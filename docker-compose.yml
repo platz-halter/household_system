@@ -82,6 +82,10 @@ services:
     networks:
       - hs-internal
     profiles: ["storage"]
+
+    volumes:
+      - storage-images:/app/data/images
+
     ports:
       - "127.0.0.1:8003:8000"
 
@@ -91,3 +95,4 @@ networks:
 
 volumes:
   postgres-data:
+  storage-images:
