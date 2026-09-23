@@ -16,7 +16,8 @@ services:
       - postgres-data:/var/lib/postgresql/data
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hs_admin}"]
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hs_admin} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -39,8 +40,8 @@ services:
       - hs-internal
     # Uncomment to reach it directly while developing, before a reverse
     # proxy is in front of it:
-    # ports:
-    #   - "127.0.0.1:8001:8000"
+    ports:
+      - "127.0.0.1:8001:8000"
 
   household-backend:
     build:
@@ -60,8 +61,8 @@ services:
     networks:
       - hs-internal
     profiles: ["household"]
-    # ports:
-    #   - "127.0.0.1:8002:8000"
+    ports:
+      - "127.0.0.1:8002:8000"
 
   storage-backend:
     build:
@@ -81,8 +82,8 @@ services:
     networks:
       - hs-internal
     profiles: ["storage"]
-    # ports:
-    #   - "127.0.0.1:8003:8000"
+    ports:
+      - "127.0.0.1:8003:8000"
 
 networks:
   hs-internal:

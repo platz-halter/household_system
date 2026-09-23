@@ -4,13 +4,14 @@ version = "0.1.0"
 description = "Local fallback auth service — issues JWTs for local users when Authentik isn't reachable/relevant (dev, fallback)"
 requires-python = ">=3.12"
 dependencies = [
-    "shared",
-    "fastapi>=0.115",
-    "uvicorn[standard]>=0.32",
-    "sqlalchemy[asyncio]>=2.0",
-    "asyncpg>=0.30",
-    "python-jose[cryptography]>=3.3",
-    "passlib[bcrypt]>=1.7",
+  "shared",
+  "fastapi>=0.115",
+  "uvicorn[standard]>=0.32",
+  "sqlalchemy[asyncio]>=2.0",
+  "asyncpg>=0.30",
+  "python-jose[cryptography]>=3.3",
+  "passlib[bcrypt]>=1.7",
+  "python-multipart>=0.0.12",
 ]
 
 [tool.uv.sources]
