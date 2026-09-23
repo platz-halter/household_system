@@ -30,4 +30,6 @@ def create_local_access_token(subject: str, role: str) -> str:
         "iat": now,
         "exp": now + ACCESS_TOKEN_TTL,
     }
-    return jwt.encode(claims, settings.local_jwt_secret, algorithm=settings.local_jwt_algorithm)
+    return jwt.encode(
+        claims, settings.local_jwt_secret, algorithm=settings.local_jwt_algorithm
+    )
