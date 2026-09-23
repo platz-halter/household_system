@@ -1,0 +1,92 @@
+name: household-system
+
+services:
+  # No `profiles` key on postgres or auth => they always start, matching
+  # the "auth authority always required" rule. household-backend and
+  # storage-backend are opt-in via --profile.
+  postgres:
+    image: postgres:16-alpine
+    container_name: hs-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-hs_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hs_admin}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - hs-internal
+
+  auth:
+    build:
+      context: .
+      dockerfile: auth/Dockerfile
+    container_name: hs-auth
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hs_admin}:${POSTGRES_PASSWORD}@postgres:5432/auth
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - hs-internal
+    # Uncomment to reach it directly while developing, before a reverse
+    # proxy is in front of it:
+    # ports:
+    #   - "127.0.0.1:8001:8000"
+
+  household-backend:
+    build:
+      context: .
+      dockerfile: household/backend/Dockerfile
+    container_name: hs-household-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hs_admin}:${POSTGRES_PASSWORD}@postgres:5432/household
+      AUTH_SERVICE_URL: http://auth:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_started
+    networks:
+      - hs-internal
+    profiles: ["household"]
+    # ports:
+    #   - "127.0.0.1:8002:8000"
+
+  storage-backend:
+    build:
+      context: .
+      dockerfile: storage/backend/Dockerfile
+    container_name: hs-storage-backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-hs_admin}:${POSTGRES_PASSWORD}@postgres:5432/storage
+      AUTH_SERVICE_URL: http://auth:8000
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_started
+    networks:
+      - hs-internal
+    profiles: ["storage"]
+    # ports:
+    #   - "127.0.0.1:8003:8000"
+
+networks:
+  hs-internal:
+    driver: bridge
+
+volumes:
+  postgres-data:

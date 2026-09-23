@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# uv
+.venv/
+*/.venv/
+
+# Env / secrets
+.env
+
+# Docker
+postgres-data/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Frontend (once scaffolded)
+node_modules/
+dist/
+build/
