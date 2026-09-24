@@ -82,24 +82,21 @@ services:
     networks:
       - hs-internal
     profiles: ["storage"]
-
     volumes:
       - storage-images:/app/data/images
-
     ports:
       - "127.0.0.1:8003:8000"
 
   storage-frontend:
     build:
-      context: ./storage/frontend/
+      context: ./storage/frontend
     container_name: hs-storage-frontend
     restart: unless-stopped
     networks:
       - hs-internal
-    profiles:
-      ["storage"]
-      # Uncomment to reach it directly while developing, before a reverse
-      # proxy is in front of it:
+    profiles: ["storage"]
+    # Not published directly — put Caddy in front (see storage/frontend/README.md
+    # for a sample Caddyfile snippet). Uncomment only for quick local testing:
     ports:
       - "127.0.0.1:8080:80"
 
