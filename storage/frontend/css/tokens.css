@@ -1,0 +1,118 @@
+/* ============================================================
+   Design tokens — the ONLY place colors/spacing/etc. are defined.
+   Everything else in the app references these variables, never a
+   raw hex code, so a new theme is a matter of adding one more
+   [data-theme="..."] block here (see the template at the bottom)
+   and one line in js/theme.js.
+   ============================================================ */
+
+:root {
+  /* --- Base black & white palette (default / "light") --- */
+  --color-bg: #ffffff;
+  --color-surface: #f7f7f7;
+  --color-surface-raised: #ffffff;
+  --color-border: #e2e2e2;
+  --color-text: #111111;
+  --color-text-muted: #666666;
+  --color-text-inverse: #ffffff;
+
+  --color-accent: #111111;           /* primary action color */
+  --color-accent-contrast: #ffffff;  /* text/icon color on top of accent */
+  --color-accent-hover: #2b2b2b;
+
+  --color-overlay: rgba(0, 0, 0, 0.55);
+
+  /* --- Semantic colors (kept consistent in hue across themes) --- */
+  --color-success: #15803d;
+  --color-success-bg: #e7f6ec;
+  --color-warning: #b45309;
+  --color-warning-bg: #fdf1dd;
+  --color-danger: #b91c1c;
+  --color-danger-bg: #fbe9e9;
+  --color-info: #1d4ed8;
+  --color-info-bg: #e8edfc;
+
+  /* --- Spacing scale --- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* --- Radii / shadows / motion --- */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 18px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.14);
+  --transition-fast: 120ms ease;
+  --transition-base: 200ms ease;
+
+  /* --- Typography --- */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-size-xs: 0.75rem;
+  --font-size-sm: 0.875rem;
+  --font-size-md: 1rem;
+  --font-size-lg: 1.125rem;
+  --font-size-xl: 1.375rem;
+
+  /* --- Layout --- */
+  --topbar-height: 56px;
+  --bottomnav-height: 60px;
+  --max-content-width: 720px;
+}
+
+/* --- Dark theme (built in, ships alongside light) --- */
+[data-theme="dark"] {
+  --color-bg: #0a0a0a;
+  --color-surface: #161616;
+  --color-surface-raised: #1e1e1e;
+  --color-border: #2c2c2c;
+  --color-text: #f2f2f2;
+  --color-text-muted: #9c9c9c;
+  --color-text-inverse: #0a0a0a;
+
+  --color-accent: #ffffff;
+  --color-accent-contrast: #0a0a0a;
+  --color-accent-hover: #d9d9d9;
+
+  --color-overlay: rgba(0, 0, 0, 0.7);
+
+  --color-success: #4ade80;
+  --color-success-bg: #10281a;
+  --color-warning: #fbbf24;
+  --color-warning-bg: #2e2306;
+  --color-danger: #f87171;
+  --color-danger-bg: #2c1212;
+  --color-info: #60a5fa;
+  --color-info-bg: #0f1f3d;
+
+  --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.6);
+}
+
+/* ------------------------------------------------------------
+   TEMPLATE — copy this to add a new theme, then register it in
+   js/theme.js's THEMES array with a matching id/label:
+
+   [data-theme="your-theme-id"] {
+     --color-bg: ...;
+     --color-surface: ...;
+     --color-surface-raised: ...;
+     --color-border: ...;
+     --color-text: ...;
+     --color-text-muted: ...;
+     --color-text-inverse: ...;
+     --color-accent: ...;
+     --color-accent-contrast: ...;
+     --color-accent-hover: ...;
+     --color-overlay: ...;
+     ( + success/warning/danger/info if this theme needs different
+       shades for contrast reasons — otherwise it can just inherit
+       the :root ones by omitting them here )
+   }
+   ------------------------------------------------------------ */
