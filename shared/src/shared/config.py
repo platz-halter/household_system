@@ -22,7 +22,9 @@ class Settings(BaseSettings):
     # "local":     verify tokens issued by the local fallback auth service.
     auth_mode: Literal["authentik", "local"] = "authentik"
 
-    authentik_issuer: str = "https://authentik.pressnet.duckdns.org/application/o/household-system/"
+    authentik_issuer: str = (
+        "https://authentik.pressnet.duckdns.org/application/o/household-system/"
+    )
     authentik_jwks_url: str = (
         "https://authentik.pressnet.duckdns.org/application/o/household-system/jwks/"
     )
@@ -40,7 +42,16 @@ class Settings(BaseSettings):
     # --- Misc -----------------------------------------------------------
     environment: Literal["dev", "prod"] = "dev"
 
+    # --- CORS ---------------------------------------------------------
+    cors_origins: str = "*"
+
 
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def cors_origin_list(settings: Settings) -> list[str]:
+    if settings.cors_origins.strip() == "*":
+        return ["*"]
+    return [o.strip() for o in settings.cors_origins.split(",") if o.strip()]

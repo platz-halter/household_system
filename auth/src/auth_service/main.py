@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
@@ -14,6 +15,7 @@ from auth_service.security import (
     verify_password,
 )
 from shared.auth import CurrentUser, require_role
+from shared.config import cors_origin_list, get_settings
 from shared.db import Base, engine, get_db
 
 
@@ -27,6 +29,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Household System — Auth (local fallback)", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origin_list(get_settings()),
+    allow_credentials=False,  # no cookies used — just a bearer token header
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

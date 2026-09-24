@@ -5,6 +5,9 @@ from fastapi import Depends, FastAPI
 from shared.auth import CurrentUser, require_role
 from shared.db import Base, engine
 
+from fastapi.middleware.cors import CORSMiddleware
+from shared.config import cors_origin_list, get_settings
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -16,6 +19,14 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Household System — Household (chores/points)", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origin_list(get_settings()),
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

@@ -5,6 +5,6 @@
 // origin — that avoids CORS entirely. See README.md for a sample
 // Caddyfile snippet.
 export const CONFIG = {
-  AUTH_BASE: "/api/auth",
-  STORAGE_BASE: "/api/storage",
+  AUTH_BASE: "http://localhost:8001",
+  STORAGE_BASE: "http://localhost:8003",
 };
