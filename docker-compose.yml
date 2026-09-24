@@ -83,6 +83,19 @@ services:
       - hs-internal
     profiles: ["storage"]
 
+    storage-frontend:
+      build:
+        context: ./storage/frontend/
+      container_name: hs-storage-frontend
+      restart: unless-stopped
+      networks:
+        - hs-internal
+      profiles: ["storage"]
+      # Uncomment to reach it directly while developing, before a reverse
+      # proxy is in front of it:
+      ports:
+        - "127.0.0.1:8080:80"
+
     volumes:
       - storage-images:/app/data/images
 
