@@ -1,9 +1,16 @@
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from storage_service.models import Item, ItemAlias, Location
 from storage_service.schemas import ItemCreate, ItemUpdate, LocationIn
+
+SORTABLE_COLUMNS = {
+    "name": Item.name,
+    "quantity": Item.quantity,
+    "created_at": Item.created_at,
+    "updated_at": Item.updated_at,
+}
 
 
 async def get_or_create_location(db: AsyncSession, loc: LocationIn) -> Location:
@@ -33,9 +40,7 @@ async def get_item(db: AsyncSession, item_id: int) -> Item | None:
 
 
 async def create_item(db: AsyncSession, data: ItemCreate) -> Item:
-    location = (
-        await get_or_create_location(db, data.location) if data.location else None
-    )
+    location = await get_or_create_location(db, data.location) if data.location else None
 
     item = Item(
         name=data.name,
@@ -44,15 +49,11 @@ async def create_item(db: AsyncSession, data: ItemCreate) -> Item:
         quantity=data.quantity,
         quantity_note=data.quantity_note,
         location=location,
-        aliases=[
-            ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)
-        ],  # dedupe, keep order
+        aliases=[ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)],  # dedupe, keep order
     )
     db.add(item)
     await db.commit()
-    await db.refresh(
-        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
-    )
+    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
     return item
 
 
@@ -73,9 +74,7 @@ async def update_item(db: AsyncSession, item: Item, data: ItemUpdate) -> Item:
         item.aliases = [ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)]
 
     await db.commit()
-    await db.refresh(
-        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
-    )
+    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
     return item
 
 
@@ -88,39 +87,57 @@ async def search_items(
     shelf: str | None = None,
     min_quantity: int | None = None,
     max_quantity: int | None = None,
+    sort_by: str = "name",
+    sort_dir: str = "asc",
     limit: int = 50,
     offset: int = 0,
-) -> list[Item]:
-    query = _item_query().join(Location, isouter=True).distinct()
+) -> tuple[list[Item], int]:
+    """Returns (page_of_items, total_matching_count) so the frontend can
+    render real page numbers rather than guessing from page length."""
 
-    if q:
-        pattern = f"%{q}%"
-        query = query.outerjoin(ItemAlias).where(
-            or_(
-                Item.name.ilike(pattern),
-                Item.description.ilike(pattern),
-                ItemAlias.alias.ilike(pattern),
+    def _apply_filters(stmt):
+        if q:
+            pattern = f"%{q}%"
+            stmt = stmt.outerjoin(ItemAlias).where(
+                or_(
+                    Item.name.ilike(pattern),
+                    Item.description.ilike(pattern),
+                    ItemAlias.alias.ilike(pattern),
+                )
             )
-        )
-    if room:
-        query = query.where(Location.room.ilike(room))
-    if level:
-        query = query.where(Location.level.ilike(level))
-    if shelf:
-        query = query.where(Location.shelf.ilike(shelf))
-    if min_quantity is not None:
-        query = query.where(Item.quantity >= min_quantity)
-    if max_quantity is not None:
-        query = query.where(Item.quantity <= max_quantity)
+        if room:
+            stmt = stmt.where(Location.room.ilike(room))
+        if level:
+            stmt = stmt.where(Location.level.ilike(level))
+        if shelf:
+            stmt = stmt.where(Location.shelf.ilike(shelf))
+        if min_quantity is not None:
+            stmt = stmt.where(Item.quantity >= min_quantity)
+        if max_quantity is not None:
+            stmt = stmt.where(Item.quantity <= max_quantity)
+        return stmt
 
-    query = query.order_by(Item.name).limit(limit).offset(offset)
+    base = select(Item.id).select_from(Item).join(Location, isouter=True)
+    count_stmt = _apply_filters(base)
+    total = await db.scalar(select(func.count()).select_from(count_stmt.distinct().subquery()))
+
+    sort_col = SORTABLE_COLUMNS.get(sort_by, Item.name)
+    order = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
+
+    query = _apply_filters(_item_query().join(Location, isouter=True).distinct())
+    query = query.order_by(order, Item.id).limit(limit).offset(offset)
     result = await db.execute(query)
-    return list(result.scalars().unique().all())
+    items = list(result.scalars().unique().all())
+
+    return items, total or 0
 
 
-async def bulk_delete_items(
-    db: AsyncSession, item_ids: list[int]
-) -> tuple[int, list[int]]:
+async def list_locations(db: AsyncSession) -> list[Location]:
+    result = await db.execute(select(Location).order_by(Location.room, Location.level, Location.shelf))
+    return list(result.scalars().all())
+
+
+async def bulk_delete_items(db: AsyncSession, item_ids: list[int]) -> tuple[int, list[int]]:
     result = await db.execute(select(Item.id).where(Item.id.in_(item_ids)))
     found_ids = set(result.scalars().all())
     not_found = [i for i in item_ids if i not in found_ids]

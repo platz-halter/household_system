@@ -14,15 +14,15 @@ from storage_service.schemas import (
     BulkDeleteResult,
     ItemCreate,
     ItemOut,
+    ItemPage,
     ItemUpdate,
+    LocationOut,
 )
 
 IMAGE_DIR = Path("/app/data/images")
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_IMAGE_BYTES = (
-    8 * 1024 * 1024
-)  # 8 MB — plenty for item photos, keeps the volume sane
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — plenty for item photos, keeps the volume sane
 
 
 @asynccontextmanager
@@ -34,9 +34,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(
-    title="Household System — Storage (cellar/item tracking)", lifespan=lifespan
-)
+app = FastAPI(title="Household System — Storage (cellar/item tracking)", lifespan=lifespan)
 
 # Any authenticated user can read; only admin/user (not viewer) can write.
 can_read = require_role("admin", "user", "viewer")
@@ -48,22 +46,22 @@ async def health():
     return {"status": "ok"}
 
 
-@app.get("/items", response_model=list[ItemOut])
+@app.get("/items", response_model=ItemPage)
 async def list_items(
-    q: str | None = Query(
-        default=None, description="Free-text search: name, description, aliases"
-    ),
+    q: str | None = Query(default=None, description="Free-text search: name, description, aliases"),
     room: str | None = None,
     level: str | None = None,
     shelf: str | None = None,
     min_quantity: int | None = Query(default=None, ge=0),
     max_quantity: int | None = Query(default=None, ge=0),
+    sort_by: str = Query(default="name", pattern="^(name|quantity|created_at|updated_at)$"),
+    sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
     _user: CurrentUser = Depends(can_read),
 ):
-    items = await crud.search_items(
+    items, total = await crud.search_items(
         db,
         q=q,
         room=room,
@@ -71,10 +69,24 @@ async def list_items(
         shelf=shelf,
         min_quantity=min_quantity,
         max_quantity=max_quantity,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
         limit=limit,
         offset=offset,
     )
-    return [ItemOut.from_model(i) for i in items]
+    return ItemPage(
+        items=[ItemOut.from_model(i) for i in items], total=total, limit=limit, offset=offset
+    )
+
+
+@app.get("/locations", response_model=list[LocationOut])
+async def list_locations(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    """All known room/level/shelf combinations, for filter dropdowns —
+    avoids the frontend guessing free-text values that don't exist."""
+    return [LocationOut.model_validate(loc) for loc in await crud.list_locations(db)]
 
 
 @app.post("/items", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
@@ -95,9 +107,7 @@ async def get_item(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
     return ItemOut.from_model(item)
 
 
@@ -110,9 +120,7 @@ async def patch_item(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
     item = await crud.update_item(db, item, data)
     return ItemOut.from_model(item)
 
@@ -125,9 +133,7 @@ async def delete_item(
 ):
     deleted, _ = await crud.bulk_delete_items(db, [item_id])
     if deleted == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
 
 
 @app.post("/items/bulk-delete", response_model=BulkDeleteResult)
@@ -149,9 +155,7 @@ async def upload_item_image(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
 
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
@@ -166,18 +170,14 @@ async def upload_item_image(
             detail=f"Image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)}MB limit",
         )
 
-    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[
-        file.content_type
-    ]
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[file.content_type]
     filename = f"{item_id}-{uuid.uuid4().hex}.{ext}"
     (IMAGE_DIR / filename).write_bytes(contents)
 
     item.image_path = filename
     db.add(item)
     await db.commit()
-    await db.refresh(
-        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
-    )
+    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
     return ItemOut.from_model(item)
 
 
@@ -189,13 +189,9 @@ async def get_item_image(
 ):
     item = await crud.get_item(db, item_id)
     if item is None or not item.image_path:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No image for this item"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No image for this item")
 
     path = IMAGE_DIR / item.image_path
     if not path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk")
     return FileResponse(path)
