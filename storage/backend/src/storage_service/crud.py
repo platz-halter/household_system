@@ -40,7 +40,9 @@ async def get_item(db: AsyncSession, item_id: int) -> Item | None:
 
 
 async def create_item(db: AsyncSession, data: ItemCreate) -> Item:
-    location = await get_or_create_location(db, data.location) if data.location else None
+    location = (
+        await get_or_create_location(db, data.location) if data.location else None
+    )
 
     item = Item(
         name=data.name,
@@ -49,11 +51,15 @@ async def create_item(db: AsyncSession, data: ItemCreate) -> Item:
         quantity=data.quantity,
         quantity_note=data.quantity_note,
         location=location,
-        aliases=[ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)],  # dedupe, keep order
+        aliases=[
+            ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)
+        ],  # dedupe, keep order
     )
     db.add(item)
     await db.commit()
-    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
+    await db.refresh(
+        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
+    )
     return item
 
 
@@ -71,10 +77,27 @@ async def update_item(db: AsyncSession, item: Item, data: ItemUpdate) -> Item:
     if data.location is not None:
         item.location = await get_or_create_location(db, data.location)
     if data.aliases is not None:
-        item.aliases = [ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)]
+        desired = list(dict.fromkeys(data.aliases))  # dedupe, preserve order
+        desired_set = set(desired)
+        existing_by_text = {a.alias: a for a in item.aliases}
+
+        # Remove aliases no longer wanted.
+        for alias_text, alias_obj in list(existing_by_text.items()):
+            if alias_text not in desired_set:
+                item.aliases.remove(alias_obj)
+
+        # Add only genuinely new aliases — leaving unchanged ones alone
+        # avoids a DELETE+INSERT pair for the same (item_id, alias) row,
+        # which previously tripped the unique constraint because the
+        # INSERT could flush before the matching DELETE.
+        for alias_text in desired:
+            if alias_text not in existing_by_text:
+                item.aliases.append(ItemAlias(alias=alias_text))
 
     await db.commit()
-    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
+    await db.refresh(
+        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
+    )
     return item
 
 
@@ -119,7 +142,9 @@ async def search_items(
 
     base = select(Item.id).select_from(Item).join(Location, isouter=True)
     count_stmt = _apply_filters(base)
-    total = await db.scalar(select(func.count()).select_from(count_stmt.distinct().subquery()))
+    total = await db.scalar(
+        select(func.count()).select_from(count_stmt.distinct().subquery())
+    )
 
     sort_col = SORTABLE_COLUMNS.get(sort_by, Item.name)
     order = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
@@ -133,11 +158,15 @@ async def search_items(
 
 
 async def list_locations(db: AsyncSession) -> list[Location]:
-    result = await db.execute(select(Location).order_by(Location.room, Location.level, Location.shelf))
+    result = await db.execute(
+        select(Location).order_by(Location.room, Location.level, Location.shelf)
+    )
     return list(result.scalars().all())
 
 
-async def bulk_delete_items(db: AsyncSession, item_ids: list[int]) -> tuple[int, list[int]]:
+async def bulk_delete_items(
+    db: AsyncSession, item_ids: list[int]
+) -> tuple[int, list[int]]:
     result = await db.execute(select(Item.id).where(Item.id.in_(item_ids)))
     found_ids = set(result.scalars().all())
     not_found = [i for i in item_ids if i not in found_ids]

@@ -1,5 +1,5 @@
 import { CONFIG } from "./config.js";
-import { api } from "./api.js";
+import { api, fetchImageUrl, invalidateImageUrl } from "./api.js";
 import { icons } from "./icons.js";
 import { decodeToken } from "./auth.js";
 import { showToast } from "./toast.js";
@@ -271,11 +271,15 @@ function renderItemCard(item, container) {
   const thumb = document.createElement("div");
   thumb.className = "item-thumb";
   if (item.image_path) {
-    const img = document.createElement("img");
-    img.src = `${CONFIG.STORAGE_BASE}/items/${item.id}/image`;
-    img.alt = item.name;
-    img.loading = "lazy";
-    thumb.appendChild(img);
+    thumb.innerHTML = icons.image; // placeholder while the authenticated fetch resolves
+    fetchImageUrl(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`).then((objectUrl) => {
+      if (!objectUrl) return; // fetch failed — keep the placeholder icon
+      thumb.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = objectUrl;
+      img.alt = item.name;
+      thumb.appendChild(img);
+    });
   } else {
     thumb.innerHTML = icons.image;
   }
@@ -482,9 +486,7 @@ function openItemModal(item, container) {
   const { body, close } = openModalShell(item.name);
 
   const imageSection = item.image_path
-    ? `<div class="item-thumb" id="modal-image" style="aspect-ratio: 4/3; border-radius: var(--radius-md); margin-bottom: var(--space-3); cursor: zoom-in;">
-         <img src="${CONFIG.STORAGE_BASE}/items/${item.id}/image" alt="${escapeAttr(item.name)}" />
-       </div>`
+    ? `<div class="item-thumb" id="modal-image" style="aspect-ratio: 4/3; border-radius: var(--radius-md); margin-bottom: var(--space-3); cursor: zoom-in;">${icons.image}</div>`
     : "";
 
   body.innerHTML = `
@@ -502,7 +504,16 @@ function openItemModal(item, container) {
 
   const modalImage = body.querySelector("#modal-image");
   if (modalImage) {
-    modalImage.addEventListener("click", () => openLightbox(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`, item.name));
+    const imageUrl = `${CONFIG.STORAGE_BASE}/items/${item.id}/image`;
+    fetchImageUrl(imageUrl).then((objectUrl) => {
+      if (!objectUrl) return;
+      modalImage.innerHTML = "";
+      const img = document.createElement("img");
+      img.src = objectUrl;
+      img.alt = item.name;
+      modalImage.appendChild(img);
+      modalImage.addEventListener("click", () => openLightbox(objectUrl, item.name));
+    });
   }
 
   if (!writable) return;
@@ -521,6 +532,7 @@ function openItemModal(item, container) {
         const fd = new FormData();
         fd.append("file", imageFile);
         await api.postForm(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`, fd);
+        invalidateImageUrl(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`);
       }
       showToast("Item updated", "success");
       close();
