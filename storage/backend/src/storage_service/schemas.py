@@ -84,6 +84,13 @@ class ItemOut(BaseModel):
         )
 
 
+class ItemPage(BaseModel):
+    items: list[ItemOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class BulkDeleteRequest(BaseModel):
     item_ids: list[int] = Field(min_length=1)
 
