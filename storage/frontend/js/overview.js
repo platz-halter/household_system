@@ -81,6 +81,7 @@ export async function renderOverview(container) {
             <option value="updated_at-desc">Recently updated</option>
             <option value="created_at-desc">Newest first</option>
           </select>
+          <button class="btn btn-icon" id="select-toggle" aria-label="Select items" title="Select items">${icons.checklist}</button>
         </div>
         <div class="filter-panel hidden" id="filter-panel">
           <div class="field-row">
@@ -113,6 +114,7 @@ export async function renderOverview(container) {
       <div id="item-grid" class="item-grid" aria-live="polite"></div>
       <div id="pagination-root"></div>
     </div>
+    <div id="bulk-bar-root"></div>
     <button class="fab" id="add-item-fab" aria-label="Add item">${icons.plus}</button>
   `;
 
@@ -122,7 +124,7 @@ export async function renderOverview(container) {
     debounce((e) => {
       state.q = e.target.value;
       state.offset = 0;
-      refreshItems(container);
+      refreshItems(container, selection);
     }, 300)
   );
 
@@ -137,7 +139,7 @@ export async function renderOverview(container) {
     state.sortBy = by;
     state.sortDir = dir;
     state.offset = 0;
-    refreshItems(container);
+    refreshItems(container, selection);
   });
 
   const roomSelect = container.querySelector("#filter-room");
@@ -178,17 +180,17 @@ export async function renderOverview(container) {
     state.shelf = "";
     state.offset = 0;
     populateLocationFilters();
-    refreshItems(container);
+    refreshItems(container, selection);
   });
   levelSelect.addEventListener("change", (e) => {
     state.level = e.target.value;
     state.offset = 0;
-    refreshItems(container);
+    refreshItems(container, selection);
   });
   shelfSelect.addEventListener("change", (e) => {
     state.shelf = e.target.value;
     state.offset = 0;
-    refreshItems(container);
+    refreshItems(container, selection);
   });
 
   const minQtyInput = container.querySelector("#filter-min-qty");
@@ -198,7 +200,7 @@ export async function renderOverview(container) {
     debounce((e) => {
       state.minQuantity = e.target.value;
       state.offset = 0;
-      refreshItems(container);
+      refreshItems(container, selection);
     }, 300)
   );
   maxQtyInput.addEventListener(
@@ -206,7 +208,7 @@ export async function renderOverview(container) {
     debounce((e) => {
       state.maxQuantity = e.target.value;
       state.offset = 0;
-      refreshItems(container);
+      refreshItems(container, selection);
     }, 300)
   );
 
@@ -220,21 +222,35 @@ export async function renderOverview(container) {
     maxQtyInput.value = "";
     state.offset = 0;
     populateLocationFilters();
-    refreshItems(container);
+    refreshItems(container, selection);
   });
 
   const fab = container.querySelector("#add-item-fab");
+  const selectToggle = container.querySelector("#select-toggle");
+
+  // Selection state lives for the lifetime of this render only — it
+  // intentionally resets if you navigate away and back to Overview.
+  const selection = { mode: false, ids: new Set() };
+
   if (canWrite()) {
     fab.addEventListener("click", () => openAddModal(container));
+    selectToggle.addEventListener("click", () => {
+      selection.mode = !selection.mode;
+      selection.ids.clear();
+      selectToggle.classList.toggle("btn-primary", selection.mode);
+      fab.classList.toggle("hidden", selection.mode);
+      refreshItems(container, selection);
+    });
   } else {
     fab.classList.add("hidden"); // viewers can't create items
+    selectToggle.classList.add("hidden"); // ...or bulk edit/delete them
   }
 
   await loadLocations();
-  await refreshItems(container);
+  await refreshItems(container, selection);
 }
 
-async function refreshItems(container) {
+async function refreshItems(container, selection) {
   const grid = container.querySelector("#item-grid");
   const paginationRoot = container.querySelector("#pagination-root");
   if (!grid) return; // navigated away before this resolved
@@ -257,31 +273,39 @@ async function refreshItems(container) {
     grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${icons.box}<p style="margin-top: var(--space-2);">No items found</p></div>`;
   } else {
     grid.innerHTML = "";
-    page.items.forEach((item) => grid.appendChild(renderItemCard(item, container)));
+    page.items.forEach((item) => grid.appendChild(renderItemCard(item, container, selection)));
   }
 
-  renderPagination(paginationRoot, container);
+  renderPagination(paginationRoot, container, selection);
+  renderBulkBar(container, selection);
 }
 
-function renderItemCard(item, container) {
+function renderItemCard(item, container, selection) {
   const card = document.createElement("button");
   card.className = "item-card";
   card.type = "button";
 
+  const inSelectionMode = selection && selection.mode;
+  const isSelected = inSelectionMode && selection.ids.has(item.id);
+  card.classList.toggle("selected", Boolean(isSelected));
+
   const thumb = document.createElement("div");
   thumb.className = "item-thumb";
+  thumb.style.position = "relative";
   if (item.image_path) {
     thumb.innerHTML = icons.image; // placeholder while the authenticated fetch resolves
     fetchImageUrl(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`).then((objectUrl) => {
       if (!objectUrl) return; // fetch failed — keep the placeholder icon
-      thumb.innerHTML = "";
       const img = document.createElement("img");
       img.src = objectUrl;
       img.alt = item.name;
+      thumb.innerHTML = ""; // clears the placeholder — badge must go AFTER this
       thumb.appendChild(img);
+      if (inSelectionMode) thumb.appendChild(selectionBadge(isSelected));
     });
   } else {
     thumb.innerHTML = icons.image;
+    if (inSelectionMode) thumb.appendChild(selectionBadge(isSelected));
   }
 
   const body = document.createElement("div");
@@ -301,11 +325,211 @@ function renderItemCard(item, container) {
 
   body.append(name, meta);
   card.append(thumb, body);
-  card.addEventListener("click", () => openItemModal(item, container));
+
+  card.addEventListener("click", () => {
+    if (inSelectionMode) {
+      if (selection.ids.has(item.id)) {
+        selection.ids.delete(item.id);
+      } else {
+        selection.ids.add(item.id);
+      }
+      refreshItems(container, selection);
+    } else {
+      openItemModal(item, container);
+    }
+  });
   return card;
 }
 
-function renderPagination(root, container) {
+function selectionBadge(isSelected) {
+  const badge = document.createElement("div");
+  badge.className = "selection-badge" + (isSelected ? " selection-badge-checked" : "");
+  if (isSelected) badge.innerHTML = icons.check;
+  return badge;
+}
+
+function renderBulkBar(container, selection) {
+  const root = container.querySelector("#bulk-bar-root");
+  if (!root) return;
+
+  if (!selection || !selection.mode) {
+    root.innerHTML = "";
+    return;
+  }
+
+  const count = selection.ids.size;
+  root.innerHTML = `
+    <div class="bulk-bar">
+      <span class="bulk-bar-count">${count} selected</span>
+      <button class="btn btn-icon" id="bulk-cancel" aria-label="Cancel selection">${icons.close}</button>
+      <button class="btn grow" id="bulk-edit-btn" ${count === 0 ? "disabled" : ""}>Edit</button>
+      <button class="btn btn-danger grow" id="bulk-delete-btn" ${count === 0 ? "disabled" : ""}>${icons.trash}<span>Delete</span></button>
+    </div>
+  `;
+
+  root.querySelector("#bulk-cancel").addEventListener("click", () => {
+    selection.mode = false;
+    selection.ids.clear();
+    container.querySelector("#select-toggle").classList.remove("btn-primary");
+    container.querySelector("#add-item-fab").classList.remove("hidden");
+    refreshItems(container, selection);
+  });
+
+  root.querySelector("#bulk-edit-btn").addEventListener("click", () => {
+    openBulkEditModal(container, selection);
+  });
+
+  root.querySelector("#bulk-delete-btn").addEventListener("click", async () => {
+    if (!confirm(`Delete ${count} item${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    try {
+      const result = await api.post(`${CONFIG.STORAGE_BASE}/items/bulk-delete`, {
+        item_ids: [...selection.ids],
+      });
+      showToast(`Deleted ${result.deleted} item${result.deleted === 1 ? "" : "s"}`, "success");
+      selection.mode = false;
+      selection.ids.clear();
+      container.querySelector("#select-toggle").classList.remove("btn-primary");
+      container.querySelector("#add-item-fab").classList.remove("hidden");
+      refreshItems(container, selection);
+    } catch {
+      /* api.js already showed a toast */
+    }
+  });
+}
+
+function openBulkEditModal(container, selection) {
+  const count = selection.ids.size;
+  const { body, close } = openModalShell(`Edit ${count} item${count === 1 ? "" : "s"}`);
+
+  body.innerHTML = `
+    <div class="stack">
+      <div class="field">
+        <label class="row"><input type="checkbox" id="bulk-set-location" /> <span>Change location</span></label>
+        <div class="field-row" id="bulk-location-fields" style="margin-top: var(--space-2);">
+          <div class="field">
+            <label for="bulk-room">Room</label>
+            <input class="input" id="bulk-room" />
+          </div>
+          <div class="field">
+            <label for="bulk-level">Level</label>
+            <input class="input" id="bulk-level" />
+          </div>
+        </div>
+        <div class="field" id="bulk-shelf-field">
+          <label for="bulk-shelf">Shelf</label>
+          <input class="input" id="bulk-shelf" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label class="row"><input type="checkbox" id="bulk-set-quantity" /> <span>Change quantity</span></label>
+        <div id="bulk-quantity-fields" style="margin-top: var(--space-2);">
+          <div class="field">
+            <label for="bulk-qty-type">Quantity type</label>
+            <select class="select" id="bulk-qty-type">
+              <option value="countable">Countable</option>
+              <option value="uncountable">Uncountable</option>
+            </select>
+          </div>
+          <div class="field" id="bulk-qty-countable-wrap">
+            <label for="bulk-quantity">Quantity</label>
+            <input class="input" type="number" min="0" id="bulk-quantity" />
+          </div>
+          <div class="field hidden" id="bulk-qty-uncountable-wrap">
+            <label for="bulk-qty-note">Amount note</label>
+            <input class="input" id="bulk-qty-note" placeholder="e.g. half bag" />
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary grow" id="bulk-save-btn">Apply to ${count} item${count === 1 ? "" : "s"}</button>
+    </div>
+  `;
+
+  const setLocationCheckbox = body.querySelector("#bulk-set-location");
+  const locationFields = body.querySelector("#bulk-location-fields");
+  const shelfField = body.querySelector("#bulk-shelf-field");
+  const syncLocationFields = () => {
+    const on = setLocationCheckbox.checked;
+    locationFields.style.opacity = on ? "1" : "0.4";
+    shelfField.style.opacity = on ? "1" : "0.4";
+    body.querySelector("#bulk-room").disabled = !on;
+    body.querySelector("#bulk-level").disabled = !on;
+    body.querySelector("#bulk-shelf").disabled = !on;
+  };
+  setLocationCheckbox.addEventListener("change", syncLocationFields);
+  syncLocationFields();
+
+  const setQuantityCheckbox = body.querySelector("#bulk-set-quantity");
+  const quantityFields = body.querySelector("#bulk-quantity-fields");
+  const qtyTypeSelect = body.querySelector("#bulk-qty-type");
+  const countableWrap = body.querySelector("#bulk-qty-countable-wrap");
+  const uncountableWrap = body.querySelector("#bulk-qty-uncountable-wrap");
+  const syncQuantityFields = () => {
+    const on = setQuantityCheckbox.checked;
+    quantityFields.style.opacity = on ? "1" : "0.4";
+    qtyTypeSelect.disabled = !on;
+    body.querySelector("#bulk-quantity").disabled = !on;
+    body.querySelector("#bulk-qty-note").disabled = !on;
+  };
+  const syncQtyTypeVisibility = () => {
+    const isCountable = qtyTypeSelect.value === "countable";
+    countableWrap.classList.toggle("hidden", !isCountable);
+    uncountableWrap.classList.toggle("hidden", isCountable);
+  };
+  setQuantityCheckbox.addEventListener("change", syncQuantityFields);
+  qtyTypeSelect.addEventListener("change", syncQtyTypeVisibility);
+  syncQuantityFields();
+  syncQtyTypeVisibility();
+
+  body.querySelector("#bulk-save-btn").addEventListener("click", async () => {
+    const setLocation = setLocationCheckbox.checked;
+    const setQuantity = setQuantityCheckbox.checked;
+
+    if (!setLocation && !setQuantity) {
+      showToast("Choose at least one thing to change", "warning");
+      return;
+    }
+    const room = body.querySelector("#bulk-room").value.trim();
+    if (setLocation && !room) {
+      showToast("Room is required to change location", "warning");
+      return;
+    }
+
+    const payload = { item_ids: [...selection.ids] };
+    payload.set_location = setLocation;
+    if (setLocation) {
+      payload.location = {
+        room,
+        level: body.querySelector("#bulk-level").value.trim() || null,
+        shelf: body.querySelector("#bulk-shelf").value.trim() || null,
+      };
+    }
+    payload.set_quantity = setQuantity;
+    if (setQuantity) {
+      const qtyType = qtyTypeSelect.value;
+      payload.quantity_type = qtyType;
+      payload.quantity = qtyType === "countable" ? Number(body.querySelector("#bulk-quantity").value || 0) : null;
+      payload.quantity_note = qtyType === "uncountable" ? body.querySelector("#bulk-qty-note").value.trim() || null : null;
+    }
+
+    try {
+      const result = await api.patch(`${CONFIG.STORAGE_BASE}/items/bulk`, payload);
+      showToast(`Updated ${result.updated} item${result.updated === 1 ? "" : "s"}`, "success");
+      selection.mode = false;
+      selection.ids.clear();
+      container.querySelector("#select-toggle").classList.remove("btn-primary");
+      container.querySelector("#add-item-fab").classList.remove("hidden");
+      close();
+      refreshItems(container, selection);
+    } catch {
+      /* api.js already showed a toast */
+    }
+  });
+}
+
+function renderPagination(root, container, selection) {
   const totalPages = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
   const currentPage = Math.floor(state.offset / PAGE_SIZE) + 1;
 
@@ -321,7 +545,7 @@ function renderPagination(root, container) {
   prev.disabled = currentPage <= 1;
   prev.addEventListener("click", () => {
     state.offset = Math.max(0, state.offset - PAGE_SIZE);
-    refreshItems(container);
+    refreshItems(container, selection);
     container.querySelector(".page").scrollIntoView({ behavior: "smooth" });
   });
 
@@ -335,7 +559,7 @@ function renderPagination(root, container) {
   next.disabled = currentPage >= totalPages;
   next.addEventListener("click", () => {
     state.offset += PAGE_SIZE;
-    refreshItems(container);
+    refreshItems(container, selection);
     container.querySelector(".page").scrollIntoView({ behavior: "smooth" });
   });
 
