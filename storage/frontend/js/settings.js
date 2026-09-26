@@ -1,6 +1,7 @@
 import { THEMES, getStoredTheme, applyTheme } from "./theme.js";
 import { decodeToken, logout } from "./auth.js";
 import { icons } from "./icons.js";
+import { showConfirmDialog } from "./confirmDialog.js";
 
 export function renderSettings(container) {
   const user = decodeToken() || {};
@@ -59,8 +60,9 @@ export function renderSettings(container) {
     swatch.style.border = "1px solid var(--color-border)";
   });
 
-  container.querySelector("#logout-btn").addEventListener("click", () => {
-    if (confirm("Log out?")) logout();
+  container.querySelector("#logout-btn").addEventListener("click", async () => {
+    const ok = await showConfirmDialog({ title: "Log out", message: "Are you sure you want to log out?", confirmLabel: "Log out" });
+    if (ok) logout();
   });
 }
 

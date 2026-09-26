@@ -3,6 +3,7 @@ import { api, fetchImageUrl, invalidateImageUrl } from "./api.js";
 import { icons } from "./icons.js";
 import { decodeToken } from "./auth.js";
 import { showToast } from "./toast.js";
+import { showConfirmDialog } from "./confirmDialog.js";
 
 const PAGE_SIZE = 20;
 
@@ -380,7 +381,13 @@ function renderBulkBar(container, selection) {
   });
 
   root.querySelector("#bulk-delete-btn").addEventListener("click", async () => {
-    if (!confirm(`Delete ${count} item${count === 1 ? "" : "s"}? This can't be undone.`)) return;
+    const ok = await showConfirmDialog({
+      title: "Delete items",
+      message: `Delete ${count} item${count === 1 ? "" : "s"}? This can't be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       const result = await api.post(`${CONFIG.STORAGE_BASE}/items/bulk-delete`, {
         item_ids: [...selection.ids],
@@ -767,7 +774,13 @@ function openItemModal(item, container) {
   });
 
   body.querySelector("#delete-btn").addEventListener("click", async () => {
-    if (!confirm(`Delete "${item.name}"? This can't be undone.`)) return;
+    const ok = await showConfirmDialog({
+      title: "Delete item",
+      message: `Delete "${item.name}"? This can't be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     try {
       await api.del(`${CONFIG.STORAGE_BASE}/items/${item.id}`);
       showToast("Item deleted", "success");

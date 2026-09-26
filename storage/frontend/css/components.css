@@ -416,6 +416,14 @@
 
 .modal-footer .btn { flex: 1; }
 
+.confirm-modal {
+  max-width: 380px;
+}
+
+.confirm-modal .modal-footer {
+  margin-top: var(--space-4);
+}
+
 /* --- Image lightbox (for "maximize" image viewing) --- */
 
 .lightbox-overlay {
