@@ -40,9 +40,7 @@ async def get_item(db: AsyncSession, item_id: int) -> Item | None:
 
 
 async def create_item(db: AsyncSession, data: ItemCreate) -> Item:
-    location = (
-        await get_or_create_location(db, data.location) if data.location else None
-    )
+    location = await get_or_create_location(db, data.location) if data.location else None
 
     item = Item(
         name=data.name,
@@ -51,15 +49,11 @@ async def create_item(db: AsyncSession, data: ItemCreate) -> Item:
         quantity=data.quantity,
         quantity_note=data.quantity_note,
         location=location,
-        aliases=[
-            ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)
-        ],  # dedupe, keep order
+        aliases=[ItemAlias(alias=a) for a in dict.fromkeys(data.aliases)],  # dedupe, keep order
     )
     db.add(item)
     await db.commit()
-    await db.refresh(
-        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
-    )
+    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
     return item
 
 
@@ -95,9 +89,7 @@ async def update_item(db: AsyncSession, item: Item, data: ItemUpdate) -> Item:
                 item.aliases.append(ItemAlias(alias=alias_text))
 
     await db.commit()
-    await db.refresh(
-        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
-    )
+    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
     return item
 
 
@@ -142,9 +134,7 @@ async def search_items(
 
     base = select(Item.id).select_from(Item).join(Location, isouter=True)
     count_stmt = _apply_filters(base)
-    total = await db.scalar(
-        select(func.count()).select_from(count_stmt.distinct().subquery())
-    )
+    total = await db.scalar(select(func.count()).select_from(count_stmt.distinct().subquery()))
 
     sort_col = SORTABLE_COLUMNS.get(sort_by, Item.name)
     order = sort_col.desc() if sort_dir == "desc" else sort_col.asc()
@@ -158,15 +148,11 @@ async def search_items(
 
 
 async def list_locations(db: AsyncSession) -> list[Location]:
-    result = await db.execute(
-        select(Location).order_by(Location.room, Location.level, Location.shelf)
-    )
+    result = await db.execute(select(Location).order_by(Location.room, Location.level, Location.shelf))
     return list(result.scalars().all())
 
 
-async def bulk_delete_items(
-    db: AsyncSession, item_ids: list[int]
-) -> tuple[int, list[int]]:
+async def bulk_delete_items(db: AsyncSession, item_ids: list[int]) -> tuple[int, list[int]]:
     result = await db.execute(select(Item.id).where(Item.id.in_(item_ids)))
     found_ids = set(result.scalars().all())
     not_found = [i for i in item_ids if i not in found_ids]
@@ -176,3 +162,34 @@ async def bulk_delete_items(
         await db.commit()
 
     return len(found_ids), not_found
+
+
+async def bulk_update_items(
+    db: AsyncSession,
+    item_ids: list[int],
+    *,
+    location: LocationIn | None,
+    quantity_type,
+    quantity: int | None,
+    quantity_note: str | None,
+) -> tuple[int, list[int]]:
+    """Apply the same location and/or quantity change to a batch of
+    items in one commit. Caller (main.py) only passes location/quantity_*
+    through when the request actually opted into changing that field."""
+    result = await db.execute(select(Item).where(Item.id.in_(item_ids)))
+    found_items = list(result.scalars().all())
+    found_ids = {i.id for i in found_items}
+    not_found = [i for i in item_ids if i not in found_ids]
+
+    if found_items:
+        resolved_location = await get_or_create_location(db, location) if location is not None else None
+        for item in found_items:
+            if location is not None:
+                item.location = resolved_location
+            if quantity_type is not None:
+                item.quantity_type = quantity_type
+                item.quantity = quantity
+                item.quantity_note = quantity_note
+        await db.commit()
+
+    return len(found_items), not_found

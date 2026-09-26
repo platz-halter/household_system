@@ -32,9 +32,7 @@ class ItemCreate(BaseModel):
         if self.quantity_type == QuantityType.countable and self.quantity is None:
             raise ValueError("quantity is required when quantity_type is 'countable'")
         if self.quantity_type == QuantityType.uncountable and self.quantity is not None:
-            raise ValueError(
-                "quantity must be omitted when quantity_type is 'uncountable' — use quantity_note instead"
-            )
+            raise ValueError("quantity must be omitted when quantity_type is 'uncountable' — use quantity_note instead")
         return self
 
 
@@ -75,9 +73,7 @@ class ItemOut(BaseModel):
             quantity_type=item.quantity_type,
             quantity=item.quantity,
             quantity_note=item.quantity_note,
-            location=LocationOut.model_validate(item.location)
-            if item.location
-            else None,
+            location=LocationOut.model_validate(item.location) if item.location else None,
             image_path=item.image_path,
             created_at=item.created_at,
             updated_at=item.updated_at,
@@ -93,6 +89,41 @@ class ItemPage(BaseModel):
 
 class BulkDeleteRequest(BaseModel):
     item_ids: list[int] = Field(min_length=1)
+
+
+class BulkUpdateRequest(BaseModel):
+    """Bulk edit: only location and quantity fields — name/description/
+    aliases are inherently per-item and don't make sense to set
+    identically across a batch. Each field is opt-in: omit it entirely
+    to leave that field untouched on every selected item (this is why
+    plain None isn't used as "don't touch" — see `set_location` /
+    `set_quantity` below)."""
+
+    item_ids: list[int] = Field(min_length=1)
+
+    set_location: bool = False
+    location: LocationIn | None = None
+
+    set_quantity: bool = False
+    quantity_type: QuantityType | None = None
+    quantity: int | None = Field(default=None, ge=0)
+    quantity_note: str | None = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def _check_flags(self):
+        if self.set_location and self.location is None:
+            raise ValueError("location is required when set_location is true")
+        if self.set_quantity:
+            if self.quantity_type is None:
+                raise ValueError("quantity_type is required when set_quantity is true")
+            if self.quantity_type == QuantityType.countable and self.quantity is None:
+                raise ValueError("quantity is required when set_quantity is true and quantity_type is 'countable'")
+        return self
+
+
+class BulkResult(BaseModel):
+    updated: int
+    not_found: list[int]
 
 
 class BulkDeleteResult(BaseModel):

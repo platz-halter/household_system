@@ -3,17 +3,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi.middleware.cors import CORSMiddleware
-from shared.config import cors_origin_list, get_settings
 
 from shared.auth import CurrentUser, require_role
+from shared.config import cors_origin_list, get_settings
 from shared.db import Base, engine, get_db
 from storage_service import crud
 from storage_service.schemas import (
     BulkDeleteRequest,
     BulkDeleteResult,
+    BulkResult,
+    BulkUpdateRequest,
     ItemCreate,
     ItemOut,
     ItemPage,
@@ -24,9 +26,7 @@ from storage_service.schemas import (
 IMAGE_DIR = Path("/app/data/images")
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_IMAGE_BYTES = (
-    8 * 1024 * 1024
-)  # 8 MB — plenty for item photos, keeps the volume sane
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — plenty for item photos, keeps the volume sane
 
 
 @asynccontextmanager
@@ -38,10 +38,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(
-    title="Household System — Storage (cellar/item tracking)", lifespan=lifespan
-)
-
+app = FastAPI(title="Household System — Storage (cellar/item tracking)", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,7 +47,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # Any authenticated user can read; only admin/user (not viewer) can write.
 can_read = require_role("admin", "user", "viewer")
@@ -64,17 +60,13 @@ async def health():
 
 @app.get("/items", response_model=ItemPage)
 async def list_items(
-    q: str | None = Query(
-        default=None, description="Free-text search: name, description, aliases"
-    ),
+    q: str | None = Query(default=None, description="Free-text search: name, description, aliases"),
     room: str | None = None,
     level: str | None = None,
     shelf: str | None = None,
     min_quantity: int | None = Query(default=None, ge=0),
     max_quantity: int | None = Query(default=None, ge=0),
-    sort_by: str = Query(
-        default="name", pattern="^(name|quantity|created_at|updated_at)$"
-    ),
+    sort_by: str = Query(default="name", pattern="^(name|quantity|created_at|updated_at)$"),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -95,10 +87,7 @@ async def list_items(
         offset=offset,
     )
     return ItemPage(
-        items=[ItemOut.from_model(i) for i in items],
-        total=total,
-        limit=limit,
-        offset=offset,
+        items=[ItemOut.from_model(i) for i in items], total=total, limit=limit, offset=offset
     )
 
 
@@ -122,6 +111,39 @@ async def create_item(
     return ItemOut.from_model(item)
 
 
+# NOTE: these two must be declared before the /items/{item_id} routes
+# below — otherwise FastAPI's first-match routing treats "bulk"/"bulk-delete"
+# as the {item_id} path parameter and fails with an int-parsing error.
+@app.post("/items/bulk-delete", response_model=BulkDeleteResult)
+async def bulk_delete(
+    body: BulkDeleteRequest,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    deleted, not_found = await crud.bulk_delete_items(db, body.item_ids)
+    return BulkDeleteResult(deleted=deleted, not_found=not_found)
+
+
+@app.patch("/items/bulk", response_model=BulkResult)
+async def bulk_update(
+    body: BulkUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    """Apply the same location and/or quantity change to several items
+    at once — e.g. reorganizing a shelf, or marking a batch as restocked.
+    Name/description/aliases stay per-item and aren't editable here."""
+    updated, not_found = await crud.bulk_update_items(
+        db,
+        body.item_ids,
+        location=body.location if body.set_location else None,
+        quantity_type=body.quantity_type if body.set_quantity else None,
+        quantity=body.quantity if body.set_quantity else None,
+        quantity_note=body.quantity_note if body.set_quantity else None,
+    )
+    return BulkResult(updated=updated, not_found=not_found)
+
+
 @app.get("/items/{item_id}", response_model=ItemOut)
 async def get_item(
     item_id: int,
@@ -130,9 +152,7 @@ async def get_item(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
     return ItemOut.from_model(item)
 
 
@@ -145,9 +165,7 @@ async def patch_item(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
     item = await crud.update_item(db, item, data)
     return ItemOut.from_model(item)
 
@@ -160,19 +178,7 @@ async def delete_item(
 ):
     deleted, _ = await crud.bulk_delete_items(db, [item_id])
     if deleted == 0:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
-
-
-@app.post("/items/bulk-delete", response_model=BulkDeleteResult)
-async def bulk_delete(
-    body: BulkDeleteRequest,
-    db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
-):
-    deleted, not_found = await crud.bulk_delete_items(db, body.item_ids)
-    return BulkDeleteResult(deleted=deleted, not_found=not_found)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
 
 
 @app.post("/items/{item_id}/image", response_model=ItemOut)
@@ -184,9 +190,7 @@ async def upload_item_image(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
 
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
@@ -201,18 +205,14 @@ async def upload_item_image(
             detail=f"Image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)}MB limit",
         )
 
-    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[
-        file.content_type
-    ]
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[file.content_type]
     filename = f"{item_id}-{uuid.uuid4().hex}.{ext}"
     (IMAGE_DIR / filename).write_bytes(contents)
 
     item.image_path = filename
     db.add(item)
     await db.commit()
-    await db.refresh(
-        item, attribute_names=["aliases", "location", "updated_at", "created_at"]
-    )
+    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
     return ItemOut.from_model(item)
 
 
@@ -224,13 +224,9 @@ async def get_item_image(
 ):
     item = await crud.get_item(db, item_id)
     if item is None or not item.image_path:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="No image for this item"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No image for this item")
 
     path = IMAGE_DIR / item.image_path
     if not path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk"
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk")
     return FileResponse(path)
