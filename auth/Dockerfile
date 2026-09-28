@@ -21,4 +21,6 @@ COPY auth auth
 RUN uv sync --frozen --package auth
 
 EXPOSE 8000
-CMD ["uv", "run", "--package", "auth", "uvicorn", "auth_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Migrations run first (shared/entrypoint.sh), then the API starts.
+CMD ["sh", "shared/entrypoint.sh", "auth", "auth/alembic.ini", "auth_service.main:app"]

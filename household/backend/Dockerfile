@@ -17,4 +17,6 @@ COPY household/backend household/backend
 RUN uv sync --frozen --package household-backend
 
 EXPOSE 8000
-CMD ["uv", "run", "--package", "household-backend", "uvicorn", "household_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Migrations run first (shared/entrypoint.sh), then the API starts.
+CMD ["sh", "shared/entrypoint.sh", "household-backend", "household/backend/alembic.ini", "household_service.main:app"]

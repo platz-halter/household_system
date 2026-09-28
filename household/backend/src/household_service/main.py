@@ -1,24 +1,11 @@
-from contextlib import asynccontextmanager
-
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from shared.auth import CurrentUser, require_role
-from shared.db import Base, engine
-
-from fastapi.middleware.cors import CORSMiddleware
 from shared.config import cors_origin_list, get_settings
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Dev convenience only — replace with Alembic migrations before this
-    # sees anything resembling production data.
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-
-
-app = FastAPI(title="Household System — Household (chores/points)", lifespan=lifespan)
+app = FastAPI(title="Household System — Household (chores/points)")
 
 app.add_middleware(
     CORSMiddleware,
