@@ -17,4 +17,6 @@ COPY storage/backend storage/backend
 RUN uv sync --frozen --package storage-backend
 
 EXPOSE 8000
-CMD ["uv", "run", "--package", "storage-backend", "uvicorn", "storage_service.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+# Migrations run first (shared/entrypoint.sh), then the API starts.
+CMD ["sh", "shared/entrypoint.sh", "storage-backend", "storage/backend/alembic.ini", "storage_service.main:app"]

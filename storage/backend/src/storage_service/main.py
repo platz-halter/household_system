@@ -1,5 +1,4 @@
 import uuid
-from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
@@ -9,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from shared.auth import CurrentUser, require_role
 from shared.config import cors_origin_list, get_settings
-from shared.db import Base, engine, get_db
+from shared.db import get_db
 from storage_service import crud
 from storage_service.schemas import (
     BulkDeleteRequest,
@@ -29,16 +28,7 @@ ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — plenty for item photos, keeps the volume sane
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Dev convenience only — replace with Alembic migrations before this
-    # sees anything resembling production data.
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-
-
-app = FastAPI(title="Household System — Storage (cellar/item tracking)", lifespan=lifespan)
+app = FastAPI(title="Household System — Storage (cellar/item tracking)")
 
 app.add_middleware(
     CORSMiddleware,
