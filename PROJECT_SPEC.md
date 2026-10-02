@@ -112,7 +112,7 @@ Tracks physical items (cellar, pantry, etc.).
   - A points-to-money (EUR) conversion rate, for admins to track payout
     amounts. Display/reference only — no connection to an actual
     payment or payout process.
-  - Downloadable PDF reports, by week or month.
+  - Downloadable PDF reports, by week or month. Past reports of the past months can also be downloaded.
 - **Break mode**: a user can mark themselves on break (vacation,
   sickness), which excludes them from the leaderboard and from new task
   assignments until they turn it off.
