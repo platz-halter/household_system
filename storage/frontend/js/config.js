@@ -5,8 +5,12 @@
 // origin — that avoids CORS entirely. See README.md for a sample
 // Caddyfile snippet.
 export const CONFIG = {
-  AUTH_BASE: "/api/auth",
-  STORAGE_BASE: "/api/storage",
+  //AUTH_BASE: "/api/auth",
+  //STORAGE_BASE: "/api/storage",
+
+  //No Proxy Placeholder
+  AUTH_BASE: "http://127.0.0.1:8001",
+  STORAGE_BASE: "http://127.0.0.1:8003",
 
   // --- Authentik OIDC (Authorization Code + PKCE, public SPA client —
   // no client secret, since that can't be kept confidential in a
@@ -18,9 +22,12 @@ export const CONFIG = {
   // against <issuer>.well-known/openid-configuration if anything looks
   // off — paths can vary slightly by Authentik version.
   AUTHENTIK_CLIENT_ID: "",
-  AUTHENTIK_AUTHORIZE_URL: "https://authentik.pressnet.duckdns.org/application/o/authorize/",
-  AUTHENTIK_TOKEN_URL: "https://authentik.pressnet.duckdns.org/application/o/token/",
-  AUTHENTIK_END_SESSION_URL: "https://authentik.pressnet.duckdns.org/application/o/household-system/end-session/",
+  AUTHENTIK_AUTHORIZE_URL:
+    "https://authentik.pressnet.duckdns.org/application/o/authorize/",
+  AUTHENTIK_TOKEN_URL:
+    "https://authentik.pressnet.duckdns.org/application/o/token/",
+  AUTHENTIK_END_SESSION_URL:
+    "https://authentik.pressnet.duckdns.org/application/o/household-system/end-session/",
   // Must exactly match a "Redirect URI" registered on the Authentik
   // provider — computed from wherever this page is actually served
   // rather than hardcoded, so it's correct through Caddy, localhost
