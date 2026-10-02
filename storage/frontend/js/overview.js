@@ -1,7 +1,7 @@
 import { CONFIG } from "./config.js";
 import { api, fetchImageUrl, invalidateImageUrl } from "./api.js";
 import { icons } from "./icons.js";
-import { decodeToken } from "./auth.js";
+import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 
@@ -26,8 +26,8 @@ let locationsCache = null;
 let debounceTimer = null;
 
 function canWrite() {
-  const payload = decodeToken();
-  return payload && (payload.role === "admin" || payload.role === "user");
+  const info = getCurrentUserInfo();
+  return info && (info.role === "admin" || info.role === "user");
 }
 
 function debounce(fn, delay) {

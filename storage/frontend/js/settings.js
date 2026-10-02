@@ -1,12 +1,12 @@
 import { THEMES, getStoredTheme, applyTheme } from "./theme.js";
-import { decodeToken, logout } from "./auth.js";
+import { getCurrentUserInfo, logout } from "./auth.js";
 import { icons } from "./icons.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 
 export function renderSettings(container) {
-  const user = decodeToken() || {};
+  const user = getCurrentUserInfo() || {};
   const currentTheme = getStoredTheme();
-  const initial = (user.sub || "?").slice(0, 1).toUpperCase();
+  const initial = (user.subject || "?").slice(0, 1).toUpperCase();
 
   container.innerHTML = `
     <div class="page">
@@ -15,7 +15,7 @@ export function renderSettings(container) {
         <div class="user-info-card">
           <div class="user-avatar">${escapeHtml(initial)}</div>
           <div>
-            <div style="font-weight:600;">${escapeHtml(user.sub || "Unknown user")}</div>
+            <div style="font-weight:600;">${escapeHtml(user.subject || "Unknown user")}</div>
             <div class="muted" style="font-size: var(--font-size-sm); text-transform: capitalize;">
               ${escapeHtml(user.role || "unknown role")} · ${escapeHtml(user.source || "")}
             </div>

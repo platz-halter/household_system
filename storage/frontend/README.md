@@ -53,18 +53,72 @@ CORS doing it that way, so it's only useful for a quick sanity check.
 
 That's the whole process — the Settings page picks it up automatically.
 
-## Notes / known gaps
+## Authentik setup
 
-- **Auth mode**: this login page only implements the local-account flow
-  (`POST /token` on the auth service). Once Authentik is reachable,
-  swapping to an OIDC redirect flow means replacing `js/login.js` — the
-  rest of the app (role-gating, `/me`-equivalent via `decodeToken()`)
-  doesn't change, since it already just reads `role` off the JWT
-  regardless of who issued it.
-- **Role source**: the frontend decodes the JWT client-side to decide
-  what UI to show (hide the FAB / edit controls for viewers). This is
-  UX only — the backend independently enforces the same rule, so a
-  tampered token gets a 403 from the API either way.
+The login page offers "Log in with Authentik" (primary) and a collapsible
+local-account form (fallback) — both are always active on the backend
+side (see `MIGRATIONS.md`'s sibling note in `shared/src/shared/auth.py`:
+local and Authentik tokens are both verified on every request, chosen by
+the token's own signing algorithm, not an env toggle).
+
+In Authentik, create:
+
+1. **An OAuth2/OpenID Provider**
+   - Client type: **Public** (this is a browser SPA using PKCE — there's
+     no client secret to protect)
+   - Redirect URIs: the exact origin this frontend is served from, e.g.
+     `https://storage.pressnet.duckdns.org/` (must match
+     `AUTHENTIK_REDIRECT_URI` in `js/config.js` exactly, trailing slash
+     included)
+   - Signing key: set one (needed for the access token to be a real JWT
+     the backend can verify via JWKS — without this Authentik may issue
+     opaque tokens instead)
+   - Scopes: the built-in `openid`, `profile`, `email`, **plus a custom
+     one for groups** (next step)
+
+2. **A custom Scope Mapping for group membership** — Authentik does not
+   include group membership in the default scopes. Under
+   *Customization → Property Mappings*, create a new **Scope Mapping**:
+   - Scope name: `groups`
+   - Expression: `return {"groups": [group.name for group in request.user.ak_groups.all()]}`
+
+   Add this mapping to the provider's scopes, alongside the built-in
+   ones.
+
+3. **An Application** wrapping that provider, with slug
+   `household-system` (matches the issuer path already used throughout
+   this repo).
+
+4. **The three groups** referenced in `shared/src/shared/auth.py`'s
+   `GROUP_ROLE_MAP` (and mirrored in `js/auth.js`'s `ROLE_FROM_GROUPS` for
+   display) — rename both copies together if you use different names:
+   - `household-system-admins`
+   - `household-system-users`
+   - `household-system-viewers`
+
+5. **Fill in the values** in `.env` (`AUTHENTIK_CLIENT_ID`,
+   `AUTHENTIK_ISSUER`, `AUTHENTIK_JWKS_URL`) and `js/config.js`
+   (`AUTHENTIK_CLIENT_ID` — same value as the backend's — plus the
+   authorize/token/end-session URLs). If anything 404s, check
+   `<issuer>/.well-known/openid-configuration` for the exact endpoint
+   paths — they vary slightly by Authentik version.
+
+Once working: Authentik-issued access tokens are typically short-lived
+(often ~5 minutes); the frontend handles this with a silent
+refresh-token exchange on a 401 (see `tryRefreshAuthentikToken` in
+`js/auth.js`) — you shouldn't notice it happening. Local-account
+sessions aren't refreshed this way (there's no refresh token for them);
+a 401 there goes straight back to the login page.
+
+## Other notes / known gaps
+
+- **Role source for UI gating**: the frontend resolves the current
+  user's role client-side (from the JWT's `role` claim for local
+  accounts, or `groups` mapped through `ROLE_FROM_GROUPS` for Authentik)
+  purely to decide what to show (hide the FAB / edit controls for
+  viewers). This is UX only — the backend independently enforces the
+  real rule from the same groups claim, so a tampered or stale-mapped
+  token still gets a 403 from the API regardless of what the UI shows.
 - **Image editing**: uploading a new photo happens together with
   "Save changes" — there's no separate "remove photo" control yet.
 - No offline / service-worker support yet (mentioned in the original

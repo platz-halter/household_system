@@ -1,4 +1,4 @@
-import { login } from "./auth.js";
+import { login, loginWithAuthentik } from "./auth.js";
 import { showToast } from "./toast.js";
 import { icons } from "./icons.js";
 
@@ -6,7 +6,14 @@ export function renderLogin(container) {
   container.innerHTML = `
     <div class="container-narrow center" style="min-height: calc(100vh - var(--topbar-height)); flex-direction: column;">
       <div style="margin-bottom: var(--space-6);">${icons.box}</div>
-      <form id="login-form" class="stack" style="width: 100%;">
+
+      <button class="btn btn-primary btn-block" id="authentik-login-btn">Log in with Authentik</button>
+
+      <button class="btn btn-ghost" id="toggle-local-login" style="margin-top: var(--space-4);">
+        Use a local account instead
+      </button>
+
+      <form id="login-form" class="stack hidden" style="width: 100%; margin-top: var(--space-4);">
         <div class="field">
           <label for="login-username">Username</label>
           <input class="input" id="login-username" autocomplete="username" required />
@@ -15,12 +22,22 @@ export function renderLogin(container) {
           <label for="login-password">Password</label>
           <input class="input" id="login-password" type="password" autocomplete="current-password" required />
         </div>
-        <button class="btn btn-primary btn-block" type="submit" id="login-submit">Log in</button>
+        <button class="btn btn-block" type="submit" id="login-submit">Log in</button>
       </form>
     </div>
   `;
 
+  container.querySelector("#authentik-login-btn").addEventListener("click", () => {
+    loginWithAuthentik(); // redirects the browser away — nothing more to do here
+  });
+
   const form = container.querySelector("#login-form");
+  const toggleBtn = container.querySelector("#toggle-local-login");
+  toggleBtn.addEventListener("click", () => {
+    const nowShown = form.classList.toggle("hidden") === false;
+    toggleBtn.textContent = nowShown ? "Use Authentik instead" : "Use a local account instead";
+  });
+
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const submitBtn = container.querySelector("#login-submit");

@@ -1,4 +1,4 @@
-import { getToken, clearToken } from "./auth.js";
+import { getToken, clearToken, getAuthSource, tryRefreshAuthentikToken } from "./auth.js";
 import { showToast } from "./toast.js";
 
 class ApiError extends Error {
@@ -29,6 +29,16 @@ async function request(url, options = {}) {
   }
 
   if (resp.status === 401) {
+    // Access tokens (especially Authentik's) can be short-lived — try a
+    // silent refresh and retry once before treating this as a real
+    // logout. Only attempted once per original call (_retried guards
+    // against a refresh loop if the new token is somehow also rejected).
+    if (!options._retried && getAuthSource() === "authentik") {
+      const refreshed = await tryRefreshAuthentikToken();
+      if (refreshed) {
+        return request(url, { ...options, _retried: true });
+      }
+    }
     clearToken();
     window.location.hash = "#/login";
     throw new ApiError("Session expired", 401);

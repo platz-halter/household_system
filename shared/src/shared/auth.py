@@ -2,8 +2,14 @@
 
 Downstream services (household, storage) never need to know whether a
 request was authenticated via Authentik or the local fallback service —
-they just call `get_current_user`. It dispatches on `settings.auth_mode`
-and always returns the same `CurrentUser` shape.
+they just call `get_current_user`, which always returns the same
+`CurrentUser` shape. Both verification paths are ALWAYS available; which
+one runs is decided per-request from the token's own signing algorithm
+(local tokens are HS256, Authentik's are RS256) rather than a global
+setting. That's what actually makes local accounts a fallback: you can
+log in locally when Authentik is unreachable without redeploying
+anything, and an Authentik session from someone else keeps working at
+the same time.
 
 Role mapping (Authentik groups -> app role) happens once, here, so it's
 defined in exactly one place rather than duplicated per service.
@@ -28,9 +34,9 @@ Role = Literal["admin", "user", "viewer"]
 # Authentik group name -> app role. Adjust to match the svc-<app> groups
 # actually created for this application in Authentik.
 GROUP_ROLE_MAP: dict[str, Role] = {
-    "svc-household-system-admins": "admin",
-    "svc-household-system-users": "user",
-    "svc-household-system-viewers": "viewer",
+    "household-system-admins": "admin",
+    "household-system-users": "user",
+    "household-system-viewers": "viewer",
 }
 
 
@@ -111,13 +117,31 @@ def _verify_local_token(token: str) -> CurrentUser:
     return CurrentUser(subject=claims["sub"], role=role, source="local")
 
 
+def _peek_algorithm(token: str) -> str | None:
+    """Reads the 'alg' header WITHOUT verifying the signature — used only
+    to decide which verifier to run. The chosen verifier still checks the
+    signature properly; this never grants trust by itself."""
+    try:
+        return jwt.get_unverified_header(token).get("alg")
+    except JWTError:
+        return None
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> CurrentUser:
     token = credentials.credentials
-    if settings.auth_mode == "authentik":
+    alg = _peek_algorithm(token)
+
+    if alg == settings.local_jwt_algorithm:
+        return _verify_local_token(token)
+    if alg == "RS256":
         return await _verify_authentik_token(token)
-    return _verify_local_token(token)
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Unrecognized token signing algorithm",
+    )
 
 
 def require_role(*allowed: Role):

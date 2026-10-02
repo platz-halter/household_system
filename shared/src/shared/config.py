@@ -17,33 +17,36 @@ class Settings(BaseSettings):
     # --- Database ---------------------------------------------------
     database_url: str = "postgresql+asyncpg://hs_admin:changeme@localhost:5432/postgres"
 
-    # --- Auth ---------------------------------------------------------
-    # "authentik": verify OIDC access tokens against Authentik's JWKS endpoint.
-    # "local":     verify tokens issued by the local fallback auth service.
-    auth_mode: Literal["authentik", "local"] = "authentik"
+    # --- Auth -----------------------------------------------------------
+    # Both verification paths below are always active (see shared/auth.py)
+    # — which one runs is decided per-token, not by a mode switch here.
 
-    authentik_issuer: str = (
-        "https://authentik.pressnet.duckdns.org/application/o/household-system/"
-    )
+    authentik_issuer: str = "https://authentik.pressnet.duckdns.org/application/o/household-system/"
     authentik_jwks_url: str = (
         "https://authentik.pressnet.duckdns.org/application/o/household-system/jwks/"
     )
     authentik_client_id: str = ""
 
-    # Used only when auth_mode == "local"; the local auth service signs its
-    # own JWTs with this secret so other services can verify them the same
-    # way they'd verify an Authentik token.
+    # The local auth service signs its own JWTs with this secret so other
+    # services can verify them the same way they'd verify an Authentik
+    # token — just a different algorithm/key.
     local_jwt_secret: str = "dev-only-change-me"
     local_jwt_algorithm: str = "HS256"
 
     # --- Service-to-service -----------------------------------------
     auth_service_url: str = "http://auth:8000"
 
+    # --- CORS ---------------------------------------------------------
+    # Comma-separated list of allowed origins, or "*" for any (default —
+    # fine here since no cookies are used, only a bearer token header).
+    # Once everything sits behind Caddy on one origin, CORS won't even
+    # be exercised by the browser — but set this to your actual
+    # frontend origin(s) if you ever serve the frontend from a
+    # different origin than the one Caddy proxies /api/* on.
+    cors_origins: str = "*"
+
     # --- Misc -----------------------------------------------------------
     environment: Literal["dev", "prod"] = "dev"
-
-    # --- CORS ---------------------------------------------------------
-    cors_origins: str = "*"
 
 
 @lru_cache
