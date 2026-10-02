@@ -95,14 +95,34 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 - ⬜ No PWA manifest/installability for this service (not requested for
   Storage; it's in-scope for Household instead).
 
-## Household service
+## Household service — backend
 
-- 🟡 Skeleton only: `/health` and `/me` routes, empty `models.py`
-  placeholder. No chores/points domain model, no scheduling, no
-  balancing tool, no todo board, no push notifications, no admin
-  tools/reports, no break mode, and no frontend at all yet.
-- ⬜ Everything under "Household System" and "Household planned pages"
-  in `PROJECT_SPEC.md` is still design-only — none of it is built.
+- ✅ Core chores/points domain built: `HouseholdUser` (auto-provisioned on
+  first use from the JWT `subject` — this service doesn't own accounts),
+  `Category`, `Task` (points, active flag, many-to-many categories,
+  descriptive weekly schedule — `weekdays` 0–6 + `times_per_day` — and a
+  configurable ramp-up bonus), `TodoItem` (one-off board requests with
+  `due_in_days`, optional `assigned_to`), and a single `PointsEntry`
+  ledger that both scheduled-task completions and completed todos write
+  to (so the leaderboard/activity feed just sum/list one table).
+- ✅ Routes: `/me` + `/users`, `/categories`, `/tasks` (+
+  `/tasks/{id}/complete`, with ramp-up bonus logic), `/todos` (+
+  `/complete`, `/cancel`), `/points/leaderboard` (excludes on-break users
+  entirely, not just zeroed), `/points/recent`, `/settings` (singleton
+  row, currently just `weekly_points_goal`).
+- ✅ Role gating matches storage: viewers read-only, user/admin full
+  access on everything (the spec doesn't yet distinguish admin from
+  user beyond viewer-vs-not, so no feature here special-cases admin).
+- ✅ Alembic baseline migration for the new tables, applied and verified
+  with `alembic check`; `PointsEntry.task_id`/`todo_item_id` are
+  `ON DELETE SET NULL` so deleting a task/todo keeps its points history.
+- ⬜ Not built yet (deferred by explicit scope choice this round): the
+  auto-balancing assignment tool, PDF report generation, the
+  points↔EUR conversion admin setting, and Web Push notifications
+  (todo items have an `assigned_to` field ready for it, but nothing
+  sends a push yet). No profile-picture upload for household users
+  either (storage's item-image pattern would carry over directly).
+- ⬜ No household frontend yet — backend only so far.
 
 ## Database / migrations
 
@@ -161,14 +181,18 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 
 ## Summary of what's next (not started, no action taken yet)
 
-1. Household service: build the actual chores/points domain — models,
-   CRUD, scheduling, balancing tool, todo board, push notifications,
-   admin reports, break mode — then its frontend.
-2. Optional smaller gaps: "remove photo" on Storage items, PWA
+1. Household service: build its frontend (vanilla HTML/CSS/JS, same
+   conventions as storage) against the backend that now exists —
+   home/stats/admin/task-management/user-settings pages per
+   `PROJECT_SPEC.md`.
+2. Household backend follow-ups deferred this round: the auto-balancing
+   assignment tool, PDF report generation, points↔EUR conversion
+   setting, Web Push notifications, and profile-picture upload.
+3. Optional smaller gaps: "remove photo" on Storage items, PWA
    manifest/installability (Household), clean URL routing (currently
    hash-based).
-3. User's own action items: complete the Authentik-side GUI setup
+4. User's own action items: complete the Authentik-side GUI setup
    (provider, groups scope mapping, application, groups) and verify
    production Caddy routing for `/api/*` on each service.
-4. Add Authentik admin panel for configuring the authentik connection(requires reauth before setting access)
-5. Auto generate fallback admin credentials on deployment to avoid unsafe passwords or forgetting to setup a fallback user
+5. Add Authentik admin panel for configuring the authentik connection(requires reauth before setting access)
+6. Auto generate fallback admin credentials on deployment to avoid unsafe passwords or forgetting to setup a fallback user
