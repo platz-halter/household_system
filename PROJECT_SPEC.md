@@ -51,9 +51,10 @@ see `PROJECT_STATE.md`.
 - **Three roles**, same across every service: `admin`, `user`, `viewer`.
   - Viewers: read-only everywhere.
   - Users and Admins: normal full use.
-  - (Nothing in the current spec distinguishes Admin from User beyond
-    viewer-vs-not; if that's needed later — e.g. admin-only user
-    management — it isn't designed yet.)
+  - (Admin/User are otherwise undistinguished — the one exception is
+    Household's weekly points goal, which only Admins can change; see
+    "Admin tools" below. Anything else admin-only, e.g. user
+    management, isn't designed yet.)
 - Authentik groups map to roles: `household-system-admins`,
   `household-system-users`, `household-system-viewers`.
 - An unrecognized or missing group/role fails closed to `viewer`.

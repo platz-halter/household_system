@@ -36,6 +36,14 @@ class Settings(BaseSettings):
     # --- Service-to-service -----------------------------------------
     auth_service_url: str = "http://auth:8000"
 
+    # --- Web Push (household service only) ---------------------------
+    # Generate a pair with:
+    #   uv run --package household-backend python household/backend/scripts/generate_vapid_keys.py
+    # VAPID_PUBLIC_KEY is also handed to the frontend as-is (applicationServerKey).
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = "mailto:admin@example.com"
+
     # --- CORS ---------------------------------------------------------
     # Comma-separated list of allowed origins, or "*" for any (default —
     # fine here since no cookies are used, only a bearer token header).

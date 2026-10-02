@@ -65,8 +65,23 @@ services:
     networks:
       - hs-internal
     profiles: ["household"]
+    volumes:
+      - household-reports:/app/data/reports
     ports:
       - "127.0.0.1:8002:8000"
+
+  household-frontend:
+    build:
+      context: ./household/frontend
+    container_name: hs-household-frontend
+    restart: unless-stopped
+    networks:
+      - hs-internal
+    profiles: ["household"]
+    # Not published directly — put Caddy in front (see
+    # household/frontend/README.md). Uncomment only for quick local testing:
+    ports:
+      - "127.0.0.1:8081:80"
 
   storage-backend:
     build:
@@ -111,3 +126,4 @@ networks:
 volumes:
   postgres-data:
   storage-images:
+  household-reports:

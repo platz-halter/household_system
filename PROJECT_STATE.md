@@ -111,18 +111,125 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   entirely, not just zeroed), `/points/recent`, `/settings` (singleton
   row, currently just `weekly_points_goal`).
 - ✅ Role gating matches storage: viewers read-only, user/admin full
-  access on everything (the spec doesn't yet distinguish admin from
-  user beyond viewer-vs-not, so no feature here special-cases admin).
+  access on everything, **except** `PUT /settings` (admin-only — see
+  "Admin-only weekly goal" under frontend, below).
 - ✅ Alembic baseline migration for the new tables, applied and verified
   with `alembic check`; `PointsEntry.task_id`/`todo_item_id` are
   `ON DELETE SET NULL` so deleting a task/todo keeps its points history.
-- ⬜ Not built yet (deferred by explicit scope choice this round): the
-  auto-balancing assignment tool, PDF report generation, the
-  points↔EUR conversion admin setting, and Web Push notifications
-  (todo items have an `assigned_to` field ready for it, but nothing
-  sends a push yet). No profile-picture upload for household users
-  either (storage's item-image pattern would carry over directly).
-- ⬜ No household frontend yet — backend only so far.
+- ✅ `GET /points/activity` — daily point totals (gap-filled with zero
+  days), added to feed the Stats page's activity heatmap; `PointsEntry`
+  gained a `task`/`todo_item` relationship and `PointsEntryOut` gained
+  `task_name`/`todo_title` so the recent-activity feed can show a
+  readable label instead of just an id (falls back to null if the
+  source was since deleted).
+- ✅ Points→EUR conversion: `HouseholdSettings.points_to_eur_rate`
+  (nullable float, admin-only to set via `PUT /settings`), returned by
+  `GET /settings` for display anywhere points are shown. Display/
+  reference only, as specced — no payout process is connected.
+- ✅ PDF reports: new `Report` table + `household_service/reports.py`
+  (reportlab, pure-Python — no extra system packages in the container
+  image) generates a by-week/by-month points table (plus an EUR column
+  if a rate is set) and writes it to the `household-reports` Docker
+  volume. `POST /reports` (admin, body `{period_type, period_date}` —
+  any date within the target week/month), `GET /reports` (admin, list,
+  newest first), `GET /reports/{id}/download` (admin, streams the PDF).
+  Historical reports intentionally include a user's totals regardless
+  of their *current* break status (`crud.leaderboard_for_period` —
+  break mode affects the live leaderboard, not history).
+- ✅ Web Push: `PushSubscription` table, VAPID keys in `.env`
+  (`household/backend/scripts/generate_vapid_keys.py` generates a
+  pair), `household_service/push.py` wraps `pywebpush` (runs the
+  blocking send in a thread) and prunes subscriptions the push service
+  reports as gone (404/410). Routes: `GET /push/vapid-public-key`,
+  `POST /push/subscribe` / `/push/unsubscribe` (self), `POST
+  /push/nudge` (admin-only — see below for why this is a button, not a
+  schedule). Creating a todo with `assigned_to_id` set now pushes that
+  person immediately (`crud.notify_todo_assigned`).
+  - 🟡 **Weekly reminders are admin-triggered, not automatic.** The spec
+    describes pushes "nudging users to log points during the week",
+    which reads as a schedule — I deliberately built an admin button
+    (`POST /push/nudge`: pushes everyone below the weekly goal, or
+    everyone if no goal is set) instead of an automatic weekly cron/
+    background task, to avoid the real failure modes that come with
+    in-process scheduling in a single container (silent misses across
+    restarts, idempotency bookkeeping, timezone assumptions) without a
+    scheduling dependency. If true automatic scheduling is wanted,
+    that's a deliberate follow-up, not an oversight.
+- ⬜ Still not built: the auto-balancing assignment tool, and
+  profile-picture upload for household users (storage's item-image
+  pattern would carry over directly).
+
+## Household service — frontend
+
+- ✅ Built on the same vanilla HTML/CSS/JS conventions as
+  `storage/frontend` — `css/tokens.css` is kept in lockstep (same
+  black-and-white palette, dark theme, spacing/radius/shadow tokens),
+  plus a new monochrome `--heat-0..4` scale for the activity heatmap so
+  it stays within the b&w design rather than introducing a new hue.
+  `js/auth.js`, `theme.js`, `toast.js`, `confirmDialog.js`, `main.js`
+  are carried over unchanged; `api.js` is the same pattern minus the
+  image-blob helpers (no photos in this domain).
+- ✅ Six hash-routed pages: **Home** (your points this week + weekly
+  goal progress, today's scheduled chores with one-tap complete, full
+  task list with search/select-to-bulk-complete next to it, category
+  filters), **Board** (the todo board — post/complete/cancel one-off
+  requests, optionally directed at someone), **Stats** (leaderboard by
+  all-time/this-week/**last week** (a closed, final range)/month, with
+  the EUR-equivalent shown next to each total when an admin has set a
+  rate; a GitHub-style activity heatmap — weekday labels fixed outside
+  the horizontally-scrolling grid and all 7 shown, not GitHub's
+  Mon/Wed/Fri — household-wide/just-me toggle, recent-activity feed),
+  **Tasks** (category + task management: points, weekday/times-per-day
+  schedule, ramp-up bonus config), **Settings** (break-mode toggle, a
+  push-notification toggle, read-only weekly goal, theme, account,
+  logout — reached via a topbar icon now, not the bottom nav),
+  **Admin** (`#/admin`, admin-only: editable weekly points goal, EUR
+  conversion rate, a "send weekly reminder now" button, and generate/
+  list/download PDF reports; the natural home for the balancing-tool UI
+  once that's built).
+- ✅ Role gating mirrors storage's UX-only client-side pattern: viewers
+  get every page read-only (no FABs, no select/complete/edit controls);
+  the backend independently enforces the same rule. The weekly points
+  goal goes one step further and is the one place this app actually
+  distinguishes `admin` from `user` (both client-side — the Settings
+  page only shows the Admin panel link to admins, and the router
+  redirects a non-admin away from `#/admin` — **and** server-side —
+  `PUT /settings` now requires the `admin` role, not just `can_write`).
+- ✅ Bottom nav is 4 tabs (Home/Board/Stats/Tasks); Settings moved to a
+  gear icon in the topbar so the bar doesn't get cramped on narrow
+  screens. Admin has no nav entry of its own — reached only via the
+  link on Settings (admins) or `#/admin` directly.
+- ✅ Activity heatmap: weekday labels are a fixed column outside the
+  horizontally-scrolling grid (previously they scrolled away with it —
+  now they don't), and the grid opens pre-scrolled to the current day
+  instead of the oldest one.
+- ✅ Web Push: `sw.js` (push + notificationclick only — no offline
+  caching, that's the separate unbuilt PWA-installability item) plus
+  `js/push.js` (subscribe/unsubscribe, wraps the VAPID public key fetch
+  and `PushManager`). Settings has a notification toggle per device;
+  degrades to a plain "not supported" message in browsers without the
+  Push API rather than erroring. `nginx.conf` serves `sw.js` as
+  `no-cache` specifically (everything else is long-cached) so an
+  updated service worker is picked up promptly.
+- ✅ `docker-compose.yml` gained a `household-frontend` service (same
+  shape as `storage-frontend`, behind the `household` profile);
+  `household/frontend/README.md` covers the Caddy wiring and notes this
+  is a **separate origin** from storage's frontend, so it needs adding
+  as an extra Redirect URI on the same Authentik provider.
+- ✅ Functionally tested end-to-end against the live stack with a
+  jsdom-based harness (real DOM, real click events, real HTTP calls to
+  the running auth/household containers) rather than just read —
+  covered: today/all-tasks completion incl. ramp-up bonus, multi-select
+  bulk complete, todo board complete, leaderboard + heatmap + recent
+  feed rendering, task/category edit-modal round-trip, break-mode
+  toggle, the admin-only weekly-goal flow (403 for `user`/200 for
+  `admin` at the API, admin-page save round-trip, link/route visibility
+  by role), the `#/admin` router redirect, and viewer-role control
+  hiding on every page. No real browser was available in this
+  environment to eyeball it visually — functionally verified, not
+  visually (heatmap auto-scroll-to-today in particular: the code path
+  is exercised, but jsdom has no real layout engine, so the actual
+  visual scroll position is unverified).
 
 ## Database / migrations
 
@@ -181,18 +288,28 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 
 ## Summary of what's next (not started, no action taken yet)
 
-1. Household service: build its frontend (vanilla HTML/CSS/JS, same
-   conventions as storage) against the backend that now exists —
-   home/stats/admin/task-management/user-settings pages per
-   `PROJECT_SPEC.md`.
-2. Household backend follow-ups deferred this round: the auto-balancing
-   assignment tool, PDF report generation, points↔EUR conversion
-   setting, Web Push notifications, and profile-picture upload.
-3. Optional smaller gaps: "remove photo" on Storage items, PWA
-   manifest/installability (Household), clean URL routing (currently
-   hash-based).
-4. User's own action items: complete the Authentik-side GUI setup
-   (provider, groups scope mapping, application, groups) and verify
-   production Caddy routing for `/api/*` on each service.
-5. Add Authentik admin panel for configuring the authentik connection(requires reauth before setting access)
-6. Auto generate fallback admin credentials on deployment to avoid unsafe passwords or forgetting to setup a fallback user
+1. Household backend follow-ups still not built: the auto-balancing
+   assignment tool, and profile-picture upload. (PDF reports, EUR
+   conversion, and Web Push all shipped this round — see above.)
+2. Weekly Web Push reminders are admin-triggered (a button), not an
+   automatic schedule — a deliberate simplification, not an oversight
+   (see "Web Push" above for why). Worth a real decision later if
+   automatic nudging turns out to matter.
+3. Household frontend was built but only functionally tested (jsdom +
+   real HTTP calls, no real browser available in that session) — worth
+   an actual visual pass in a browser, especially the activity heatmap,
+   Web Push permission prompt/toggle, and mobile layout at narrow
+   widths.
+4. Optional smaller gaps: "remove photo" on Storage items, PWA
+   manifest/installability (Household — note Web Push's service worker
+   is already in place; a manifest.json + icons would be the rest),
+   clean URL routing (currently hash-based).
+5. User's own action items: complete the Authentik-side GUI setup
+   (provider, groups scope mapping, application, groups), add the
+   household frontend's origin as an extra Redirect URI on that same
+   provider, verify production Caddy routing for `/api/*` on each
+   service (both frontends now need it), and set a real
+   `VAPID_SUBJECT`/regenerate VAPID keys for production rather than the
+   dev ones currently in `.env`.
+6. Add Authentik admin panel for configuring the authentik connection(requires reauth before setting access)
+7. Auto generate fallback admin credentials on deployment to avoid unsafe passwords or forgetting to setup a fallback user

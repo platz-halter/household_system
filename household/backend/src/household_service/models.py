@@ -17,6 +17,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Enum,
+    Float,
     ForeignKey,
     Integer,
     String,
@@ -178,6 +179,7 @@ class PointsEntry(Base):
 
     household_user: Mapped[HouseholdUser] = relationship()
     task: Mapped[Task | None] = relationship()
+    todo_item: Mapped[TodoItem | None] = relationship()
 
 
 class HouseholdSettings(Base):
@@ -187,3 +189,65 @@ class HouseholdSettings(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     weekly_points_goal: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # EUR per point — display/reference only, no connection to an actual
+    # payout process (see PROJECT_SPEC.md "Admin tools").
+    points_to_eur_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # Automatic weekly reminder schedule (see household_service/scheduler.py).
+    # nudge_weekday is None by default — the feature is opt-in; the manual
+    # "send now" button in the Admin panel works regardless of this.
+    nudge_weekday: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )  # 0=Mon..6=Sun
+    nudge_hour: Mapped[int] = mapped_column(Integer, default=18)  # 0-23, UTC
+    # Bookkeeping so the scheduled job and the manual button don't double-
+    # send in the same ISO week — "2026-W41" style, not admin-editable.
+    last_nudge_sent_week: Mapped[str | None] = mapped_column(String(10), nullable=True)
+
+
+class ReportPeriod(str, enum.Enum):
+    week = "week"
+    month = "month"
+
+
+class Report(Base):
+    """A generated PDF points report, kept on disk so past reports stay
+    downloadable rather than needing to be regenerated."""
+
+    __tablename__ = "reports"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    period_type: Mapped[ReportPeriod] = mapped_column(
+        Enum(ReportPeriod, name="report_period")
+    )
+    period_start: Mapped[date] = mapped_column(Date)
+    period_end: Mapped[date] = mapped_column(Date)
+    file_path: Mapped[str] = mapped_column(String(300))
+    generated_by_id: Mapped[int] = mapped_column(ForeignKey("household_users.id"))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    generated_by: Mapped[HouseholdUser] = relationship()
+
+
+class PushSubscription(Base):
+    """A browser's Web Push subscription for one household user. A user can
+    have more than one (multiple devices/browsers), so this isn't keyed
+    1:1 on household_user_id — `endpoint` is the natural unique key the
+    Push API itself gives us."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    household_user_id: Mapped[int] = mapped_column(
+        ForeignKey("household_users.id", ondelete="CASCADE")
+    )
+    endpoint: Mapped[str] = mapped_column(String(500), unique=True)
+    p256dh: Mapped[str] = mapped_column(String(200))
+    auth: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    household_user: Mapped[HouseholdUser] = relationship()

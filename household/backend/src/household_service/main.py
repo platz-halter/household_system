@@ -1,15 +1,19 @@
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from shared.auth import CurrentUser, require_role
 from shared.config import cors_origin_list, get_settings
 from shared.db import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from household_service import crud
+from household_service import crud, scheduler
+from household_service import reports as reports_pdf
 from household_service.models import TodoStatus
 from household_service.schemas import (
+    ActivityDay,
     CategoryIn,
     CategoryOut,
     CategoryUpdate,
@@ -19,7 +23,12 @@ from household_service.schemas import (
     HouseholdUserOut,
     HouseholdUserUpdate,
     LeaderboardEntry,
+    NudgeResult,
     PointsEntryOut,
+    PushSubscriptionIn,
+    PushUnsubscribeIn,
+    ReportCreate,
+    ReportOut,
     TaskCompleteRequest,
     TaskCreate,
     TaskOut,
@@ -27,9 +36,18 @@ from household_service.schemas import (
     TodoCreate,
     TodoOut,
     TodoUpdate,
+    VapidPublicKeyOut,
 )
 
-app = FastAPI(title="Household System — Household (chores/points)")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler.start()
+    yield
+    scheduler.shutdown()
+
+
+app = FastAPI(title="Household System — Household (chores/points)", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -43,6 +61,9 @@ app.add_middleware(
 # spec doesn't (yet) distinguish admin from user beyond that.
 can_read = require_role("admin", "user", "viewer")
 can_write = require_role("admin", "user")
+# The weekly points goal is the one place this service distinguishes admin
+# from user (see PROJECT_SPEC.md) — everything else stays flat per-role.
+can_admin = require_role("admin")
 
 
 async def _self(db: AsyncSession, user: CurrentUser):
@@ -249,7 +270,7 @@ async def complete_task(
         target = await _self(db, user)
 
     entry = await crud.complete_task(db, task, target)
-    return PointsEntryOut.model_validate(entry)
+    return PointsEntryOut.from_model(entry)
 
 
 # ---- Todo board ---------------------------------------------------------
@@ -279,6 +300,7 @@ async def create_todo(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
+    await crud.notify_todo_assigned(db, todo, creator)
     return TodoOut.model_validate(todo)
 
 
@@ -380,9 +402,38 @@ async def points_recent(
     _user: CurrentUser = Depends(can_read),
 ):
     return [
-        PointsEntryOut.model_validate(e)
-        for e in await crud.recent_points(db, limit=limit)
+        PointsEntryOut.from_model(e) for e in await crud.recent_points(db, limit=limit)
     ]
+
+
+@app.get("/points/activity", response_model=list[ActivityDay])
+async def points_activity(
+    since: date | None = None,
+    until: date | None = None,
+    household_user_id: int | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    """Daily point totals for the GitHub-style activity heatmap. Defaults
+    to the trailing year ending today; days with no activity are filled
+    in as zero so the frontend can render a gap-free grid."""
+    range_until = until or datetime.now(UTC).date()
+    range_since = since or (range_until - timedelta(days=364))
+
+    rows = dict(
+        await crud.daily_activity(
+            db,
+            since=range_since,
+            until=range_until,
+            household_user_id=household_user_id,
+        )
+    )
+    days = []
+    cursor = range_since
+    while cursor <= range_until:
+        days.append(ActivityDay(date=cursor, points=rows.get(cursor, 0)))
+        cursor += timedelta(days=1)
+    return days
 
 
 # ---- Settings -----------------------------------------------------------
@@ -400,6 +451,87 @@ async def get_settings_route(
 async def put_settings(
     data: HouseholdSettingsUpdate,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
+    _user: CurrentUser = Depends(can_admin),
 ):
     return HouseholdSettingsOut.model_validate(await crud.update_settings(db, data))
+
+
+# ---- Web Push -------------------------------------------------------------
+
+
+@app.get("/push/vapid-public-key", response_model=VapidPublicKeyOut)
+async def get_vapid_public_key(
+    _user: CurrentUser = Depends(can_read),
+):
+    return VapidPublicKeyOut(public_key=get_settings().vapid_public_key or None)
+
+
+@app.post("/push/subscribe", status_code=status.HTTP_204_NO_CONTENT)
+async def push_subscribe(
+    data: PushSubscriptionIn,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    hu = await _self(db, user)
+    await crud.upsert_push_subscription(db, hu.id, data)
+
+
+@app.post("/push/unsubscribe", status_code=status.HTTP_204_NO_CONTENT)
+async def push_unsubscribe(
+    data: PushUnsubscribeIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    await crud.remove_push_subscription(db, data.endpoint)
+
+
+@app.post("/push/nudge", response_model=NudgeResult)
+async def push_nudge(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    """Admin-triggered weekly reminder — see crud.send_weekly_nudge for why
+    this is a manual button rather than an automatic schedule."""
+    notified, skipped = await crud.send_weekly_nudge(db)
+    return NudgeResult(notified=notified, skipped_no_subscription=skipped)
+
+
+# ---- Reports --------------------------------------------------------------
+
+
+@app.get("/reports", response_model=list[ReportOut])
+async def list_reports(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    return [ReportOut.model_validate(r) for r in await crud.list_reports(db)]
+
+
+@app.post("/reports", response_model=ReportOut, status_code=status.HTTP_201_CREATED)
+async def create_report(
+    data: ReportCreate,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_admin),
+):
+    generator = await _self(db, user)
+    report = await crud.create_report(db, data, generator)
+    return ReportOut.model_validate(report)
+
+
+@app.get("/reports/{report_id}/download")
+async def download_report(
+    report_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    report = await crud.get_report(db, report_id)
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Report not found"
+        )
+    path = reports_pdf.REPORTS_DIR / report.file_path
+    if not path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Report file missing on disk"
+        )
+    return FileResponse(path, media_type="application/pdf", filename=path.name)

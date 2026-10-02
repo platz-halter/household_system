@@ -2,7 +2,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, field_validator
 
-from household_service.models import PointsSource, TodoStatus
+from household_service.models import PointsSource, ReportPeriod, TodoStatus
 
 # ---- Household users -------------------------------------------------
 
@@ -139,15 +139,36 @@ class PointsEntryOut(BaseModel):
     points: int
     source: PointsSource
     task_id: int | None
+    task_name: str | None
     todo_item_id: int | None
+    todo_title: str | None
     earned_at: datetime
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, entry) -> "PointsEntryOut":
+        return cls(
+            id=entry.id,
+            household_user=HouseholdUserBrief.model_validate(entry.household_user),
+            points=entry.points,
+            source=entry.source,
+            task_id=entry.task_id,
+            task_name=entry.task.name if entry.task else None,
+            todo_item_id=entry.todo_item_id,
+            todo_title=entry.todo_item.title if entry.todo_item else None,
+            earned_at=entry.earned_at,
+        )
 
 
 class LeaderboardEntry(BaseModel):
     user: HouseholdUserBrief
     total_points: int
+
+
+class ActivityDay(BaseModel):
+    date: date
+    points: int
 
 
 # ---- Todo board -------------------------------------------------------
@@ -196,8 +217,64 @@ class TodoOut(BaseModel):
 
 class HouseholdSettingsOut(BaseModel):
     weekly_points_goal: int | None
+    points_to_eur_rate: float | None
+    nudge_weekday: int | None
+    nudge_hour: int
+    last_nudge_sent_week: str | None
     model_config = {"from_attributes": True}
 
 
 class HouseholdSettingsUpdate(BaseModel):
     weekly_points_goal: int | None = Field(default=None, ge=0)
+    points_to_eur_rate: float | None = Field(default=None, ge=0)
+    nudge_weekday: int | None = Field(default=None, ge=0, le=6)
+    nudge_hour: int = Field(default=18, ge=0, le=23)
+
+
+# ---- Reports -------------------------------------------------------------
+
+
+class ReportCreate(BaseModel):
+    period_type: ReportPeriod
+    # Any date within the target week/month — the service resolves it to
+    # that period's actual start/end (Monday-start week, calendar month).
+    period_date: date
+
+
+class ReportOut(BaseModel):
+    id: int
+    period_type: ReportPeriod
+    period_start: date
+    period_end: date
+    generated_by: HouseholdUserBrief
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+# ---- Web Push --------------------------------------------------------------
+
+
+class VapidPublicKeyOut(BaseModel):
+    public_key: str | None
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str
+    auth: str
+
+
+class PushSubscriptionIn(BaseModel):
+    """Matches the shape of PushSubscription.toJSON() from the browser."""
+
+    endpoint: str = Field(max_length=500)
+    keys: PushSubscriptionKeys
+
+
+class PushUnsubscribeIn(BaseModel):
+    endpoint: str = Field(max_length=500)
+
+
+class NudgeResult(BaseModel):
+    notified: int
+    skipped_no_subscription: int

@@ -1,15 +1,21 @@
-from datetime import UTC, date, datetime, timedelta
+import calendar
+from datetime import UTC, date, datetime, time, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from household_service import push
+from household_service import reports as reports_pdf
 from household_service.models import (
     Category,
     HouseholdSettings,
     HouseholdUser,
     PointsEntry,
     PointsSource,
+    PushSubscription,
+    Report,
+    ReportPeriod,
     Task,
     TodoItem,
     TodoStatus,
@@ -19,6 +25,8 @@ from household_service.schemas import (
     CategoryUpdate,
     HouseholdSettingsUpdate,
     HouseholdUserUpdate,
+    PushSubscriptionIn,
+    ReportCreate,
     TaskCreate,
     TaskUpdate,
     TodoCreate,
@@ -212,7 +220,9 @@ async def complete_task(
     )
     db.add(entry)
     await db.commit()
-    await db.refresh(entry, attribute_names=["household_user", "earned_at"])
+    await db.refresh(
+        entry, attribute_names=["household_user", "task", "todo_item", "earned_at"]
+    )
     return entry
 
 
@@ -334,7 +344,11 @@ async def delete_todo(db: AsyncSession, todo: TodoItem) -> None:
 
 
 def _points_entry_query():
-    return select(PointsEntry).options(selectinload(PointsEntry.household_user))
+    return select(PointsEntry).options(
+        selectinload(PointsEntry.household_user),
+        selectinload(PointsEntry.task),
+        selectinload(PointsEntry.todo_item),
+    )
 
 
 async def recent_points(db: AsyncSession, limit: int = 20) -> list[PointsEntry]:
@@ -342,6 +356,32 @@ async def recent_points(db: AsyncSession, limit: int = 20) -> list[PointsEntry]:
         _points_entry_query().order_by(PointsEntry.earned_at.desc()).limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def daily_activity(
+    db: AsyncSession,
+    *,
+    since: date,
+    until: date,
+    household_user_id: int | None = None,
+) -> list[tuple[date, int]]:
+    """Points earned per calendar day, summed across sources — feeds the
+    GitHub-style activity heatmap. Days with no activity are simply absent
+    from the result; the caller fills gaps with zero."""
+    day = func.date(PointsEntry.earned_at)
+    stmt = (
+        select(day.label("day"), func.sum(PointsEntry.points).label("total"))
+        .where(
+            func.date(PointsEntry.earned_at) >= since,
+            func.date(PointsEntry.earned_at) <= until,
+        )
+        .group_by(day)
+        .order_by(day)
+    )
+    if household_user_id is not None:
+        stmt = stmt.where(PointsEntry.household_user_id == household_user_id)
+    result = await db.execute(stmt)
+    return [(row.day, int(row.total)) for row in result.all()]
 
 
 async def leaderboard(
@@ -369,6 +409,37 @@ async def leaderboard(
     return [(user, int(total_points)) for user, total_points in result.all()]
 
 
+async def points_for_user_since(
+    db: AsyncSession, household_user_id: int, since: datetime
+) -> int:
+    total = await db.scalar(
+        select(func.coalesce(func.sum(PointsEntry.points), 0)).where(
+            PointsEntry.household_user_id == household_user_id,
+            PointsEntry.earned_at >= since,
+        )
+    )
+    return int(total or 0)
+
+
+async def leaderboard_for_period(
+    db: AsyncSession, *, since: datetime, until: datetime
+) -> list[tuple[HouseholdUser, int]]:
+    """Like `leaderboard`, but for a historical report: includes users
+    regardless of their CURRENT on_break status (break mode affects the
+    live leaderboard only — it shouldn't rewrite what already happened),
+    and only users who actually earned something in the period."""
+    total = func.sum(PointsEntry.points)
+    stmt = (
+        select(HouseholdUser, total.label("total"))
+        .join(PointsEntry, PointsEntry.household_user_id == HouseholdUser.id)
+        .where(PointsEntry.earned_at >= since, PointsEntry.earned_at <= until)
+        .group_by(HouseholdUser.id)
+        .order_by(total.desc())
+    )
+    result = await db.execute(stmt)
+    return [(user, int(total_points)) for user, total_points in result.all()]
+
+
 # ---- Settings -----------------------------------------------------------
 
 
@@ -387,6 +458,215 @@ async def update_settings(
 ) -> HouseholdSettings:
     settings = await get_settings_row(db)
     settings.weekly_points_goal = data.weekly_points_goal
+    settings.points_to_eur_rate = data.points_to_eur_rate
+    settings.nudge_weekday = data.nudge_weekday
+    settings.nudge_hour = data.nudge_hour
     await db.commit()
     await db.refresh(settings)
     return settings
+
+
+# ---- Web Push -------------------------------------------------------------
+
+
+async def upsert_push_subscription(
+    db: AsyncSession, household_user_id: int, data: PushSubscriptionIn
+) -> PushSubscription:
+    result = await db.execute(
+        select(PushSubscription).where(PushSubscription.endpoint == data.endpoint)
+    )
+    sub = result.scalar_one_or_none()
+    if sub is None:
+        sub = PushSubscription(endpoint=data.endpoint)
+        db.add(sub)
+    sub.household_user_id = household_user_id
+    sub.p256dh = data.keys.p256dh
+    sub.auth = data.keys.auth
+    await db.commit()
+    await db.refresh(sub)
+    return sub
+
+
+async def remove_push_subscription(db: AsyncSession, endpoint: str) -> bool:
+    result = await db.execute(
+        select(PushSubscription).where(PushSubscription.endpoint == endpoint)
+    )
+    sub = result.scalar_one_or_none()
+    if sub is None:
+        return False
+    await db.delete(sub)
+    await db.commit()
+    return True
+
+
+async def get_subscriptions_for_user(
+    db: AsyncSession, household_user_id: int
+) -> list[PushSubscription]:
+    result = await db.execute(
+        select(PushSubscription).where(
+            PushSubscription.household_user_id == household_user_id
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def notify_todo_assigned(
+    db: AsyncSession, todo: TodoItem, requested_by: HouseholdUser
+) -> None:
+    """Fire-and-forget push to whoever a new todo was requested from.
+    Silently no-ops if they have no subscription or VAPID isn't configured."""
+    if todo.assigned_to_id is None:
+        return
+    subs = await get_subscriptions_for_user(db, todo.assigned_to_id)
+    if not subs:
+        return
+    await push.send_to_subscriptions(
+        db,
+        subs,
+        {
+            "title": "New chore request",
+            "body": f"{requested_by.display_name} asked you to: {todo.title}",
+            "url": "#/board",
+        },
+    )
+
+
+async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int]:
+    """Pushes every non-break user who's below the weekly goal (or
+    everyone, if no goal is set) a "log your points" nudge. Used by both
+    the Admin panel's manual "send now" button and the automatic weekly
+    schedule (household_service/scheduler.py) — either path stamps
+    `last_nudge_sent_week` so the other one doesn't double-send the same
+    week. Returns (notified, skipped_no_subscription)."""
+    since = _start_of_this_week()
+    settings = await get_settings_row(db)
+    users = await list_household_users(db)
+
+    notified = 0
+    skipped = 0
+    for user in users:
+        if user.on_break:
+            continue
+        points = await points_for_user_since(db, user.id, since)
+        if (
+            settings.weekly_points_goal is not None
+            and points >= settings.weekly_points_goal
+        ):
+            continue
+        subs = await get_subscriptions_for_user(db, user.id)
+        if not subs:
+            skipped += 1
+            continue
+        body = (
+            f"You're at {points}/{settings.weekly_points_goal} points this week — "
+            "don't forget your chores!"
+            if settings.weekly_points_goal is not None
+            else "Don't forget to log your points this week!"
+        )
+        sent = await push.send_to_subscriptions(
+            db, subs, {"title": "Weekly reminder", "body": body, "url": "#/home"}
+        )
+        if sent:
+            notified += 1
+        else:
+            skipped += 1
+
+    settings.last_nudge_sent_week = _iso_week_key(datetime.now(UTC))
+    await db.commit()
+    return notified, skipped
+
+
+async def run_scheduled_nudge_if_due(db: AsyncSession) -> tuple[int, int] | None:
+    """Called hourly by household_service.scheduler. Returns None (and
+    does nothing) if the automatic schedule is off, it's not the
+    configured weekday/hour right now, or this week's nudge already went
+    out — otherwise runs it and returns send_weekly_nudge's result."""
+    settings = await get_settings_row(db)
+    if settings.nudge_weekday is None:
+        return None
+    now = datetime.now(UTC)
+    if now.weekday() != settings.nudge_weekday or now.hour != settings.nudge_hour:
+        return None
+    if settings.last_nudge_sent_week == _iso_week_key(now):
+        return None
+    return await send_weekly_nudge(db)
+
+
+def _iso_week_key(dt: datetime) -> str:
+    year, week, _ = dt.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _start_of_this_week() -> datetime:
+    today = datetime.now(UTC).date()
+    monday = today - timedelta(days=today.weekday())
+    return datetime.combine(monday, time.min, tzinfo=UTC)
+
+
+# ---- Reports ----------------------------------------------------------
+
+
+def _resolve_period(period_type: ReportPeriod, period_date: date) -> tuple[date, date]:
+    if period_type == ReportPeriod.week:
+        start = period_date - timedelta(days=period_date.weekday())
+        end = start + timedelta(days=6)
+    else:
+        start = period_date.replace(day=1)
+        last_day = calendar.monthrange(period_date.year, period_date.month)[1]
+        end = period_date.replace(day=last_day)
+    return start, end
+
+
+async def create_report(
+    db: AsyncSession, data: ReportCreate, generated_by: HouseholdUser
+) -> Report:
+    start, end = _resolve_period(data.period_type, data.period_date)
+    since = datetime.combine(start, time.min, tzinfo=UTC)
+    until = datetime.combine(end, time.max, tzinfo=UTC)
+
+    rows = await leaderboard_for_period(db, since=since, until=until)
+    settings = await get_settings_row(db)
+
+    report = Report(
+        period_type=data.period_type,
+        period_start=start,
+        period_end=end,
+        generated_by_id=generated_by.id,
+        file_path="",  # filled in below once we have the row's id
+    )
+    db.add(report)
+    await db.flush()  # assigns report.id without committing yet
+
+    filename = reports_pdf.generate_report_pdf(
+        report_id=report.id,
+        period_type=data.period_type.value,
+        period_start=start,
+        period_end=end,
+        rows=[(user.display_name, total) for user, total in rows],
+        eur_rate=settings.points_to_eur_rate,
+        generated_by=generated_by.display_name,
+        generated_at=datetime.now(UTC),
+    )
+    report.file_path = filename
+
+    await db.commit()
+    await db.refresh(report, attribute_names=["generated_by", "created_at"])
+    return report
+
+
+async def list_reports(db: AsyncSession) -> list[Report]:
+    result = await db.execute(
+        select(Report)
+        .options(selectinload(Report.generated_by))
+        .order_by(Report.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def get_report(db: AsyncSession, report_id: int) -> Report | None:
+    result = await db.execute(
+        select(Report)
+        .options(selectinload(Report.generated_by))
+        .where(Report.id == report_id)
+    )
+    return result.scalar_one_or_none()
