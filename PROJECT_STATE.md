@@ -170,3 +170,5 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 3. User's own action items: complete the Authentik-side GUI setup
    (provider, groups scope mapping, application, groups) and verify
    production Caddy routing for `/api/*` on each service.
+4. Add Authentik admin panel for configuring the authentik connection(requires reauth before setting access)
+5. Auto generate fallback admin credentials on deployment to avoid unsafe passwords or forgetting to setup a fallback user
