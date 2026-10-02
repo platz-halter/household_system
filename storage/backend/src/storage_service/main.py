@@ -4,11 +4,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from shared.auth import CurrentUser, require_role
 from shared.config import cors_origin_list, get_settings
 from shared.db import get_db
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from storage_service import crud
 from storage_service.schemas import (
     BulkDeleteRequest,
@@ -20,12 +20,16 @@ from storage_service.schemas import (
     ItemPage,
     ItemUpdate,
     LocationOut,
+    RoomIn,
+    RoomOut,
 )
 
 IMAGE_DIR = Path("/app/data/images")
 IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — plenty for item photos, keeps the volume sane
+MAX_IMAGE_BYTES = (
+    8 * 1024 * 1024
+)  # 8 MB — plenty for item photos, keeps the volume sane
 
 
 app = FastAPI(title="Household System — Storage (cellar/item tracking)")
@@ -50,13 +54,17 @@ async def health():
 
 @app.get("/items", response_model=ItemPage)
 async def list_items(
-    q: str | None = Query(default=None, description="Free-text search: name, description, aliases"),
+    q: str | None = Query(
+        default=None, description="Free-text search: name, description, aliases"
+    ),
     room: str | None = None,
     level: str | None = None,
     shelf: str | None = None,
     min_quantity: int | None = Query(default=None, ge=0),
     max_quantity: int | None = Query(default=None, ge=0),
-    sort_by: str = Query(default="name", pattern="^(name|quantity|created_at|updated_at)$"),
+    sort_by: str = Query(
+        default="name", pattern="^(name|quantity|created_at|updated_at)$"
+    ),
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
@@ -77,7 +85,10 @@ async def list_items(
         offset=offset,
     )
     return ItemPage(
-        items=[ItemOut.from_model(i) for i in items], total=total, limit=limit, offset=offset
+        items=[ItemOut.from_model(i) for i in items],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -86,9 +97,52 @@ async def list_locations(
     db: AsyncSession = Depends(get_db),
     _user: CurrentUser = Depends(can_read),
 ):
-    """All known room/level/shelf combinations, for filter dropdowns —
-    avoids the frontend guessing free-text values that don't exist."""
-    return [LocationOut.model_validate(loc) for loc in await crud.list_locations(db)]
+    """All known room/level/shelf combinations actually in use, for the
+    level/shelf filter dropdowns. Room itself now has its own managed list
+    — see /rooms — rather than being derived from what items happen to use."""
+    return [LocationOut.from_model(loc) for loc in await crud.list_locations(db)]
+
+
+@app.get("/rooms", response_model=list[RoomOut])
+async def list_rooms(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    return [RoomOut.model_validate(r) for r in await crud.list_rooms(db)]
+
+
+@app.post("/rooms", response_model=RoomOut, status_code=status.HTTP_201_CREATED)
+async def create_room(
+    data: RoomIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    try:
+        room = await crud.create_room(db, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return RoomOut.model_validate(room)
+
+
+@app.delete("/rooms/{room_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_room(
+    room_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    room = await crud.get_room(db, room_id)
+    if room is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Room not found"
+        )
+    try:
+        await crud.delete_room(db, room)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
 
 
 @app.post("/items", response_model=ItemOut, status_code=status.HTTP_201_CREATED)
@@ -97,7 +151,12 @@ async def create_item(
     db: AsyncSession = Depends(get_db),
     _user: CurrentUser = Depends(can_write),
 ):
-    item = await crud.create_item(db, data)
+    try:
+        item = await crud.create_item(db, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     return ItemOut.from_model(item)
 
 
@@ -123,14 +182,19 @@ async def bulk_update(
     """Apply the same location and/or quantity change to several items
     at once — e.g. reorganizing a shelf, or marking a batch as restocked.
     Name/description/aliases stay per-item and aren't editable here."""
-    updated, not_found = await crud.bulk_update_items(
-        db,
-        body.item_ids,
-        location=body.location if body.set_location else None,
-        quantity_type=body.quantity_type if body.set_quantity else None,
-        quantity=body.quantity if body.set_quantity else None,
-        quantity_note=body.quantity_note if body.set_quantity else None,
-    )
+    try:
+        updated, not_found = await crud.bulk_update_items(
+            db,
+            body.item_ids,
+            location=body.location if body.set_location else None,
+            quantity_type=body.quantity_type if body.set_quantity else None,
+            quantity=body.quantity if body.set_quantity else None,
+            quantity_note=body.quantity_note if body.set_quantity else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     return BulkResult(updated=updated, not_found=not_found)
 
 
@@ -142,7 +206,9 @@ async def get_item(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
+        )
     return ItemOut.from_model(item)
 
 
@@ -155,8 +221,15 @@ async def patch_item(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
-    item = await crud.update_item(db, item, data)
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
+        )
+    try:
+        item = await crud.update_item(db, item, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     return ItemOut.from_model(item)
 
 
@@ -168,7 +241,9 @@ async def delete_item(
 ):
     deleted, _ = await crud.bulk_delete_items(db, [item_id])
     if deleted == 0:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
+        )
 
 
 @app.post("/items/{item_id}/image", response_model=ItemOut)
@@ -180,7 +255,9 @@ async def upload_item_image(
 ):
     item = await crud.get_item(db, item_id)
     if item is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Item not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Item not found"
+        )
 
     if file.content_type not in ALLOWED_IMAGE_TYPES:
         raise HTTPException(
@@ -195,14 +272,16 @@ async def upload_item_image(
             detail=f"Image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)}MB limit",
         )
 
-    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[file.content_type]
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[
+        file.content_type
+    ]
     filename = f"{item_id}-{uuid.uuid4().hex}.{ext}"
     (IMAGE_DIR / filename).write_bytes(contents)
 
     item.image_path = filename
     db.add(item)
     await db.commit()
-    await db.refresh(item, attribute_names=["aliases", "location", "updated_at", "created_at"])
+    await crud.reload_item(db, item)
     return ItemOut.from_model(item)
 
 
@@ -214,9 +293,13 @@ async def get_item_image(
 ):
     item = await crud.get_item(db, item_id)
     if item is None or not item.image_path:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No image for this item")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No image for this item"
+        )
 
     path = IMAGE_DIR / item.image_path
     if not path.exists():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk"
+        )
     return FileResponse(path)

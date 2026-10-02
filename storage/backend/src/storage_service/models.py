@@ -1,10 +1,9 @@
 import enum
 from datetime import datetime
 
+from shared.db import Base
 from sqlalchemy import DateTime, Enum, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-
-from shared.db import Base
 
 
 class QuantityType(str, enum.Enum):
@@ -12,24 +11,41 @@ class QuantityType(str, enum.Enum):
     uncountable = "uncountable"
 
 
+class Room(Base):
+    """The managed list of valid rooms (Settings → Manage rooms). Items can
+    only be placed in a room that exists here — free-typing a new room name
+    on the item form was how the room filter dropdown ended up cluttered
+    with near-duplicate/typo'd values, so creating a room is now its own
+    explicit step."""
+
+    __tablename__ = "rooms"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+
+    locations: Mapped[list["Location"]] = relationship(back_populates="room")
+
+
 class Location(Base):
-    """A single cellar/household spot: room -> level -> shelf.
+    """A single cellar/household spot: room -> shelf -> shelf level.
 
     Kept as its own table (rather than free-text fields on Item) so the
-    filter dropdowns in the UI can list distinct known rooms/levels/shelves
-    without scanning every item.
+    filter dropdowns in the UI can list distinct known shelves/levels
+    without scanning every item. `level` is a shelf level (e.g. "top",
+    "bottom shelf"), not a building floor.
     """
 
     __tablename__ = "locations"
     __table_args__ = (
-        UniqueConstraint("room", "level", "shelf", name="uq_location_triplet"),
+        UniqueConstraint("room_id", "level", "shelf", name="uq_location_triplet"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    room: Mapped[str] = mapped_column(String(64), index=True)
+    room_id: Mapped[int] = mapped_column(ForeignKey("rooms.id"), index=True)
     level: Mapped[str | None] = mapped_column(String(64), nullable=True)
     shelf: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    room: Mapped[Room] = relationship(back_populates="locations")
     items: Mapped[list["Item"]] = relationship(back_populates="location")
 
 

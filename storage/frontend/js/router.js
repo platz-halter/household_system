@@ -2,11 +2,13 @@ import { isAuthenticated } from "./auth.js";
 import { renderLogin } from "./login.js";
 import { renderOverview } from "./overview.js";
 import { renderSettings } from "./settings.js";
+import { renderRooms } from "./rooms.js";
 
 const routes = {
   "/login": { render: renderLogin, requiresAuth: false, chrome: false },
   "/overview": { render: renderOverview, requiresAuth: true, chrome: true },
   "/settings": { render: renderSettings, requiresAuth: true, chrome: true },
+  "/rooms": { render: renderRooms, requiresAuth: true, chrome: true },
 };
 
 function currentPath() {

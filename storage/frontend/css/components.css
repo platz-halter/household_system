@@ -16,6 +16,7 @@
   color: var(--color-text);
   font-weight: 600;
   font-size: var(--font-size-sm);
+  text-decoration: none; /* .btn is also used on <a> (e.g. Settings -> Manage rooms) */
   cursor: pointer;
   transition: background-color var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast);
   -webkit-tap-highlight-color: transparent;
@@ -214,6 +215,10 @@
 .item-card.selected {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent) inset;
+}
+
+.item-card.selected .item-thumb {
+  opacity: 0.6;
 }
 
 .selection-badge {
@@ -517,71 +522,6 @@
   0% { background-position: 100% 50%; }
   100% { background-position: 0 50%; }
 }
-
-/* --- Selection mode (bulk edit/delete) --- */
-
-.item-card {
-  position: relative;
-}
-
-.select-badge {
-  position: absolute;
-  top: 8px;
-  left: 8px;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-full);
-  background: var(--color-bg);
-  border: 2px solid var(--color-border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1;
-}
-
-.select-badge .icon {
-  width: 14px;
-  height: 14px;
-  stroke-width: 3;
-  opacity: 0;
-}
-
-.item-card.selected .select-badge {
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-}
-
-.item-card.selected .select-badge .icon {
-  opacity: 1;
-  stroke: var(--color-accent-contrast);
-}
-
-.item-card.selected .item-thumb {
-  opacity: 0.6;
-}
-
-.bulk-bar {
-  position: fixed;
-  left: 0;
-  right: 0;
-  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-3) var(--space-4);
-  background: var(--color-surface-raised);
-  border-top: 1px solid var(--color-border);
-  box-shadow: var(--shadow-md);
-  z-index: 45;
-}
-
-.bulk-bar .count-label {
-  font-weight: 600;
-  font-size: var(--font-size-sm);
-  margin-right: auto;
-}
-
-
 
 .settings-section {
   margin-bottom: var(--space-6);

@@ -23,7 +23,9 @@ const state = {
 };
 
 let locationsCache = null;
+let roomsCache = null;
 let debounceTimer = null;
+let currentItems = [];
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -91,8 +93,11 @@ export async function renderOverview(container) {
               <select class="select" id="filter-room"><option value="">Any</option></select>
             </div>
             <div class="field">
-              <label for="filter-level">Level</label>
-              <select class="select" id="filter-level"><option value="">Any</option></select>
+              <label>Quantity</label>
+              <div class="row">
+                <input class="input" type="number" min="0" id="filter-min-qty" placeholder="Min" value="${escapeAttr(state.minQuantity)}" />
+                <input class="input" type="number" min="0" id="filter-max-qty" placeholder="Max" value="${escapeAttr(state.maxQuantity)}" />
+              </div>
             </div>
           </div>
           <div class="field-row">
@@ -101,11 +106,8 @@ export async function renderOverview(container) {
               <select class="select" id="filter-shelf"><option value="">Any</option></select>
             </div>
             <div class="field">
-              <label>Quantity</label>
-              <div class="row">
-                <input class="input" type="number" min="0" id="filter-min-qty" placeholder="Min" value="${escapeAttr(state.minQuantity)}" />
-                <input class="input" type="number" min="0" id="filter-max-qty" placeholder="Max" value="${escapeAttr(state.maxQuantity)}" />
-              </div>
+              <label for="filter-level">Shelf level</label>
+              <input class="input" type="number" id="filter-level" placeholder="Any" value="${escapeAttr(state.level)}" />
             </div>
           </div>
           <button class="btn" id="filter-clear">Clear filters</button>
@@ -144,7 +146,7 @@ export async function renderOverview(container) {
   });
 
   const roomSelect = container.querySelector("#filter-room");
-  const levelSelect = container.querySelector("#filter-level");
+  const levelInput = container.querySelector("#filter-level");
   const shelfSelect = container.querySelector("#filter-shelf");
 
   async function loadLocations() {
@@ -155,17 +157,26 @@ export async function renderOverview(container) {
         locationsCache = [];
       }
     }
+    // Always fresh (not cached-once like locations above) — rooms can be
+    // added/removed on the Rooms management page, and this page shouldn't
+    // keep showing a stale list after a visit there.
+    try {
+      roomsCache = await api.get(`${CONFIG.STORAGE_BASE}/rooms`);
+    } catch {
+      roomsCache = roomsCache || [];
+    }
     populateLocationFilters();
   }
 
   function populateLocationFilters() {
-    const rooms = [...new Set(locationsCache.map((l) => l.room))].sort();
+    // Room comes from the managed list (Settings → Manage rooms), not
+    // from whatever rooms items happen to already use — so a freshly
+    // added, not-yet-used room still shows up as a filter option.
+    const rooms = roomsCache.map((r) => r.name).sort();
     const relevant = locationsCache.filter((l) => !state.room || l.room === state.room);
-    const levels = [...new Set(relevant.map((l) => l.level).filter(Boolean))].sort();
     const shelves = [...new Set(relevant.map((l) => l.shelf).filter(Boolean))].sort();
 
     fillSelect(roomSelect, rooms, state.room);
-    fillSelect(levelSelect, levels, state.level);
     fillSelect(shelfSelect, shelves, state.shelf);
   }
 
@@ -179,15 +190,19 @@ export async function renderOverview(container) {
     state.room = e.target.value;
     state.level = "";
     state.shelf = "";
+    levelInput.value = "";
     state.offset = 0;
     populateLocationFilters();
     refreshItems(container, selection);
   });
-  levelSelect.addEventListener("change", (e) => {
-    state.level = e.target.value;
-    state.offset = 0;
-    refreshItems(container, selection);
-  });
+  levelInput.addEventListener(
+    "input",
+    debounce((e) => {
+      state.level = e.target.value;
+      state.offset = 0;
+      refreshItems(container, selection);
+    }, 300)
+  );
   shelfSelect.addEventListener("change", (e) => {
     state.shelf = e.target.value;
     state.offset = 0;
@@ -221,6 +236,7 @@ export async function renderOverview(container) {
     state.maxQuantity = "";
     minQtyInput.value = "";
     maxQtyInput.value = "";
+    levelInput.value = "";
     state.offset = 0;
     populateLocationFilters();
     refreshItems(container, selection);
@@ -240,7 +256,7 @@ export async function renderOverview(container) {
       selection.ids.clear();
       selectToggle.classList.toggle("btn-primary", selection.mode);
       fab.classList.toggle("hidden", selection.mode);
-      refreshItems(container, selection);
+      renderGrid(container, selection);
     });
   } else {
     fab.classList.add("hidden"); // viewers can't create items
@@ -253,7 +269,6 @@ export async function renderOverview(container) {
 
 async function refreshItems(container, selection) {
   const grid = container.querySelector("#item-grid");
-  const paginationRoot = container.querySelector("#pagination-root");
   if (!grid) return; // navigated away before this resolved
 
   grid.innerHTML = Array.from({ length: 6 })
@@ -269,12 +284,25 @@ async function refreshItems(container, selection) {
   }
 
   state.total = page.total;
+  currentItems = page.items;
+  renderGrid(container, selection);
+}
 
-  if (page.items.length === 0) {
+// Rebuilds the grid/pagination/bulk-bar from the already-fetched
+// currentItems cache, with no network call and no skeleton flash. Used
+// whenever only the selection UI changes (entering/exiting/cancelling
+// bulk-select) — the set of items on screen hasn't changed, just how
+// each card is drawn.
+function renderGrid(container, selection) {
+  const grid = container.querySelector("#item-grid");
+  const paginationRoot = container.querySelector("#pagination-root");
+  if (!grid) return;
+
+  if (currentItems.length === 0) {
     grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${icons.box}<p style="margin-top: var(--space-2);">No items found</p></div>`;
   } else {
     grid.innerHTML = "";
-    page.items.forEach((item) => grid.appendChild(renderItemCard(item, container, selection)));
+    currentItems.forEach((item) => grid.appendChild(renderItemCard(item, container, selection)));
   }
 
   renderPagination(paginationRoot, container, selection);
@@ -329,17 +357,34 @@ function renderItemCard(item, container, selection) {
 
   card.addEventListener("click", () => {
     if (inSelectionMode) {
-      if (selection.ids.has(item.id)) {
-        selection.ids.delete(item.id);
-      } else {
-        selection.ids.add(item.id);
-      }
-      refreshItems(container, selection);
+      toggleCardSelection(container, selection, item.id, card);
     } else {
       openItemModal(item, container);
     }
   });
   return card;
+}
+
+// Selecting a card used to call refreshItems() — a full re-fetch plus a
+// from-scratch rebuild of every card (skeleton flash, thumbnails resetting
+// to the placeholder icon and reloading) on every single tap. Toggling
+// selection doesn't change what items exist, so it only needs to update
+// the tapped card's own classes/badge and the bulk bar's count.
+function toggleCardSelection(container, selection, itemId, card) {
+  const nowSelected = !selection.ids.has(itemId);
+  if (nowSelected) {
+    selection.ids.add(itemId);
+  } else {
+    selection.ids.delete(itemId);
+  }
+
+  card.classList.toggle("selected", nowSelected);
+  const badge = card.querySelector(".selection-badge");
+  if (badge) {
+    badge.classList.toggle("selection-badge-checked", nowSelected);
+    badge.innerHTML = nowSelected ? icons.check : "";
+  }
+  renderBulkBar(container, selection);
 }
 
 function selectionBadge(isSelected) {
@@ -373,7 +418,7 @@ function renderBulkBar(container, selection) {
     selection.ids.clear();
     container.querySelector("#select-toggle").classList.remove("btn-primary");
     container.querySelector("#add-item-fab").classList.remove("hidden");
-    refreshItems(container, selection);
+    renderGrid(container, selection);
   });
 
   root.querySelector("#bulk-edit-btn").addEventListener("click", () => {
@@ -651,19 +696,28 @@ function itemFormHtml(item = {}) {
         <label for="f-qty-note">Amount note</label>
         <input class="input" id="f-qty-note" placeholder="e.g. half bag" value="${escapeAttr(item.quantity_note || "")}" />
       </div>
+      <div class="field">
+        <label for="f-room">Room</label>
+        <select class="select" id="f-room">
+          <option value="">No room set</option>
+          ${(roomsCache || [])
+            .map(
+              (r) =>
+                `<option value="${escapeAttr(r.name)}" ${loc.room === r.name ? "selected" : ""}>${escapeHtml(r.name)}</option>`
+            )
+            .join("")}
+        </select>
+        ${(roomsCache || []).length === 0 ? `<span class="muted" style="font-size: var(--font-size-xs);">No rooms yet — add one in Settings → Manage rooms.</span>` : ""}
+      </div>
       <div class="field-row">
         <div class="field">
-          <label for="f-room">Room</label>
-          <input class="input" id="f-room" value="${escapeAttr(loc.room || "")}" />
+          <label for="f-shelf">Shelf</label>
+          <input class="input" id="f-shelf" value="${escapeAttr(loc.shelf || "")}" />
         </div>
         <div class="field">
-          <label for="f-level">Level</label>
+          <label for="f-level">Shelf level</label>
           <input class="input" id="f-level" value="${escapeAttr(loc.level || "")}" />
         </div>
-      </div>
-      <div class="field">
-        <label for="f-shelf">Shelf</label>
-        <input class="input" id="f-shelf" value="${escapeAttr(loc.shelf || "")}" />
       </div>
       <div class="field">
         <label for="f-image">Photo</label>

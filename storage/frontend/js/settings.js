@@ -24,6 +24,11 @@ export function renderSettings(container) {
       </div>
 
       <div class="settings-section">
+        <h3>Storage</h3>
+        <a href="#/rooms" class="btn btn-block">${icons.box}<span>Manage rooms</span></a>
+      </div>
+
+      <div class="settings-section">
         <h3>Theme</h3>
         <div id="theme-options"></div>
       </div>

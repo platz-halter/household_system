@@ -5,15 +5,37 @@ from pydantic import BaseModel, Field, model_validator
 from storage_service.models import QuantityType
 
 
+class RoomIn(BaseModel):
+    name: str = Field(min_length=1, max_length=64)
+
+
+class RoomOut(RoomIn):
+    id: int
+    model_config = {"from_attributes": True}
+
+
 class LocationIn(BaseModel):
-    room: str = Field(min_length=1, max_length=64)
+    room: str = Field(min_length=1, max_length=64)  # an existing Room's name
     level: str | None = None
     shelf: str | None = None
 
 
-class LocationOut(LocationIn):
+class LocationOut(BaseModel):
     id: int
+    room: str
+    level: str | None
+    shelf: str | None
+
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, location) -> "LocationOut":
+        return cls(
+            id=location.id,
+            room=location.room.name,
+            level=location.level,
+            shelf=location.shelf,
+        )
 
 
 class ItemCreate(BaseModel):
@@ -32,7 +54,9 @@ class ItemCreate(BaseModel):
         if self.quantity_type == QuantityType.countable and self.quantity is None:
             raise ValueError("quantity is required when quantity_type is 'countable'")
         if self.quantity_type == QuantityType.uncountable and self.quantity is not None:
-            raise ValueError("quantity must be omitted when quantity_type is 'uncountable' — use quantity_note instead")
+            raise ValueError(
+                "quantity must be omitted when quantity_type is 'uncountable' — use quantity_note instead"
+            )
         return self
 
 
@@ -73,7 +97,7 @@ class ItemOut(BaseModel):
             quantity_type=item.quantity_type,
             quantity=item.quantity,
             quantity_note=item.quantity_note,
-            location=LocationOut.model_validate(item.location) if item.location else None,
+            location=LocationOut.from_model(item.location) if item.location else None,
             image_path=item.image_path,
             created_at=item.created_at,
             updated_at=item.updated_at,
@@ -117,7 +141,9 @@ class BulkUpdateRequest(BaseModel):
             if self.quantity_type is None:
                 raise ValueError("quantity_type is required when set_quantity is true")
             if self.quantity_type == QuantityType.countable and self.quantity is None:
-                raise ValueError("quantity is required when set_quantity is true and quantity_type is 'countable'")
+                raise ValueError(
+                    "quantity is required when set_quantity is true and quantity_type is 'countable'"
+                )
         return self
 
 
