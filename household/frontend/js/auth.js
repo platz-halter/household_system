@@ -127,6 +127,24 @@ export async function login(username, password) {
 
 // --- Authentik OIDC (Authorization Code + PKCE, public SPA client) --
 
+// Authentik being unreachable (down, DNS/network issue) must not hang
+// forever — plain fetch() has no built-in timeout, and an unresolved
+// await here blocks boot()'s startRouter() call, which looks like the
+// app is stuck in an infinite loading loop with no way out but a hard
+// refresh. Aborting after a few seconds lets the existing try/catch
+// paths below treat it as an ordinary failure instead.
+const AUTHENTIK_FETCH_TIMEOUT_MS = 8000;
+
+async function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTHENTIK_FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function base64UrlEncode(bytes) {
   let str = "";
   for (const b of bytes) str += String.fromCharCode(b);
@@ -199,7 +217,7 @@ export async function handleAuthentikCallback() {
       client_id: CONFIG.AUTHENTIK_CLIENT_ID,
       code_verifier: verifier,
     });
-    const resp = await fetch(CONFIG.AUTHENTIK_TOKEN_URL, {
+    const resp = await fetchWithTimeout(CONFIG.AUTHENTIK_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -235,7 +253,7 @@ export async function tryRefreshAuthentikToken() {
       refresh_token: refreshToken,
       client_id: CONFIG.AUTHENTIK_CLIENT_ID,
     });
-    const resp = await fetch(CONFIG.AUTHENTIK_TOKEN_URL, {
+    const resp = await fetchWithTimeout(CONFIG.AUTHENTIK_TOKEN_URL, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,

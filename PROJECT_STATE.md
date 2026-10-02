@@ -142,6 +142,17 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   Web Crypto), "Log in with Authentik" as the primary action with a
   collapsible local-account form as fallback, silent refresh-token
   exchange on 401, Authentik end-session logout with `id_token_hint`.
+- 🐛 Fixed a real hang: the code-exchange (`handleAuthentikCallback`) and
+  silent-refresh (`tryRefreshAuthentikToken`) fetches to
+  `AUTHENTIK_TOKEN_URL` had no timeout, so if Authentik was unreachable
+  (down, DNS/network issue) the `await` just hung forever — in
+  `handleAuthentikCallback`'s case, blocking `main.js`'s `boot()` before
+  `startRouter()` ever runs, which looks like the whole app is stuck in
+  an infinite loading loop with no recovery but a hard refresh. Both now
+  go through a shared `fetchWithTimeout()` (`auth.js`, 8s, `AbortController`)
+  so an unreachable Authentik is treated as an ordinary failed
+  login/refresh instead — same file in both `storage/frontend` and
+  `household/frontend` (kept byte-identical; see their own note above).
 - ✅ `getCurrentUserInfo()` helper resolves role/subject/source for both
   local and Authentik tokens — fixes an earlier bug where
   `canWrite()`/Settings read `decodeToken().role`, which is `undefined`
@@ -251,7 +262,13 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   goal progress, today's scheduled chores with one-tap complete, full
   task list with search/select-to-bulk-complete next to it, category
   filters), **Board** (the todo board — post/complete/cancel one-off
-  requests, optionally directed at someone), **Stats** (leaderboard by
+  requests, optionally directed at someone; the "New todo" modal has a
+  "From task" picker at the top so posting an existing recurring task as
+  a one-off board request doesn't mean retyping its title/description/
+  points by hand — picking one prefills those three fields, still
+  editable, and still creates a plain `TodoItem` with no link back to
+  the `Task` row, matching the board's "one-off, decoupled from the
+  recurring schedule" design), **Stats** (leaderboard by
   all-time/this-week/**last week** (a closed, final range)/month, with
   the EUR-equivalent shown next to each total when an admin has set a
   rate; a GitHub-style activity heatmap — weekday labels fixed outside
