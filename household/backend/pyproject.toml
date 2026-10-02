@@ -12,6 +12,7 @@ dependencies = [
     "reportlab>=4.2",
     "pywebpush>=2.0",
     "apscheduler>=3.10",
+    "python-multipart>=0.0.12",
 ]
 
 [tool.uv.sources]

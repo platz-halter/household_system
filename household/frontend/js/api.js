@@ -72,6 +72,42 @@ export const api = {
   patch: (url, body) => request(url, { method: "PATCH", body: JSON.stringify(body) }),
   put: (url, body) => request(url, { method: "PUT", body: JSON.stringify(body) }),
   del: (url) => request(url, { method: "DELETE" }),
+  postForm: (url, formData) => request(url, { method: "POST", body: formData }),
 };
+
+/**
+ * <img src="..."> can't send an Authorization header, and photo endpoints
+ * require one (same role-gating as everything else) — so we fetch the
+ * image ourselves with auth and hand back a blob: object URL for the
+ * <img> to point at instead. Returns null on failure (no photo set, 403,
+ * etc.) rather than throwing/toasting — an avatar quietly falling back to
+ * initials is better UX than an error toast every time one renders.
+ */
+const objectUrlCache = new Map(); // api url -> blob: url, avoids re-fetching the same image repeatedly
+
+export async function fetchImageUrl(url) {
+  if (objectUrlCache.has(url)) return objectUrlCache.get(url);
+  try {
+    const blob = await request(url, { silent: true });
+    const objectUrl = URL.createObjectURL(blob);
+    objectUrlCache.set(url, objectUrl);
+    return objectUrl;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Call after uploading a new photo — the API URL doesn't change on
+ * re-upload, so without this the cache would keep serving the previous
+ * photo's blob.
+ */
+export function invalidateImageUrl(url) {
+  const cached = objectUrlCache.get(url);
+  if (cached) {
+    URL.revokeObjectURL(cached);
+    objectUrlCache.delete(url);
+  }
+}
 
 export { ApiError };

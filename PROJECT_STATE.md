@@ -50,18 +50,44 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 - ✅ Item model: name, description, aliases (many, diffed on update
   rather than replace-all — fixes a prior unique-constraint violation
   bug), quantity (countable int or free-text uncountable note),
-  location (room/level/shelf), one photo.
+  location (room/shelf/shelf-level), one photo.
 - ✅ Search (name/description/aliases), filter (room/level/shelf,
-  quantity range), sort (name/quantity/recency), pagination.
+  quantity range), sort (name/quantity/recency), pagination — verified
+  end-to-end against 46 real seeded items (20/20/6 across 3 pages, no
+  duplicates/gaps, correct prev/next disabled states at both ends,
+  negative-offset/over-200-limit query params correctly rejected as 422).
 - ✅ Bulk delete and bulk edit (location and/or quantity across a
   selected batch).
-- ✅ `/locations` endpoint for filter UI.
+- ✅ **Rooms are now a managed entity**, not free-typed: a new `Room`
+  table (`rooms`) is the single source of truth; `Location.room_id` is a
+  hard FK to it (migration backfills `rooms` from every distinct
+  pre-existing `locations.room` value, then converts the column to the
+  FK — verified all 3 of the pre-existing test rooms preserved). `level`
+  is now documented/treated as a shelf level, not a building floor.
+  `GET/POST /rooms`, `DELETE /rooms/{id}` (blocked with 409 while any
+  *item* — not just a leftover unused Location row — still sits in that
+  room; deleting an unused room also sweeps its now-orphaned Location
+  rows, since they'd otherwise block the delete on a dangling FK).
+  Creating/editing an item with an unknown room name now 400s instead of
+  silently creating it.
+- ✅ `/locations` endpoint for level/shelf filter dropdowns (still
+  derived from locations actually in use); room dropdowns (filter panel
+  + item form) now come from `/rooms` instead.
 - ✅ Authenticated image upload/serving.
 - ✅ CORS via `cors_origin_list()`.
 - ✅ Alembic migrations, baseline revision written as idempotent
   "create if not exists" so a pre-Alembic (`create_all`-created)
   database adopts cleanly without data loss.
 - ✅ Role-gated writes: viewers read-only; users/admins full access.
+- 🐛 Fixed: `create_item`/`update_item`/the image-upload route only
+  refreshed `item.location` after a write, not the nested
+  `item.location.room` — reading `location.room.name` during response
+  serialization (now needed since the Room migration) then triggered an
+  async-incompatible lazy load and crashed with `MissingGreenlet`.
+  Consolidated into one `crud.reload_item()` used by all three call
+  sites; a stray commit-then-crash from this (the commit succeeds before
+  the serialization step did) left one orphaned test item behind, since
+  cleaned up.
 
 ## Storage service — frontend
 
@@ -73,6 +99,38 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 - ✅ Overview page: paginated item grid, search, filter, sort, image
   "maximize" viewer, add-item flow with bulk-add ("save and add
   another"), multi-select mode for bulk edit/delete.
+- 🐛 Fixed a real glitch testers hit: selecting an item in bulk-select
+  mode called `refreshItems()` — a full re-fetch from the server plus a
+  from-scratch rebuild of every card (skeleton flash, every thumbnail
+  resetting to the placeholder icon and reloading) — on every single
+  tap. Selecting a card now only toggles that one card's class/badge in
+  place and re-renders the bulk bar; no fetch, no rebuild. Verified via
+  a fetch-call counter in tests: 0 network calls on select/deselect.
+  Also removed a duplicate, dead/conflicting second copy of the
+  `.item-card`/`.bulk-bar`/`.select-badge` CSS block (the live JS never
+  used `.select-badge`; the duplicate `.bulk-bar` silently overrode the
+  floating-rounded positioning with a conflicting edge-to-edge one).
+- 🐛 Same glitch also hit entering/exiting bulk-select mode itself (the
+  checklist toggle button and "cancel selection") — both still called
+  `refreshItems()`. Fixed by caching the last-fetched page's items and
+  splitting `refreshItems()` (fetch + render) from a new `renderGrid()`
+  (render only, from the cache); the toggle and cancel buttons now call
+  `renderGrid()`, so switching selection mode makes no network call and
+  shows no skeleton flash.
+- ✅ Filter panel "Shelf level" is now a number input instead of a
+  dropdown (native numeric keypad on mobile, consistent with the
+  quantity min/max fields) instead of a `<select>` built from distinct
+  known level values.
+- ✅ Filter panel field order: room+quantity, then shelf+"shelf level"
+  (previously room+level, then shelf+quantity) — level now visually
+  groups with shelf, matching its "shelf level, not building floor"
+  meaning. Add/edit item dialog: room is now a `<select>` sourced from
+  the managed rooms list (see backend) instead of free text, and the
+  shelf field now comes before the (renamed) "Shelf level" field.
+- ✅ New Rooms page (`#/rooms`, linked from Settings → Storage →
+  "Manage rooms"): add a room, or delete one (blocked with a toast if
+  it's still in use) — the only way rooms get created now; the item
+  form's room dropdown won't let you free-type a new one.
 - ✅ Settings page: theme selection, signed-in user info (subject, role,
   source), logout.
 - ✅ Styled confirm-dialog modal (`confirmDialog.js`) replacing native
@@ -122,10 +180,16 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   `task_name`/`todo_title` so the recent-activity feed can show a
   readable label instead of just an id (falls back to null if the
   source was since deleted).
-- ✅ Points→EUR conversion: `HouseholdSettings.points_to_eur_rate`
-  (nullable float, admin-only to set via `PUT /settings`), returned by
-  `GET /settings` for display anywhere points are shown. Display/
-  reference only, as specced — no payout process is connected.
+- ✅ Points→money conversion: `HouseholdSettings.points_to_money_rate`
+  (nullable float) + `currency` (ISO 4217 code, e.g. "EUR"/"USD",
+  defaults to "EUR" — renamed from the original EUR-only
+  `points_to_eur_rate` once currency became selectable), both
+  admin-only to set via `PUT /settings`, returned by `GET /settings`
+  for display anywhere points are shown. Frontend formats amounts with
+  `Intl`/`toLocaleString({style:"currency", currency})`, which handles
+  any valid code's symbol automatically — no manual symbol map needed
+  client-side. Display/reference only, as specced — no payout process
+  is connected.
 - ✅ PDF reports: new `Report` table + `household_service/reports.py`
   (reportlab, pure-Python — no extra system packages in the container
   image) generates a by-week/by-month points table (plus an EUR column
@@ -136,25 +200,39 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   Historical reports intentionally include a user's totals regardless
   of their *current* break status (`crud.leaderboard_for_period` —
   break mode affects the live leaderboard, not history).
+  Designed rather than bare: letterhead header, summary stat callouts
+  (total points/participants/top performer/**money per point**/total
+  value — the rate itself is shown, not just the totals it produces), a
+  styled leaderboard table with a per-row proportional share bar, a
+  per-user converted-amount column, and a green highlight on #1, and a
+  page-numbered footer — all in the app's black-and-white palette plus
+  the one semantic accent (success green). Reportlab has no `Intl`, so
+  the PDF renders money as `amount CURRENCY` (e.g. "35.40 USD") rather
+  than a locale-specific symbol — unambiguous and font-safe regardless
+  of which of the Admin panel's currencies is selected.
 - ✅ Web Push: `PushSubscription` table, VAPID keys in `.env`
   (`household/backend/scripts/generate_vapid_keys.py` generates a
   pair), `household_service/push.py` wraps `pywebpush` (runs the
   blocking send in a thread) and prunes subscriptions the push service
   reports as gone (404/410). Routes: `GET /push/vapid-public-key`,
   `POST /push/subscribe` / `/push/unsubscribe` (self), `POST
-  /push/nudge` (admin-only — see below for why this is a button, not a
-  schedule). Creating a todo with `assigned_to_id` set now pushes that
-  person immediately (`crud.notify_todo_assigned`).
-  - 🟡 **Weekly reminders are admin-triggered, not automatic.** The spec
-    describes pushes "nudging users to log points during the week",
-    which reads as a schedule — I deliberately built an admin button
-    (`POST /push/nudge`: pushes everyone below the weekly goal, or
-    everyone if no goal is set) instead of an automatic weekly cron/
-    background task, to avoid the real failure modes that come with
-    in-process scheduling in a single container (silent misses across
-    restarts, idempotency bookkeeping, timezone assumptions) without a
-    scheduling dependency. If true automatic scheduling is wanted,
-    that's a deliberate follow-up, not an oversight.
+  /push/nudge` (admin-only manual "send now"). Creating a todo with
+  `assigned_to_id` set now pushes that person immediately
+  (`crud.notify_todo_assigned`).
+- ✅ **Real scheduling**, via `household_service/scheduler.py`
+  (APScheduler's `AsyncIOScheduler`, wired into FastAPI's lifespan in
+  `main.py` — started/shut down alongside the app). Built as the
+  general-purpose piece future time-based features should register a
+  job with, not a one-off for the nudge. The weekly reminder is now a
+  real automatic schedule, superseding the earlier manual-only design
+  (see git history if curious): an hourly tick
+  (`crud.run_scheduled_nudge_if_due`) checks `HouseholdSettings.
+  nudge_weekday`/`nudge_hour` (admin-configurable in the Admin panel,
+  off by default) against the current time, and `last_nudge_sent_week`
+  for idempotency (so a restart mid-hour, or the manual button firing
+  in the same week, can't double-send). Job *definitions* are
+  re-registered from code on every startup (in-memory jobstore); only
+  the *effect* that must not double-fire is persisted, in the database.
 - ⬜ Still not built: the auto-balancing assignment tool, and
   profile-picture upload for household users (storage's item-image
   pattern would carry over directly).
@@ -183,10 +261,13 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   schedule, ramp-up bonus config), **Settings** (break-mode toggle, a
   push-notification toggle, read-only weekly goal, theme, account,
   logout — reached via a topbar icon now, not the bottom nav),
-  **Admin** (`#/admin`, admin-only: editable weekly points goal, EUR
-  conversion rate, a "send weekly reminder now" button, and generate/
-  list/download PDF reports; the natural home for the balancing-tool UI
-  once that's built).
+  **Admin** (`#/admin`, admin-only: editable weekly points goal, a
+  currency picker (EUR/USD/GBP/CHF/SEK/NOK/DKK/PLN/CZK/JPY/CAD/AUD) +
+  conversion rate, a "send weekly reminder now" button plus an optional
+  automatic weekly-reminder schedule (weekday + UTC hour, off by
+  default) with a "last sent" readout, and generate/list/download PDF
+  reports; the natural home for the balancing-tool UI once that's
+  built).
 - ✅ Role gating mirrors storage's UX-only client-side pattern: viewers
   get every page read-only (no FABs, no select/complete/edit controls);
   the backend independently enforces the same rule. The weekly points
@@ -290,11 +371,11 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 
 1. Household backend follow-ups still not built: the auto-balancing
    assignment tool, and profile-picture upload. (PDF reports, EUR
-   conversion, and Web Push all shipped this round — see above.)
-2. Weekly Web Push reminders are admin-triggered (a button), not an
-   automatic schedule — a deliberate simplification, not an oversight
-   (see "Web Push" above for why). Worth a real decision later if
-   automatic nudging turns out to matter.
+   conversion, Web Push, and real scheduling all shipped this round —
+   see above.)
+2. The scheduler (`household_service/scheduler.py`) currently has one
+   tenant (the weekly nudge). It's built generically on purpose — reach
+   for it before hand-rolling another background loop.
 3. Household frontend was built but only functionally tested (jsdom +
    real HTTP calls, no real browser available in that session) — worth
    an actual visual pass in a browser, especially the activity heatmap,

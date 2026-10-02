@@ -65,9 +65,13 @@ Tracks physical items (cellar, pantry, etc.).
 
 - **Item fields**: name, description, multiple aliases, quantity
   (countable with an integer, or uncountable with a free-text note like
-  "half bag"), location (room / level / shelf), one photo.
+  "half bag"), location (room / shelf / shelf level — "level" is a
+  shelf's level, e.g. top/middle/bottom, not a building floor), one
+  photo. Rooms are a managed list (add/delete on their own page), not
+  free-typed per item, so the room filter/picker doesn't accumulate
+  near-duplicate or typo'd values the way a free-text field would.
 - **Search**: free text across name, description, and aliases.
-- **Filter**: by room/level/shelf and by quantity range.
+- **Filter**: by room/shelf/level and by quantity range.
 - **Sort**: by name, quantity, or recency.
 - **Pagination**.
 - **Bulk operations**: bulk delete, and bulk edit (location and/or

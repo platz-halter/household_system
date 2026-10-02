@@ -67,6 +67,7 @@ services:
     profiles: ["household"]
     volumes:
       - household-reports:/app/data/reports
+      - household-avatars:/app/data/avatars
     ports:
       - "127.0.0.1:8002:8000"
 
@@ -127,3 +128,4 @@ volumes:
   postgres-data:
   storage-images:
   household-reports:
+  household-avatars:

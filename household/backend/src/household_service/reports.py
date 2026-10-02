@@ -109,9 +109,9 @@ def _styles():
             "statValue",
             parent=base["Normal"],
             fontName="Helvetica-Bold",
-            fontSize=20,
+            fontSize=16,
             textColor=INK,
-            leading=22,
+            leading=18,
         ),
         "stat_label": ParagraphStyle(
             "statLabel",
@@ -169,7 +169,9 @@ def _stat_cell(value: str, label: str, styles) -> list:
     ]
 
 
-def _summary_row(rows: list[tuple[str, int]], eur_rate: float | None, styles):
+def _summary_row(
+    rows: list[tuple[str, int]], rate: float | None, currency: str, styles
+):
     total_points = sum(points for _, points in rows)
     participants = len(rows)
     top_name = rows[0][0] if rows else "—"
@@ -179,9 +181,10 @@ def _summary_row(rows: list[tuple[str, int]], eur_rate: float | None, styles):
         _stat_cell(str(participants), "Participants", styles),
         _stat_cell(top_name, "Top performer", styles),
     ]
-    if eur_rate:
+    if rate:
+        cells.append(_stat_cell(f"{rate:.2f} {currency}", "Money per point", styles))
         cells.append(
-            _stat_cell(f"{total_points * eur_rate:.2f} €", "Total value", styles)
+            _stat_cell(f"{total_points * rate:.2f} {currency}", "Total value", styles)
         )
 
     table = Table([cells], colWidths=[None] * len(cells))
@@ -202,25 +205,27 @@ def _summary_row(rows: list[tuple[str, int]], eur_rate: float | None, styles):
     return table
 
 
-def _leaderboard_table(rows: list[tuple[str, int]], eur_rate: float | None, styles):
+def _leaderboard_table(
+    rows: list[tuple[str, int]], rate: float | None, currency: str, styles
+):
     max_points = max((points for _, points in rows), default=0)
 
     header = ["#", "User", "Points"]
-    if eur_rate:
-        header.append("≈ EUR")
+    if rate:
+        header.append(f"≈ {currency}")
     header.append("Share")
 
     data = [header]
     for i, (name, points) in enumerate(rows, start=1):
         row = [str(i), name, str(points)]
-        if eur_rate:
-            row.append(f"{points * eur_rate:.2f} €")
+        if rate:
+            row.append(f"{points * rate:.2f} {currency}")
         row.append(_ShareBar(points / max_points if max_points else 0))
         data.append(row)
 
     col_widths = [10 * mm, None, 22 * mm]
-    if eur_rate:
-        col_widths.append(24 * mm)
+    if rate:
+        col_widths.append(26 * mm)
     col_widths.append(38 * mm)
 
     table = Table(data, colWidths=col_widths, hAlign="LEFT", repeatRows=1)
@@ -276,7 +281,8 @@ def generate_report_pdf(
     period_start: date,
     period_end: date,
     rows: list[tuple[str, int]],
-    eur_rate: float | None,
+    rate: float | None,
+    currency: str = "EUR",
     generated_by: str = "an admin",
     generated_at: datetime | None = None,
 ) -> str:
@@ -305,9 +311,9 @@ def generate_report_pdf(
             Paragraph("No points were logged in this period.", styles["empty"])
         )
     else:
-        story.append(_summary_row(rows, eur_rate, styles))
+        story.append(_summary_row(rows, rate, currency, styles))
         story.append(Spacer(1, 8 * mm))
-        story.append(_leaderboard_table(rows, eur_rate, styles))
+        story.append(_leaderboard_table(rows, rate, currency, styles))
 
     footer = _footer(generated_by)
     doc.build(story, onFirstPage=footer, onLaterPages=footer)

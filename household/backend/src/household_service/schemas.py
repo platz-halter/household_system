@@ -11,6 +11,7 @@ class HouseholdUserBrief(BaseModel):
     id: int
     subject: str
     display_name: str
+    image_path: str | None
     model_config = {"from_attributes": True}
 
 
@@ -217,7 +218,8 @@ class TodoOut(BaseModel):
 
 class HouseholdSettingsOut(BaseModel):
     weekly_points_goal: int | None
-    points_to_eur_rate: float | None
+    points_to_money_rate: float | None
+    currency: str
     nudge_weekday: int | None
     nudge_hour: int
     last_nudge_sent_week: str | None
@@ -226,9 +228,15 @@ class HouseholdSettingsOut(BaseModel):
 
 class HouseholdSettingsUpdate(BaseModel):
     weekly_points_goal: int | None = Field(default=None, ge=0)
-    points_to_eur_rate: float | None = Field(default=None, ge=0)
+    points_to_money_rate: float | None = Field(default=None, ge=0)
+    currency: str = Field(default="EUR", min_length=3, max_length=3)
     nudge_weekday: int | None = Field(default=None, ge=0, le=6)
     nudge_hour: int = Field(default=18, ge=0, le=23)
+
+    @field_validator("currency")
+    @classmethod
+    def _normalize_currency(cls, v: str) -> str:
+        return v.strip().upper()
 
 
 # ---- Reports -------------------------------------------------------------
@@ -277,4 +285,9 @@ class PushUnsubscribeIn(BaseModel):
 
 class NudgeResult(BaseModel):
     notified: int
+    skipped_already_met_goal: int
     skipped_no_subscription: int
+
+
+class TestPushResult(BaseModel):
+    sent: int

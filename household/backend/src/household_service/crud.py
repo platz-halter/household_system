@@ -73,6 +73,22 @@ async def update_household_user(
     return user
 
 
+async def set_user_image(
+    db: AsyncSession, user: HouseholdUser, filename: str
+) -> HouseholdUser:
+    user.image_path = filename
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def clear_user_image(db: AsyncSession, user: HouseholdUser) -> HouseholdUser:
+    user.image_path = None
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
 # ---- Categories -------------------------------------------------------
 
 
@@ -458,7 +474,8 @@ async def update_settings(
 ) -> HouseholdSettings:
     settings = await get_settings_row(db)
     settings.weekly_points_goal = data.weekly_points_goal
-    settings.points_to_eur_rate = data.points_to_eur_rate
+    settings.points_to_money_rate = data.points_to_money_rate
+    settings.currency = data.currency
     settings.nudge_weekday = data.nudge_weekday
     settings.nudge_hour = data.nudge_hour
     await db.commit()
@@ -531,19 +548,23 @@ async def notify_todo_assigned(
     )
 
 
-async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int]:
+async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int, int]:
     """Pushes every non-break user who's below the weekly goal (or
     everyone, if no goal is set) a "log your points" nudge. Used by both
     the Admin panel's manual "send now" button and the automatic weekly
     schedule (household_service/scheduler.py) — either path stamps
     `last_nudge_sent_week` so the other one doesn't double-send the same
-    week. Returns (notified, skipped_no_subscription)."""
+    week. Returns (notified, skipped_already_met_goal, skipped_no_subscription).
+    Note this intentionally has nothing to send someone who's already hit
+    their goal — if you just want to check push delivery works at all,
+    use send_test_push instead (see /push/test)."""
     since = _start_of_this_week()
     settings = await get_settings_row(db)
     users = await list_household_users(db)
 
     notified = 0
-    skipped = 0
+    already_met_goal = 0
+    no_subscription = 0
     for user in users:
         if user.on_break:
             continue
@@ -552,10 +573,11 @@ async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int]:
             settings.weekly_points_goal is not None
             and points >= settings.weekly_points_goal
         ):
+            already_met_goal += 1
             continue
         subs = await get_subscriptions_for_user(db, user.id)
         if not subs:
-            skipped += 1
+            no_subscription += 1
             continue
         body = (
             f"You're at {points}/{settings.weekly_points_goal} points this week — "
@@ -569,14 +591,14 @@ async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int]:
         if sent:
             notified += 1
         else:
-            skipped += 1
+            no_subscription += 1
 
     settings.last_nudge_sent_week = _iso_week_key(datetime.now(UTC))
     await db.commit()
-    return notified, skipped
+    return notified, already_met_goal, no_subscription
 
 
-async def run_scheduled_nudge_if_due(db: AsyncSession) -> tuple[int, int] | None:
+async def run_scheduled_nudge_if_due(db: AsyncSession) -> tuple[int, int, int] | None:
     """Called hourly by household_service.scheduler. Returns None (and
     does nothing) if the automatic schedule is off, it's not the
     configured weekday/hour right now, or this week's nudge already went
@@ -590,6 +612,26 @@ async def run_scheduled_nudge_if_due(db: AsyncSession) -> tuple[int, int] | None
     if settings.last_nudge_sent_week == _iso_week_key(now):
         return None
     return await send_weekly_nudge(db)
+
+
+async def send_test_push(db: AsyncSession, household_user_id: int) -> int:
+    """Unconditional push to your own subscriptions — unlike
+    send_weekly_nudge, this ignores break/goal status entirely, so it
+    actually proves whether delivery works. Returns how many of your
+    subscriptions reported success (0 means no subscription on this
+    account, or delivery failed for all of them)."""
+    subs = await get_subscriptions_for_user(db, household_user_id)
+    if not subs:
+        return 0
+    return await push.send_to_subscriptions(
+        db,
+        subs,
+        {
+            "title": "Test notification",
+            "body": "If you can see this, push notifications are working.",
+            "url": "#/settings",
+        },
+    )
 
 
 def _iso_week_key(dt: datetime) -> str:
@@ -643,7 +685,8 @@ async def create_report(
         period_start=start,
         period_end=end,
         rows=[(user.display_name, total) for user, total in rows],
-        eur_rate=settings.points_to_eur_rate,
+        rate=settings.points_to_money_rate,
+        currency=settings.currency,
         generated_by=generated_by.display_name,
         generated_at=datetime.now(UTC),
     )

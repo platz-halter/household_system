@@ -1,10 +1,10 @@
 import { CONFIG } from "./config.js";
-import { api } from "./api.js";
+import { api, fetchImageUrl } from "./api.js";
 import { escapeHtml, initials, timeAgo, startOfWeekIso, startOfMonthIso, lastWeekRangeIso } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
-const state = { period: "all", scope: "household" };
+const state = { period: "week", scope: "me" };
 let meCache = null;
 let settingsCache = null;
 
@@ -19,8 +19,8 @@ async function getSettings() {
   return settingsCache;
 }
 
-function formatEur(points, rate) {
-  return (points * rate).toLocaleString(undefined, { style: "currency", currency: "EUR" });
+function formatMoney(points, rate, currency) {
+  return (points * rate).toLocaleString(undefined, { style: "currency", currency });
 }
 
 export async function renderStats(container) {
@@ -29,8 +29,8 @@ export async function renderStats(container) {
       <div class="section-heading">
         <h2>Leaderboard</h2>
         <div class="segmented" id="period-segmented">
-          <button data-period="all" class="active">All time</button>
-          <button data-period="week">This week</button>
+          <button data-period="all">All time</button>
+          <button data-period="week" class="active">This week</button>
           <button data-period="lastweek">Last week</button>
           <button data-period="month">Month</button>
         </div>
@@ -40,8 +40,8 @@ export async function renderStats(container) {
       <div class="section-heading">
         <h2>Activity</h2>
         <div class="segmented" id="scope-segmented">
-          <button data-scope="household" class="active">Household</button>
-          <button data-scope="me">Just me</button>
+          <button data-scope="household">Household</button>
+          <button data-scope="me" class="active">Just me</button>
         </div>
       </div>
       <div class="heatmap-wrap">
@@ -114,21 +114,37 @@ async function loadLeaderboard(container) {
       root.innerHTML = `<div class="empty-state">No one on the leaderboard yet</div>`;
       return;
     }
-    const { points_to_eur_rate } = await getSettings();
+    const { points_to_money_rate, currency } = await getSettings();
     root.innerHTML = rows
       .map(
         (row, i) => `
         <div class="leaderboard-row">
           <span class="leaderboard-rank">${i + 1}</span>
-          <div class="user-avatar">${escapeHtml(initials(row.user.display_name))}</div>
+          <div class="user-avatar"${row.user.image_path ? ` data-avatar-user-id="${row.user.id}"` : ""}>${escapeHtml(initials(row.user.display_name))}</div>
           <span class="leaderboard-name">${escapeHtml(row.user.display_name)}</span>
-          <span class="leaderboard-points">${row.total_points} pts${points_to_eur_rate ? ` <span class="muted" style="font-weight: 500;">(${formatEur(row.total_points, points_to_eur_rate)})</span>` : ""}</span>
+          <span class="leaderboard-points">${row.total_points} pts${points_to_money_rate ? ` <span class="muted" style="font-weight: 500;">(${formatMoney(row.total_points, points_to_money_rate, currency)})</span>` : ""}</span>
         </div>`
       )
       .join("");
+    hydrateAvatars(root);
   } catch {
     root.innerHTML = `<div class="empty-state">Couldn't load the leaderboard</div>`;
   }
+}
+
+// Photos load in after the initial render rather than blocking it — same
+// "initials now, swap in the real photo when it arrives" pattern as the
+// Settings page avatar, just applied to however many rows are on screen.
+async function hydrateAvatars(root) {
+  const els = root.querySelectorAll("[data-avatar-user-id]");
+  await Promise.all(
+    [...els].map(async (el) => {
+      const objectUrl = await fetchImageUrl(`${HB}/users/${el.dataset.avatarUserId}/photo`);
+      if (objectUrl) {
+        el.innerHTML = `<img src="${objectUrl}" alt="" style="width:100%; height:100%; object-fit:cover; border-radius:inherit;" />`;
+      }
+    })
+  );
 }
 
 async function loadRecent(container) {
@@ -146,7 +162,7 @@ async function loadRecent(container) {
         const label = e.task_name || e.todo_title || (e.source === "task" ? "a deleted task" : "a deleted todo");
         return `
           <div class="list-row" style="cursor: default;">
-            <div class="avatar-sm">${escapeHtml(initials(e.household_user.display_name))}</div>
+            <div class="avatar-sm"${e.household_user.image_path ? ` data-avatar-user-id="${e.household_user.id}"` : ""}>${escapeHtml(initials(e.household_user.display_name))}</div>
             <div class="list-row-body">
               <div class="list-row-title">${escapeHtml(e.household_user.display_name)} completed ${escapeHtml(label)}</div>
               <div class="list-row-meta"><span>${timeAgo(e.earned_at)}</span></div>
@@ -155,6 +171,7 @@ async function loadRecent(container) {
           </div>`;
       })
       .join("");
+    hydrateAvatars(root);
   } catch {
     root.innerHTML = `<div class="empty-state">Couldn't load recent activity</div>`;
   }

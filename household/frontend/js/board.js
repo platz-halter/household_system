@@ -1,5 +1,5 @@
 import { CONFIG } from "./config.js";
-import { api } from "./api.js";
+import { api, fetchImageUrl } from "./api.js";
 import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
@@ -17,6 +17,7 @@ const STATUS_FILTERS = [
 
 const state = { status: "open" };
 let usersCache = null;
+let tasksCache = null;
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -63,6 +64,18 @@ async function loadUsers() {
   return usersCache;
 }
 
+// Always fresh (not cached-once like users above) — tasks can be added/
+// edited on the Task management panel, and the modal shouldn't offer a
+// stale list after a visit there.
+async function loadTasks() {
+  try {
+    tasksCache = await api.get(`${HB}/tasks?active=true`);
+  } catch {
+    tasksCache = tasksCache || [];
+  }
+  return tasksCache;
+}
+
 async function refreshTodos(container, writable) {
   const root = container.querySelector("#todo-list");
   if (!root) return;
@@ -84,6 +97,20 @@ async function refreshTodos(container, writable) {
 
   root.innerHTML = "";
   todos.forEach((todo) => root.appendChild(todoRow(todo, container, writable)));
+  hydrateAvatars(root);
+}
+
+// Photos load in after the initial render rather than blocking it.
+async function hydrateAvatars(root) {
+  const els = root.querySelectorAll("[data-avatar-user-id]");
+  await Promise.all(
+    [...els].map(async (el) => {
+      const objectUrl = await fetchImageUrl(`${HB}/users/${el.dataset.avatarUserId}/photo`);
+      if (objectUrl) {
+        el.innerHTML = `<img src="${objectUrl}" alt="" style="width:100%; height:100%; object-fit:cover;" />`;
+      }
+    })
+  );
 }
 
 function todoRow(todo, container, writable) {
@@ -93,7 +120,7 @@ function todoRow(todo, container, writable) {
 
   const badge = dueBadge(todo.due_date);
   const assignee = todo.assigned_to
-    ? `<span class="row" style="gap:4px;"><span class="avatar-sm">${escapeHtml(initials(todo.assigned_to.display_name))}</span>${escapeHtml(todo.assigned_to.display_name)}</span>`
+    ? `<span class="row" style="gap:4px;"><span class="avatar-sm"${todo.assigned_to.image_path ? ` data-avatar-user-id="${todo.assigned_to.id}"` : ""}>${escapeHtml(initials(todo.assigned_to.display_name))}</span>${escapeHtml(todo.assigned_to.display_name)}</span>`
     : `<span>Anyone</span>`;
 
   const statusBadge =
@@ -158,7 +185,7 @@ function todoRow(todo, container, writable) {
 }
 
 async function openTodoModal(container) {
-  const users = await loadUsers();
+  const [users, tasks] = await Promise.all([loadUsers(), loadTasks()]);
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -169,6 +196,13 @@ async function openTodoModal(container) {
         <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="Close">${icons.close}</button>
       </div>
       <div class="stack">
+        <div class="field">
+          <label for="t-task">From task</label>
+          <select class="select" id="t-task">
+            <option value="">Custom (one-off)</option>
+            ${tasks.map((t) => `<option value="${t.id}">${escapeAttr(t.name)}</option>`).join("")}
+          </select>
+        </div>
         <div class="field">
           <label for="t-title">Title</label>
           <input class="input" id="t-title" required />
@@ -214,6 +248,16 @@ async function openTodoModal(container) {
     if (e.target === overlay) close();
   });
   overlay.querySelector("#t-title").focus();
+
+  // Picking a task prefills title/description/points as a starting point
+  // — the board item created is still a plain, independent TodoItem (not
+  // linked back to the task), so it's fine to tweak these before posting.
+  overlay.querySelector("#t-task").addEventListener("change", (e) => {
+    const task = tasks.find((t) => String(t.id) === e.target.value);
+    overlay.querySelector("#t-title").value = task ? task.name : "";
+    overlay.querySelector("#t-description").value = task ? task.description || "" : "";
+    overlay.querySelector("#t-points").value = task ? task.points : 1;
+  });
 
   overlay.querySelector("#t-save").addEventListener("click", async () => {
     const title = overlay.querySelector("#t-title").value.trim();

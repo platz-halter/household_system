@@ -448,6 +448,7 @@
   justify-content: center;
   font-weight: 700;
   flex-shrink: 0;
+  overflow: hidden;
 }
 
 /* --- Switch (break mode toggle) --- */
@@ -704,6 +705,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  overflow: hidden;
   font-size: 0.65rem;
   font-weight: 700;
   flex-shrink: 0;

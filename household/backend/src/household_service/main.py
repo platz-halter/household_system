@@ -1,7 +1,9 @@
+import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, status
+from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from shared.auth import CurrentUser, require_role
@@ -33,6 +35,7 @@ from household_service.schemas import (
     TaskCreate,
     TaskOut,
     TaskUpdate,
+    TestPushResult,
     TodoCreate,
     TodoOut,
     TodoUpdate,
@@ -46,6 +49,11 @@ async def lifespan(app: FastAPI):
     yield
     scheduler.shutdown()
 
+
+AVATAR_DIR = Path("/app/data/avatars")
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
+MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — plenty for a profile photo
 
 app = FastAPI(title="Household System — Household (chores/points)", lifespan=lifespan)
 
@@ -106,6 +114,73 @@ async def list_users(
     return [
         HouseholdUserOut.model_validate(u) for u in await crud.list_household_users(db)
     ]
+
+
+@app.post("/me/photo", response_model=HouseholdUserOut)
+async def upload_my_photo(
+    file: UploadFile,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    if file.content_type not in ALLOWED_IMAGE_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported image type '{file.content_type}'. Allowed: {sorted(ALLOWED_IMAGE_TYPES)}",
+        )
+
+    contents = await file.read()
+    if len(contents) > MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"Image exceeds {MAX_IMAGE_BYTES // (1024 * 1024)}MB limit",
+        )
+
+    hu = await _self(db, user)
+    old_filename = hu.image_path
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp"}[
+        file.content_type
+    ]
+    filename = f"{hu.id}-{uuid.uuid4().hex}.{ext}"
+    (AVATAR_DIR / filename).write_bytes(contents)
+
+    result = HouseholdUserOut.model_validate(
+        await crud.set_user_image(db, hu, filename)
+    )
+    if old_filename:
+        (AVATAR_DIR / old_filename).unlink(missing_ok=True)
+    return result
+
+
+@app.delete("/me/photo", response_model=HouseholdUserOut)
+async def delete_my_photo(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    hu = await _self(db, user)
+    old_filename = hu.image_path
+    result = HouseholdUserOut.model_validate(await crud.clear_user_image(db, hu))
+    if old_filename:
+        (AVATAR_DIR / old_filename).unlink(missing_ok=True)
+    return result
+
+
+@app.get("/users/{user_id}/photo")
+async def get_user_photo(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    hu = await crud.get_household_user(db, user_id)
+    if hu is None or not hu.image_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="No photo for this user"
+        )
+    path = AVATAR_DIR / hu.image_path
+    if not path.exists():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Image file missing on disk"
+        )
+    return FileResponse(path)
 
 
 # ---- Categories -----------------------------------------------------
@@ -491,9 +566,28 @@ async def push_nudge(
     _user: CurrentUser = Depends(can_admin),
 ):
     """Admin-triggered weekly reminder — see crud.send_weekly_nudge for why
-    this is a manual button rather than an automatic schedule."""
-    notified, skipped = await crud.send_weekly_nudge(db)
-    return NudgeResult(notified=notified, skipped_no_subscription=skipped)
+    this is a manual button rather than an automatic schedule. This only
+    reaches people below their weekly goal — use POST /push/test to check
+    delivery works at all, regardless of anyone's points."""
+    notified, already_met_goal, no_subscription = await crud.send_weekly_nudge(db)
+    return NudgeResult(
+        notified=notified,
+        skipped_already_met_goal=already_met_goal,
+        skipped_no_subscription=no_subscription,
+    )
+
+
+@app.post("/push/test", response_model=TestPushResult)
+async def push_test(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    """Sends yourself an unconditional test push — unlike /push/nudge,
+    this ignores break/goal status, so it actually proves whether
+    delivery works for your own subscription(s)."""
+    hu = await _self(db, user)
+    sent = await crud.send_test_push(db, hu.id)
+    return TestPushResult(sent=sent)
 
 
 # ---- Reports --------------------------------------------------------------

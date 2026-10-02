@@ -24,18 +24,21 @@ export async function renderAdmin(container) {
       </div>
 
       <div class="settings-section">
-        <h3>Points &rarr; EUR conversion</h3>
+        <h3>Points &rarr; money conversion</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
           Reference only — shown next to points, no real payout is connected.
         </p>
-        <div id="eur-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="money-root"><div class="skeleton" style="height: 56px;"></div></div>
       </div>
 
       <div class="settings-section">
         <h3>Reminders</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
           Pushes anyone subscribed (Settings &rarr; Notifications) who's below
-          the weekly goal, or everyone if no goal is set.
+          the weekly goal, or everyone if no goal is set — so it won't send
+          you anything once you've already hit it this week. To check push
+          delivery itself works regardless of points, use "Send test
+          notification" in Settings &rarr; Notifications instead.
         </p>
         <button class="btn btn-block" id="nudge-btn" style="margin-bottom: var(--space-3);">${icons.checklist}<span>Send weekly reminder now</span></button>
         <div id="schedule-root"><div class="skeleton" style="height: 56px;"></div></div>
@@ -57,7 +60,7 @@ export async function renderAdmin(container) {
     try {
       const result = await api.post(`${HB}/push/nudge`);
       showToast(
-        `Notified ${result.notified}, skipped ${result.skipped_no_subscription} (no goal left, or not subscribed)`,
+        `Notified ${result.notified} · ${result.skipped_already_met_goal} already at goal · ${result.skipped_no_subscription} not subscribed/unreachable`,
         "success"
       );
     } catch {
@@ -70,7 +73,7 @@ export async function renderAdmin(container) {
   container.querySelector("#new-report-btn").addEventListener("click", () => openReportModal(container));
 
   await loadGoal(container);
-  await loadEurRate(container);
+  await loadMoneyRate(container);
   await loadSchedule(container);
   await loadReports(container);
 }
@@ -103,24 +106,38 @@ async function loadGoal(container) {
   }
 }
 
-async function loadEurRate(container) {
-  const root = container.querySelector("#eur-root");
+// Common currencies for the dropdown — not an exhaustive ISO 4217 list,
+// just enough for a homelab household. The backend accepts any 3-letter
+// code; this just keeps the picker sane.
+const CURRENCIES = ["EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "JPY", "CAD", "AUD"];
+
+async function loadMoneyRate(container) {
+  const root = container.querySelector("#money-root");
   if (!root) return;
   try {
     const settings = await api.get(`${HB}/settings`);
     root.innerHTML = `
-      <div class="field">
-        <label for="eur-input">EUR per point</label>
-        <div class="row">
-          <input class="input" type="number" min="0" step="0.01" id="eur-input" value="${settings.points_to_eur_rate ?? ""}" placeholder="No rate set" />
-          <button class="btn btn-primary" id="eur-save">Save</button>
+      <div class="field-row">
+        <div class="field">
+          <label for="currency-select">Currency</label>
+          <select class="select" id="currency-select">
+            ${CURRENCIES.map((c) => `<option value="${c}" ${settings.currency === c ? "selected" : ""}>${c}</option>`).join("")}
+          </select>
+        </div>
+        <div class="field">
+          <label for="rate-input">Per point</label>
+          <input class="input" type="number" min="0" step="0.01" id="rate-input" value="${settings.points_to_money_rate ?? ""}" placeholder="No rate set" />
         </div>
       </div>
+      <button class="btn btn-primary btn-block" id="money-save" style="margin-top: var(--space-2);">Save</button>
     `;
-    root.querySelector("#eur-save").addEventListener("click", async () => {
-      const raw = root.querySelector("#eur-input").value;
+    root.querySelector("#money-save").addEventListener("click", async () => {
+      const raw = root.querySelector("#rate-input").value;
       try {
-        await patchSettings({ points_to_eur_rate: raw === "" ? null : Number(raw) });
+        await patchSettings({
+          points_to_money_rate: raw === "" ? null : Number(raw),
+          currency: root.querySelector("#currency-select").value,
+        });
         showToast("Saved", "success");
       } catch {
         /* api.js already showed a toast */
@@ -139,7 +156,8 @@ async function patchSettings(partial) {
   const current = await api.get(`${HB}/settings`);
   await api.put(`${HB}/settings`, {
     weekly_points_goal: current.weekly_points_goal,
-    points_to_eur_rate: current.points_to_eur_rate,
+    points_to_money_rate: current.points_to_money_rate,
+    currency: current.currency,
     nudge_weekday: current.nudge_weekday,
     nudge_hour: current.nudge_hour,
     ...partial,

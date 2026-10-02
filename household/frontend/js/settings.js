@@ -1,5 +1,5 @@
 import { CONFIG } from "./config.js";
-import { api } from "./api.js";
+import { api, fetchImageUrl, invalidateImageUrl } from "./api.js";
 import { THEMES, getStoredTheme, applyTheme } from "./theme.js";
 import { getCurrentUserInfo, logout } from "./auth.js";
 import { icons } from "./icons.js";
@@ -32,7 +32,7 @@ export async function renderSettings(container) {
       <div class="settings-section">
         <h3>Account</h3>
         <div class="user-info-card">
-          <div class="user-avatar">${escapeHtml(initial)}</div>
+          <div class="user-avatar" id="account-avatar">${escapeHtml(initial)}</div>
           <div>
             <div style="font-weight:600;">${escapeHtml(user.subject || "Unknown user")}</div>
             <div class="muted" style="font-size: var(--font-size-sm); text-transform: capitalize;">
@@ -40,6 +40,15 @@ export async function renderSettings(container) {
             </div>
           </div>
         </div>
+        ${
+          writable
+            ? `<div class="row" style="margin-top: var(--space-3);">
+                 <label class="btn" for="avatar-file-input" style="cursor: pointer;">${icons.camera}<span>Change photo</span></label>
+                 <input type="file" id="avatar-file-input" accept="image/png,image/jpeg,image/webp" class="sr-only" />
+                 <button class="btn" id="avatar-remove-btn">Remove photo</button>
+               </div>`
+            : ""
+        }
       </div>
 
       <div class="settings-section">
@@ -112,9 +121,61 @@ export async function renderSettings(container) {
     if (ok) logout();
   });
 
+  await loadAvatar(container, writable);
   await loadBreakMode(container, writable);
   await loadPushSection(container, writable);
   await loadHouseholdSettings(container);
+}
+
+async function loadAvatar(container, writable) {
+  const avatarEl = container.querySelector("#account-avatar");
+  if (!avatarEl) return;
+
+  let me;
+  try {
+    me = await api.get(`${HB}/me`);
+  } catch {
+    return; // leave the initials fallback in place
+  }
+  const photoUrl = `${HB}/users/${me.id}/photo`;
+
+  const applyPhoto = async () => {
+    if (!me.image_path) return;
+    const objectUrl = await fetchImageUrl(photoUrl);
+    if (!objectUrl) return;
+    avatarEl.innerHTML = `<img src="${objectUrl}" alt="" style="width:100%; height:100%; object-fit:cover;" />`;
+  };
+  await applyPhoto();
+
+  if (!writable) return;
+
+  container.querySelector("#avatar-file-input").addEventListener("change", async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      me = await api.postForm(`${HB}/me/photo`, fd);
+      invalidateImageUrl(photoUrl);
+      await applyPhoto();
+      showToast("Photo updated", "success");
+    } catch {
+      /* api.js already showed a toast */
+    } finally {
+      e.target.value = "";
+    }
+  });
+
+  container.querySelector("#avatar-remove-btn").addEventListener("click", async () => {
+    try {
+      me = await api.del(`${HB}/me/photo`);
+      invalidateImageUrl(photoUrl);
+      avatarEl.innerHTML = escapeHtml((getCurrentUserInfo()?.subject || "?").slice(0, 1).toUpperCase());
+      showToast("Photo removed", "success");
+    } catch {
+      /* api.js already showed a toast */
+    }
+  });
 }
 
 async function loadBreakMode(container, writable) {
@@ -135,6 +196,20 @@ async function loadBreakMode(container, writable) {
       container.querySelector("#break-switch").addEventListener("click", async (e) => {
         const btn = e.currentTarget;
         const next = !btn.classList.contains("on");
+        const ok = await showConfirmDialog(
+          next
+            ? {
+                title: "Go on break?",
+                message: "You'll be hidden from the leaderboard and new task assignments until you turn this off again.",
+                confirmLabel: "Go on break",
+              }
+            : {
+                title: "End your break?",
+                message: "You'll reappear on the leaderboard and be eligible for task assignments again.",
+                confirmLabel: "End break",
+              }
+        );
+        if (!ok) return;
         try {
           await api.patch(`${HB}/me`, { on_break: next });
           btn.classList.toggle("on", next);
@@ -168,6 +243,11 @@ async function loadPushSection(container, writable) {
       </div>
       <button class="switch${subscription ? " on" : ""}" id="push-switch" role="switch" aria-checked="${Boolean(subscription)}" ${writable ? "" : "disabled"}></button>
     </div>
+    ${
+      subscription && writable
+        ? `<button class="btn" id="push-test-btn" style="margin-top: var(--space-2);">Send test notification</button>`
+        : ""
+    }
   `;
 
   if (!writable) return;
@@ -182,15 +262,33 @@ async function loadPushSection(container, writable) {
       } else {
         await unsubscribeFromPush();
       }
-      btn.classList.toggle("on", turningOn);
-      btn.setAttribute("aria-checked", String(turningOn));
       showToast(turningOn ? "Notifications on" : "Notifications off", "success");
+      await loadPushSection(container, writable); // re-render: the test button only shows while subscribed
     } catch (err) {
       showToast(err.message || "Couldn't change notification settings", "danger");
     } finally {
       btn.disabled = false;
     }
   });
+
+  const testBtn = container.querySelector("#push-test-btn");
+  if (testBtn) {
+    testBtn.addEventListener("click", async () => {
+      testBtn.disabled = true;
+      try {
+        const result = await api.post(`${HB}/push/test`);
+        if (result.sent > 0) {
+          showToast(`Sent — check this device for a notification`, "success");
+        } else {
+          showToast("Nothing was delivered — the subscription may be stale; try turning notifications off and on again", "warning");
+        }
+      } catch {
+        /* api.js already showed a toast */
+      } finally {
+        testBtn.disabled = false;
+      }
+    });
+  }
 }
 
 // Read-only for everyone here — only the Admin panel (#/admin) can change

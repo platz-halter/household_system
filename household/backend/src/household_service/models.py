@@ -50,6 +50,7 @@ class HouseholdUser(Base):
     subject: Mapped[str] = mapped_column(String(200), unique=True, index=True)
     display_name: Mapped[str] = mapped_column(String(200))
     on_break: Mapped[bool] = mapped_column(Boolean, default=False)
+    image_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -189,9 +190,11 @@ class HouseholdSettings(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     weekly_points_goal: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # EUR per point — display/reference only, no connection to an actual
-    # payout process (see PROJECT_SPEC.md "Admin tools").
-    points_to_eur_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # Money per point — display/reference only, no connection to an actual
+    # payout process (see PROJECT_SPEC.md "Admin tools"). `currency` is an
+    # ISO 4217 code (e.g. "EUR", "USD"); admin-selectable in the Admin panel.
+    points_to_money_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), default="EUR")
 
     # Automatic weekly reminder schedule (see household_service/scheduler.py).
     # nudge_weekday is None by default — the feature is opt-in; the manual
