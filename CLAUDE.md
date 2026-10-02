@@ -9,10 +9,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - You may run `git status`/`git diff`/`git log` freely to understand state.
 - Flag when something is ready to commit; don't commit it.
 
-- Never run docker commands that modify active containers
-- Only use docker commands to gather information about running containers
-- Flag when I should run docker commands that are not used for gathering info
-
 ## Project docs — read these first
 
 - `PROJECT_SPEC.md` — the design target (what the system should become).
