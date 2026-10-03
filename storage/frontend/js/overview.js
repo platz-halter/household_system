@@ -102,8 +102,11 @@ export async function renderOverview(container) {
           </div>
           <div class="field-row">
             <div class="field">
-              <label for="filter-shelf">Shelf</label>
-              <select class="select" id="filter-shelf"><option value="">Any</option></select>
+              <label>Shelf</label>
+              <button type="button" class="btn btn-block" id="filter-shelf-btn" style="justify-content: space-between;">
+                <span id="filter-shelf-label">Any</span>
+                ${icons.chevronRight}
+              </button>
             </div>
             <div class="field">
               <label for="filter-level">Shelf level</label>
@@ -147,7 +150,15 @@ export async function renderOverview(container) {
 
   const roomSelect = container.querySelector("#filter-room");
   const levelInput = container.querySelector("#filter-level");
-  const shelfSelect = container.querySelector("#filter-shelf");
+  const shelfBtn = container.querySelector("#filter-shelf-btn");
+  const shelfLabel = container.querySelector("#filter-shelf-label");
+  // Shelf isn't a managed list like Room — it's whatever free text has
+  // been typed into items' locations so far, which can grow into a long,
+  // unsearchable list on mobile as a real inventory fills in. A popup
+  // picker (openShelfPickerModal) with search stays usable at any size;
+  // Room stays a native <select> since the managed-rooms list it's
+  // populated from is small and curated by design.
+  let currentShelves = [];
 
   async function loadLocations() {
     if (!locationsCache) {
@@ -174,10 +185,10 @@ export async function renderOverview(container) {
     // added, not-yet-used room still shows up as a filter option.
     const rooms = roomsCache.map((r) => r.name).sort();
     const relevant = locationsCache.filter((l) => !state.room || l.room === state.room);
-    const shelves = [...new Set(relevant.map((l) => l.shelf).filter(Boolean))].sort();
+    currentShelves = [...new Set(relevant.map((l) => l.shelf).filter(Boolean))].sort();
 
     fillSelect(roomSelect, rooms, state.room);
-    fillSelect(shelfSelect, shelves, state.shelf);
+    shelfLabel.textContent = state.shelf || "Any";
   }
 
   function fillSelect(selectEl, values, selected) {
@@ -203,10 +214,17 @@ export async function renderOverview(container) {
       refreshItems(container, selection);
     }, 300)
   );
-  shelfSelect.addEventListener("change", (e) => {
-    state.shelf = e.target.value;
-    state.offset = 0;
-    refreshItems(container, selection);
+  shelfBtn.addEventListener("click", () => {
+    openShelfPickerModal({
+      shelves: currentShelves,
+      selected: state.shelf,
+      onSelect: (shelf) => {
+        state.shelf = shelf;
+        shelfLabel.textContent = shelf || "Any";
+        state.offset = 0;
+        refreshItems(container, selection);
+      },
+    });
   });
 
   const minQtyInput = container.querySelector("#filter-min-qty");
@@ -271,17 +289,20 @@ async function refreshItems(container, selection) {
   const grid = container.querySelector("#item-grid");
   if (!grid) return; // navigated away before this resolved
 
-  grid.innerHTML = Array.from({ length: 6 })
+  const skeletonHtml = Array.from({ length: 6 })
     .map(() => `<div class="skeleton" style="aspect-ratio: 3/4;"></div>`)
     .join("");
+  const cancelSkeleton = showSkeletonAfterDelay(grid, skeletonHtml);
 
   let page;
   try {
     page = await api.get(`${CONFIG.STORAGE_BASE}/items?${buildQuery()}`);
   } catch {
+    cancelSkeleton();
     grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">Couldn't load items. Pull down to retry.</div>`;
     return;
   }
+  cancelSkeleton();
 
   state.total = page.total;
   currentItems = page.items;
@@ -621,6 +642,70 @@ function renderPagination(root, container, selection) {
 
 // --- Modals -----------------------------------------------------------
 
+// Popup for picking a shelf, in place of a native <select> — shelf
+// names are free text accumulated from items' locations, not a managed
+// list, so this list has no inherent size cap the way Room's does; a
+// search box keeps it usable on mobile regardless of how long it gets.
+function openShelfPickerModal({ shelves, selected, onSelect }) {
+  const { body, close } = openModalShell("Filter by shelf");
+  body.innerHTML = `
+    <div class="search-bar" style="margin-bottom: var(--space-3);">
+      ${icons.search}
+      <input type="search" id="sp-search" placeholder="Search shelves…" />
+    </div>
+    <div id="sp-list" class="stack" style="max-height: 55vh; overflow-y: auto;"></div>
+  `;
+
+  function pickerRow(label, isSelected) {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "row-between";
+    row.style.cssText =
+      "width: 100%; padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md); margin-bottom: var(--space-2); text-align: left; background: none; font: inherit; color: inherit;";
+    row.innerHTML = `<span>${escapeHtml(label)}</span>${isSelected ? icons.check : ""}`;
+    return row;
+  }
+
+  function renderList(q) {
+    const listRoot = body.querySelector("#sp-list");
+    const filtered = q ? shelves.filter((s) => s.toLowerCase().includes(q)) : shelves;
+    listRoot.innerHTML = "";
+
+    const anyRow = pickerRow("Any", !selected);
+    anyRow.addEventListener("click", () => {
+      onSelect("");
+      close();
+    });
+    listRoot.appendChild(anyRow);
+
+    if (filtered.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = "No shelves match";
+      listRoot.appendChild(empty);
+      return;
+    }
+
+    filtered.forEach((shelf) => {
+      const row = pickerRow(shelf, selected === shelf);
+      row.addEventListener("click", () => {
+        onSelect(shelf);
+        close();
+      });
+      listRoot.appendChild(row);
+    });
+  }
+
+  let debounceId = null;
+  body.querySelector("#sp-search").addEventListener("input", (e) => {
+    clearTimeout(debounceId);
+    const q = e.target.value.trim().toLowerCase();
+    debounceId = setTimeout(() => renderList(q), 150);
+  });
+
+  renderList("");
+}
+
 function openModalShell(titleText) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -921,4 +1006,16 @@ function escapeHtml(str) {
 
 function escapeAttr(str) {
   return escapeHtml(str);
+}
+
+// A skeleton shown immediately flashes for anything that resolves fast
+// (typical on a local network) — delaying when it's allowed to appear
+// means a quick response never shows one at all, only a genuinely slow
+// one does. Call this right before the request starts, then call the
+// returned function as soon as it settles.
+function showSkeletonAfterDelay(root, html, delayMs = 200) {
+  const timer = setTimeout(() => {
+    root.innerHTML = html;
+  }, delayMs);
+  return () => clearTimeout(timer);
 }

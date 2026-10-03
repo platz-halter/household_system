@@ -2,12 +2,15 @@ import { CONFIG } from "./config.js";
 import { api } from "./api.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
+import { escapeHtml, escapeAttr, showSkeletonAfterDelay } from "./util.js";
+import { showConfirmDialog } from "./confirmDialog.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
+const AUTH_BASE = CONFIG.AUTH_BASE;
 
 // This page is the one place in the app where "admin" means something
 // different from "user" (see PROJECT_SPEC.md). The router already redirects
-// non-admins away from #/admin before this ever renders; this check is just
+// non-admins away from /admin before this ever renders; this check is just
 // defense in depth, not the real enforcement (the backend rejects a non-admin
 // PUT /settings / POST /reports / POST /push/nudge regardless of the UI).
 export async function renderAdmin(container) {
@@ -19,8 +22,17 @@ export async function renderAdmin(container) {
       </p>
 
       <div class="settings-section">
+        <h3>Week start</h3>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
+          Which day "this week" starts on — everywhere points/goals/reports
+          are tracked by week (Home, Stats, the balancer, weekly reports).
+        </p>
+        <div id="week-start-root"></div>
+      </div>
+
+      <div class="settings-section">
         <h3>Weekly points goal</h3>
-        <div id="goal-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="goal-root"></div>
       </div>
 
       <div class="settings-section">
@@ -28,7 +40,7 @@ export async function renderAdmin(container) {
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
           Reference only — shown next to points, no real payout is connected.
         </p>
-        <div id="money-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="money-root"></div>
       </div>
 
       <div class="settings-section">
@@ -41,7 +53,22 @@ export async function renderAdmin(container) {
           notification" in Settings &rarr; Notifications instead.
         </p>
         <button class="btn btn-block" id="nudge-btn" style="margin-bottom: var(--space-3);">${icons.checklist}<span>Send weekly reminder now</span></button>
-        <div id="schedule-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="schedule-root"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Task balancing</h3>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
+          Hands out unclaimed weekly/monthly tasks and unclaimed board todos to
+          whoever's currently carrying the least load, then pulls an unfinished
+          task away from anyone who's pulled well ahead and hands it to whoever's
+          behind — favoring anyone short of the weekly goal, never overloading
+          one person, and never touching a task someone's already started. Runs
+          automatically once a day; use this to run it right now instead of
+          waiting.
+        </p>
+        <button class="btn btn-block" id="balance-btn">${icons.scale}<span>Run balancer now</span></button>
+        <div id="balance-result-root" style="margin-top: var(--space-3);"></div>
       </div>
 
       <div class="settings-section">
@@ -49,7 +76,25 @@ export async function renderAdmin(container) {
           <h3 style="margin-bottom: 0;">Reports</h3>
           <button class="btn btn-icon" id="new-report-btn" aria-label="Generate report">${icons.plus}</button>
         </div>
-        <div id="reports-root"><div class="skeleton" style="height: 100px;"></div></div>
+        <div id="auto-report-root" style="margin-bottom: var(--space-3);"></div>
+        <div id="reports-root"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Authentik connection</h3>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
+          Change the Authentik OIDC settings here instead of hand-editing
+          <code>.env</code> on the server — every service picks up a
+          change within about a minute, no restart needed. Changing the
+          issuer, JWKS URL, or client ID will sign out anyone currently
+          logged in through Authentik (local accounts are unaffected).
+          Saving or resetting always requires your LOCAL admin password
+          below, even if you're signed in through Authentik right now —
+          whoever can repoint these values controls who every service
+          trusts as an admin, so a currently-valid session alone isn't
+          enough.
+        </p>
+        <div id="authentik-config-root"></div>
       </div>
     </div>
   `;
@@ -72,17 +117,65 @@ export async function renderAdmin(container) {
 
   container.querySelector("#new-report-btn").addEventListener("click", () => openReportModal(container));
 
+  container.querySelector("#balance-btn").addEventListener("click", async () => {
+    const btn = container.querySelector("#balance-btn");
+    btn.disabled = true;
+    try {
+      const result = await api.post(`${HB}/balancing/run`);
+      renderBalanceResult(container, result);
+      showToast("Balancing run complete", "success");
+    } catch {
+      /* api.js already showed a toast */
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  await loadWeekStart(container);
   await loadGoal(container);
   await loadMoneyRate(container);
   await loadSchedule(container);
+  await loadAutoReport(container);
   await loadReports(container);
+  await loadAuthentikConfig(container);
+}
+
+async function loadWeekStart(container) {
+  const root = container.querySelector("#week-start-root");
+  if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
+  try {
+    const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
+    root.innerHTML = `
+      <div class="row">
+        <select class="select grow" id="week-start-select">
+          ${WEEKDAY_NAMES.map((name, i) => `<option value="${i}" ${settings.week_start_weekday === i ? "selected" : ""}>${name}</option>`).join("")}
+        </select>
+        <button class="btn btn-primary" id="week-start-save">Save</button>
+      </div>
+    `;
+    root.querySelector("#week-start-save").addEventListener("click", async () => {
+      try {
+        await patchSettings({ week_start_weekday: Number(root.querySelector("#week-start-select").value) });
+        showToast('Saved — "this week" now starts on that day everywhere', "success");
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+  } catch {
+    cancelSkeleton();
+    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+  }
 }
 
 async function loadGoal(container) {
   const root = container.querySelector("#goal-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
   try {
     const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
     root.innerHTML = `
       <div class="field">
         <label for="goal-input">Points per week</label>
@@ -102,6 +195,7 @@ async function loadGoal(container) {
       }
     });
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
   }
 }
@@ -114,8 +208,10 @@ const CURRENCIES = ["EUR", "USD", "GBP", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK
 async function loadMoneyRate(container) {
   const root = container.querySelector("#money-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
   try {
     const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
     root.innerHTML = `
       <div class="field-row">
         <div class="field">
@@ -144,6 +240,7 @@ async function loadMoneyRate(container) {
       }
     });
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
   }
 }
@@ -160,6 +257,8 @@ async function patchSettings(partial) {
     currency: current.currency,
     nudge_weekday: current.nudge_weekday,
     nudge_hour: current.nudge_hour,
+    week_start_weekday: current.week_start_weekday,
+    auto_report_enabled: current.auto_report_enabled,
     ...partial,
   });
 }
@@ -167,10 +266,12 @@ async function patchSettings(partial) {
 async function loadSchedule(container) {
   const root = container.querySelector("#schedule-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
   try {
     const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
     const lastSent = settings.last_nudge_sent_week
-      ? `Last sent automatically: week ${settings.last_nudge_sent_week}`
+      ? `Last sent automatically: week of ${settings.last_nudge_sent_week}`
       : "Hasn't run automatically yet";
 
     root.innerHTML = `
@@ -216,36 +317,160 @@ async function loadSchedule(container) {
       }
     });
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load the reminder schedule</div>`;
+  }
+}
+
+function renderBalanceResult(container, result) {
+  const root = container.querySelector("#balance-result-root");
+  if (!root) return;
+
+  if (result.by_user.length === 0 && result.reassignments.length === 0) {
+    root.innerHTML = `<div class="empty-state">Nothing to assign or rebalance — everything's already claimed or caught up</div>`;
+    return;
+  }
+
+  const rows = result.by_user
+    .map((u) => {
+      const bits = [`${u.new_task_count} task${u.new_task_count === 1 ? "" : "s"}`, `${u.new_todo_count} todo${u.new_todo_count === 1 ? "" : "s"}`];
+      if (u.reassigned_in_count) bits.push(`+${u.reassigned_in_count} moved to them`);
+      if (u.reassigned_out_count) bits.push(`-${u.reassigned_out_count} moved away`);
+      const netPoints = u.new_expected_points + u.reassigned_net_points;
+      return `
+      <div class="list-row" style="cursor:default;">
+        <div class="list-row-body">
+          <div class="list-row-title">${escapeHtml(u.household_user.display_name)}</div>
+          <div class="list-row-meta"><span>${bits.join(" · ")}</span></div>
+        </div>
+        <div class="list-row-points"><span>${netPoints >= 0 ? "+" : ""}${netPoints}</span><span class="muted">pts</span></div>
+      </div>`;
+    })
+    .join("");
+
+  const reassignmentRows = result.reassignments
+    .map(
+      (r) => `
+      <div class="list-row" style="cursor:default;">
+        <div class="list-row-body">
+          <div class="list-row-title">${escapeHtml(r.task_name)}</div>
+          <div class="list-row-meta"><span>${escapeHtml(r.from_user.display_name)} &rarr; ${escapeHtml(r.to_user.display_name)} — pulled away unfinished to even out the week</span></div>
+        </div>
+        <div class="list-row-points"><span>${r.points}</span><span class="muted">pts</span></div>
+      </div>`
+    )
+    .join("");
+
+  const leftover =
+    result.unassigned_task_count || result.unassigned_todo_count
+      ? `<p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">
+           ${result.unassigned_task_count} task(s) and ${result.unassigned_todo_count} todo(s) left unassigned this
+           run — everyone eligible is already at the per-run cap.
+         </p>`
+      : "";
+
+  root.innerHTML = `
+    ${rows ? `<div class="stack">${rows}</div>` : ""}
+    ${
+      reassignmentRows
+        ? `<p class="muted" style="font-size: var(--font-size-xs); margin: var(--space-3) 0 4px;">Mid-week rebalancing</p><div class="stack">${reassignmentRows}</div>`
+        : ""
+    }
+    ${leftover}
+  `;
+}
+
+async function loadAutoReport(container) {
+  const root = container.querySelector("#auto-report-root");
+  if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
+  try {
+    const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
+    const lastAuto = settings.last_auto_report_period
+      ? `Last auto-generated: week of ${settings.last_auto_report_period}`
+      : "Hasn't run automatically yet";
+    root.innerHTML = `
+      <div class="field">
+        <label class="row">
+          <input type="checkbox" id="auto-report-enabled" ${settings.auto_report_enabled ? "checked" : ""} />
+          <span>Auto-generate a report for each week once it ends</span>
+        </label>
+      </div>
+      <div class="row" style="margin-top: var(--space-2);">
+        <span class="muted" style="font-size: var(--font-size-xs); flex: 1;">${lastAuto}</span>
+        <button class="btn btn-primary" id="auto-report-save">Save</button>
+      </div>
+    `;
+    root.querySelector("#auto-report-save").addEventListener("click", async () => {
+      try {
+        await patchSettings({ auto_report_enabled: root.querySelector("#auto-report-enabled").checked });
+        showToast("Saved", "success");
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+  } catch {
+    cancelSkeleton();
+    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
   }
 }
 
 async function loadReports(container) {
   const root = container.querySelector("#reports-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 100px;"></div>`);
   try {
     const reports = await api.get(`${HB}/reports`);
+    cancelSkeleton();
     if (reports.length === 0) {
       root.innerHTML = `<div class="empty-state">No reports generated yet</div>`;
       return;
     }
+    // A plain div, not a <button> — it now holds two separate actions
+    // (download, toggle-paid), and a <button> can't contain another
+    // interactive element.
     root.innerHTML = reports
-      .map(
-        (r) => `
-        <button type="button" class="list-row" data-report-id="${r.id}" data-period="${r.period_start}">
+      .map((r) => {
+        const paid = Boolean(r.paid_at);
+        return `
+        <div class="list-row" data-report-id="${r.id}" data-period="${r.period_start}" data-paid="${paid}" style="${paid ? "opacity: 0.6;" : ""}">
           <div class="list-row-body">
-            <div class="list-row-title">${r.period_type === "week" ? "Weekly" : "Monthly"} report</div>
-            <div class="list-row-meta"><span>${r.period_start} – ${r.period_end}</span></div>
+            <div class="list-row-title">
+              ${r.period_type === "week" ? "Weekly" : "Monthly"} report
+              ${r.is_last_week ? `<span class="badge badge-info">Last week</span>` : ""}
+              <span class="badge badge-${paid ? "success" : "neutral"}">${paid ? "Paid" : "Unpaid"}</span>
+            </div>
+            <div class="list-row-meta">
+              <span>${r.period_start} – ${r.period_end}</span>
+              ${r.generated_by ? "" : `<span class="muted">· auto</span>`}
+            </div>
           </div>
-          ${icons.chevronRight}
-        </button>`
-      )
+          <div class="list-row-actions">
+            <button class="btn btn-icon" data-action="toggle-paid" aria-label="${paid ? "Mark unpaid" : "Mark paid"}" title="${paid ? "Mark unpaid" : "Mark paid"}">${icons.check}</button>
+            <button class="btn btn-icon" data-action="download" aria-label="Download report">${icons.chevronRight}</button>
+          </div>
+        </div>`;
+      })
       .join("");
 
     root.querySelectorAll("[data-report-id]").forEach((row) => {
-      row.addEventListener("click", () => downloadReport(row.dataset.reportId, row.dataset.period));
+      const id = row.dataset.reportId;
+      row.querySelector('[data-action="download"]').addEventListener("click", () => {
+        downloadReport(id, row.dataset.period);
+      });
+      row.querySelector('[data-action="toggle-paid"]').addEventListener("click", async () => {
+        const nowPaid = row.dataset.paid !== "true";
+        try {
+          await api.patch(`${HB}/reports/${id}`, { paid: nowPaid });
+          loadReports(container);
+        } catch {
+          /* api.js already showed a toast */
+        }
+      });
     });
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load reports</div>`;
   }
 }
@@ -318,6 +543,109 @@ function openReportModal(container) {
       loadReports(container);
     } catch {
       /* api.js already showed a toast */
+    }
+  });
+}
+
+const AUTHENTIK_FIELDS = [
+  ["issuer", "Issuer"],
+  ["jwks_url", "JWKS URL"],
+  ["client_id", "Client ID"],
+  ["authorize_url", "Authorize URL"],
+  ["token_url", "Token URL"],
+  ["end_session_url", "End-session URL"],
+  ["scope", "Scope"],
+];
+
+async function loadAuthentikConfig(container) {
+  const root = container.querySelector("#authentik-config-root");
+  if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 320px;"></div>`);
+  let config;
+  try {
+    config = await api.get(`${AUTH_BASE}/authentik-config`);
+  } catch {
+    cancelSkeleton();
+    root.innerHTML = `<div class="empty-state">Couldn't load the Authentik configuration</div>`;
+    return;
+  }
+  cancelSkeleton();
+
+  root.innerHTML = `
+    ${AUTHENTIK_FIELDS.map(
+      ([key, label]) => `
+      <div class="field">
+        <label for="ak-${key}">${label}</label>
+        <input class="input" id="ak-${key}" value="${escapeAttr(config[key])}" />
+      </div>`
+    ).join("")}
+    <div
+      class="field"
+      style="margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border-color);"
+    >
+      <label for="ak-reauth-username">Confirm with your local admin username</label>
+      <input class="input" id="ak-reauth-username" autocomplete="username" />
+    </div>
+    <div class="field">
+      <label for="ak-reauth-password">...and password</label>
+      <input class="input" type="password" id="ak-reauth-password" autocomplete="current-password" />
+    </div>
+    <div class="row" style="margin-top: var(--space-2);">
+      <button class="btn" id="ak-reset">Reset to .env defaults</button>
+      <button class="btn btn-primary grow" id="ak-save">Save</button>
+    </div>
+  `;
+
+  function reauthBody() {
+    return {
+      reauth_username: root.querySelector("#ak-reauth-username").value,
+      reauth_password: root.querySelector("#ak-reauth-password").value,
+    };
+  }
+
+  root.querySelector("#ak-save").addEventListener("click", async () => {
+    const body = {
+      ...Object.fromEntries(AUTHENTIK_FIELDS.map(([key]) => [key, root.querySelector(`#ak-${key}`).value.trim()])),
+      ...reauthBody(),
+    };
+    const btn = root.querySelector("#ak-save");
+    btn.disabled = true;
+    try {
+      // silent: true — the generic "(403) you don't have permission" toast
+      // api.js would otherwise show is wrong here: a 403 from THIS route
+      // means the reauth password didn't check out, not that the caller
+      // lacks the admin role (they already do, or require_role() itself
+      // would have 403'd before this even ran). Show the real detail
+      // message instead ("Re-authentication failed", or the issuer
+      // validation failure) so the admin knows what actually went wrong.
+      await api.put(`${AUTH_BASE}/authentik-config`, body, { silent: true });
+      showToast("Saved — can take up to a minute to reach every service", "success");
+      loadAuthentikConfig(container);
+    } catch (err) {
+      showToast(err.message || "Couldn't save", "danger");
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  root.querySelector("#ak-reset").addEventListener("click", async () => {
+    const ok = await showConfirmDialog({
+      title: "Reset Authentik settings?",
+      message: "This reverts every service to the .env defaults. Anyone currently logged in through Authentik will be signed out.",
+      confirmLabel: "Reset",
+      danger: true,
+    });
+    if (!ok) return;
+    const btn = root.querySelector("#ak-reset");
+    btn.disabled = true;
+    try {
+      await api.post(`${AUTH_BASE}/authentik-config/reset`, reauthBody(), { silent: true });
+      showToast("Reset to .env defaults", "success");
+      loadAuthentikConfig(container);
+    } catch (err) {
+      showToast(err.message || "Couldn't reset", "danger");
+    } finally {
+      btn.disabled = false;
     }
   });
 }

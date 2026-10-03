@@ -19,7 +19,10 @@ export function isPushSupported() {
 export async function registerServiceWorker() {
   if (!isPushSupported()) return null;
   try {
-    return await navigator.serviceWorker.register("sw.js");
+    // Root-absolute: a relative "sw.js" resolves against the current
+    // page's path, so a boot from a deep route like /admin would
+    // register (and fail to find) /admin/sw.js instead of the real file.
+    return await navigator.serviceWorker.register("/sw.js");
   } catch {
     return null;
   }

@@ -4,6 +4,10 @@ const TOKEN_KEY = "hs_token";
 const SOURCE_KEY = "hs_auth_source"; // "local" | "authentik"
 const REFRESH_TOKEN_KEY = "hs_refresh_token"; // authentik only
 const ID_TOKEN_KEY = "hs_id_token"; // authentik only — needed as id_token_hint on logout
+// Stashed at login time so logout() needs no fetch — see getAuthentikConfig()
+// below for why end_session_url specifically can't come from a static
+// constant anymore, and why logout() still shouldn't need a network call.
+const END_SESSION_URL_KEY = "hs_end_session_url";
 const OIDC_STATE_KEY = "hs_oidc_state"; // sessionStorage
 const OIDC_VERIFIER_KEY = "hs_oidc_verifier"; // sessionStorage
 
@@ -31,11 +35,12 @@ export function getToken() {
   return localStorage.getItem(TOKEN_KEY);
 }
 
-function setSession({ accessToken, source, refreshToken, idToken }) {
+function setSession({ accessToken, source, refreshToken, idToken, endSessionUrl }) {
   localStorage.setItem(TOKEN_KEY, accessToken);
   localStorage.setItem(SOURCE_KEY, source);
   if (refreshToken) localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
   if (idToken) localStorage.setItem(ID_TOKEN_KEY, idToken);
+  if (endSessionUrl) localStorage.setItem(END_SESSION_URL_KEY, endSessionUrl);
 }
 
 export function clearToken() {
@@ -43,6 +48,7 @@ export function clearToken() {
   localStorage.removeItem(SOURCE_KEY);
   localStorage.removeItem(REFRESH_TOKEN_KEY);
   localStorage.removeItem(ID_TOKEN_KEY);
+  localStorage.removeItem(END_SESSION_URL_KEY);
 }
 
 export function isAuthenticated() {
@@ -145,6 +151,26 @@ async function fetchWithTimeout(url, options) {
   }
 }
 
+// The actual Authentik connection details (client_id, authorize/token/
+// end_session URLs, scope) used to be hardcoded here in config.js. They
+// now live in the auth service's database, editable through the admin
+// panel instead of hand-editing this file + .env on every service — see
+// auth_service.main's GET/PUT /authentik-config and shared.auth
+// ._AuthentikConfigCache (the backend-side equivalent of this same
+// cache). Fetched once per page load and cached in-module; a stale copy
+// for the rest of this tab's session is an acceptable tradeoff for not
+// hitting this on every call, and a fresh page load always re-fetches.
+let authentikConfigCache = null;
+
+async function getAuthentikConfig() {
+  if (!authentikConfigCache) {
+    const resp = await fetchWithTimeout(`${CONFIG.AUTH_BASE}/authentik-config`);
+    if (!resp.ok) throw new Error("Could not load Authentik configuration");
+    authentikConfigCache = await resp.json();
+  }
+  return authentikConfigCache;
+}
+
 function base64UrlEncode(bytes) {
   let str = "";
   for (const b of bytes) str += String.fromCharCode(b);
@@ -164,6 +190,7 @@ async function sha256Base64Url(text) {
 
 /** Redirects the browser to Authentik's login page. Never returns. */
 export async function loginWithAuthentik() {
+  const config = await getAuthentikConfig();
   const verifier = randomString(48);
   const challenge = await sha256Base64Url(verifier);
   const state = randomString(24);
@@ -173,14 +200,14 @@ export async function loginWithAuthentik() {
 
   const params = new URLSearchParams({
     response_type: "code",
-    client_id: CONFIG.AUTHENTIK_CLIENT_ID,
+    client_id: config.client_id,
     redirect_uri: CONFIG.AUTHENTIK_REDIRECT_URI,
-    scope: CONFIG.AUTHENTIK_SCOPE,
+    scope: config.scope,
     state,
     code_challenge: challenge,
     code_challenge_method: "S256",
   });
-  _navigate(`${CONFIG.AUTHENTIK_AUTHORIZE_URL}?${params}`);
+  _navigate(`${config.authorize_url}?${params}`);
 }
 
 /**
@@ -197,8 +224,11 @@ export async function handleAuthentikCallback() {
   if (!code && !error) return false;
 
   // Clean the callback params out of the URL either way, so a reload
-  // doesn't try to replay an already-used authorization code.
-  const cleanUrl = window.location.origin + window.location.pathname + window.location.hash;
+  // doesn't try to replay an already-used authorization code. Pathname
+  // only — AUTHENTIK_REDIRECT_URI is always origin + "/", so this is
+  // always just the bare root; main.js's boot() sends it on to the
+  // default route right after this resolves.
+  const cleanUrl = window.location.origin + window.location.pathname;
   window.history.replaceState({}, "", cleanUrl);
 
   const expectedState = sessionStorage.getItem(OIDC_STATE_KEY);
@@ -209,15 +239,19 @@ export async function handleAuthentikCallback() {
   if (error) return false; // e.g. the user cancelled at Authentik's consent screen
   if (!verifier || !expectedState || params.get("state") !== expectedState) return false;
 
+  // Only reached once we know this really is a callback — a normal page
+  // load returned false above already, so boot() never waits on this
+  // fetch for the common case.
   try {
+    const config = await getAuthentikConfig();
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
       redirect_uri: CONFIG.AUTHENTIK_REDIRECT_URI,
-      client_id: CONFIG.AUTHENTIK_CLIENT_ID,
+      client_id: config.client_id,
       code_verifier: verifier,
     });
-    const resp = await fetchWithTimeout(CONFIG.AUTHENTIK_TOKEN_URL, {
+    const resp = await fetchWithTimeout(config.token_url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -231,6 +265,7 @@ export async function handleAuthentikCallback() {
       source: "authentik",
       refreshToken: data.refresh_token,
       idToken: data.id_token,
+      endSessionUrl: config.end_session_url,
     });
     return true;
   } catch {
@@ -248,12 +283,13 @@ export async function tryRefreshAuthentikToken() {
   if (!refreshToken) return false;
 
   try {
+    const config = await getAuthentikConfig();
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
-      client_id: CONFIG.AUTHENTIK_CLIENT_ID,
+      client_id: config.client_id,
     });
-    const resp = await fetchWithTimeout(CONFIG.AUTHENTIK_TOKEN_URL, {
+    const resp = await fetchWithTimeout(config.token_url, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -274,13 +310,22 @@ export async function tryRefreshAuthentikToken() {
 export function logout() {
   const source = getAuthSource();
   const idToken = localStorage.getItem(ID_TOKEN_KEY);
+  // Read before clearToken() wipes it — stashed at login time (see
+  // setSession/handleAuthentikCallback) specifically so logout never
+  // needs a fetch for this: it has to work instantly and can't be
+  // allowed to hang just because the auth service (or Authentik
+  // itself) happens to be unreachable right now.
+  const endSessionUrl = localStorage.getItem(END_SESSION_URL_KEY);
   clearToken();
 
-  if (source === "authentik" && CONFIG.AUTHENTIK_END_SESSION_URL) {
+  if (source === "authentik" && endSessionUrl) {
     const params = new URLSearchParams({ post_logout_redirect_uri: window.location.origin + "/" });
     if (idToken) params.set("id_token_hint", idToken);
-    _navigate(`${CONFIG.AUTHENTIK_END_SESSION_URL}?${params}`);
+    _navigate(`${endSessionUrl}?${params}`);
     return; // browser is navigating away — nothing left to do here
   }
-  window.location.hash = "#/login";
+  // A full reload (same _navigate indirection used above), not
+  // router.js's navigate() — see api.js's 401 handler for why this
+  // low-level module never imports the router.
+  _navigate("/login");
 }

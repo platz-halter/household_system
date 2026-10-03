@@ -12,14 +12,14 @@ self.addEventListener("push", (event) => {
   const title = payload.title || "Household";
   const options = {
     body: payload.body || "",
-    data: { url: payload.url || "#/home" },
+    data: { url: payload.url || "/home" },
   };
   event.waitUntil(self.registration.showNotification(title, options));
 });
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const targetUrl = (event.notification.data && event.notification.data.url) || "#/home";
+  const targetUrl = (event.notification.data && event.notification.data.url) || "/home";
 
   event.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windowClients) => {
@@ -29,7 +29,11 @@ self.addEventListener("notificationclick", (event) => {
           return client.focus();
         }
       }
-      return self.clients.openWindow(self.registration.scope + targetUrl);
+      // new URL(path, scope) resolves a root-absolute path against the
+      // registration scope correctly regardless of a trailing slash on
+      // either side — plain string concatenation would double up (or
+      // drop) the "/" between them.
+      return self.clients.openWindow(new URL(targetUrl, self.registration.scope).href);
     })
   );
 });

@@ -40,7 +40,12 @@ async function request(url, options = {}) {
       }
     }
     clearToken();
-    window.location.hash = "#/login";
+    // A full reload, not router.js's navigate() — this is a low-level
+    // module nearly every page imports; importing the router back into
+    // it would create a router -> page -> api -> router cycle. A hard
+    // reload also guarantees any module-level cache gets dropped along
+    // with the now-cleared token.
+    window.location.assign("/login");
     throw new ApiError("Session expired", 401);
   }
 
@@ -66,11 +71,18 @@ async function request(url, options = {}) {
   return data;
 }
 
+// The optional 3rd `options` arg (currently just `{ silent: true }`) lets
+// a caller suppress the automatic error toast and show its own instead —
+// needed where the generic "(403) you don't have permission" toast would
+// be actively misleading, e.g. the Authentik admin panel's reauth check,
+// which 403s for a WRONG REAUTH PASSWORD even though the caller already
+// has a perfectly valid admin bearer token.
 export const api = {
   get: (url) => request(url),
-  post: (url, body) => request(url, { method: "POST", body: body !== undefined ? JSON.stringify(body) : undefined }),
+  post: (url, body, options) =>
+    request(url, { method: "POST", body: body !== undefined ? JSON.stringify(body) : undefined, ...options }),
   patch: (url, body) => request(url, { method: "PATCH", body: JSON.stringify(body) }),
-  put: (url, body) => request(url, { method: "PUT", body: JSON.stringify(body) }),
+  put: (url, body, options) => request(url, { method: "PUT", body: JSON.stringify(body), ...options }),
   del: (url) => request(url, { method: "DELETE" }),
   postForm: (url, formData) => request(url, { method: "POST", body: formData }),
 };

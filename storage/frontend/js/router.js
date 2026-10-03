@@ -4,6 +4,8 @@ import { renderOverview } from "./overview.js";
 import { renderSettings } from "./settings.js";
 import { renderRooms } from "./rooms.js";
 
+const DEFAULT_PATH = "/overview";
+
 const routes = {
   "/login": { render: renderLogin, requiresAuth: false, chrome: false },
   "/overview": { render: renderOverview, requiresAuth: true, chrome: true },
@@ -11,9 +13,34 @@ const routes = {
   "/rooms": { render: renderRooms, requiresAuth: true, chrome: true },
 };
 
+// Strips a trailing slash (except the bare root) so "/rooms/" and
+// "/rooms" resolve to the same route — easy to end up with a trailing
+// slash from a typed URL, an old bookmark, or browser autocomplete.
+function normalizePath(pathname) {
+  if (pathname.length > 1 && pathname.endsWith("/")) {
+    return pathname.slice(0, -1);
+  }
+  return pathname;
+}
+
 function currentPath() {
-  const hash = window.location.hash.replace(/^#/, "");
-  return hash || "/overview";
+  const path = normalizePath(window.location.pathname);
+  return path === "/" ? DEFAULT_PATH : path;
+}
+
+/**
+ * The one place that changes the URL for an in-app navigation. `replace`
+ * is for corrective redirects (not-logged-in, already-logged-in) that
+ * shouldn't leave a back-button entry pointing at the page that bounced
+ * the user away; omit it for a real, user-initiated navigation.
+ */
+export function navigate(path, { replace = false } = {}) {
+  if (replace) {
+    window.history.replaceState({}, "", path);
+  } else {
+    window.history.pushState({}, "", path);
+  }
+  handleRoute();
 }
 
 function updateChrome(path, chrome) {
@@ -33,14 +60,14 @@ function updateChrome(path, chrome) {
 
 async function handleRoute() {
   const path = currentPath();
-  const route = routes[path] || routes["/overview"];
+  const route = routes[path] || routes[DEFAULT_PATH];
 
   if (route.requiresAuth && !isAuthenticated()) {
-    window.location.hash = "#/login";
+    navigate("/login", { replace: true });
     return;
   }
   if (path === "/login" && isAuthenticated()) {
-    window.location.hash = "#/overview";
+    navigate(DEFAULT_PATH, { replace: true });
     return;
   }
 
@@ -49,7 +76,40 @@ async function handleRoute() {
   await route.render(app);
 }
 
+// Intercepts a click on any internal <a href="/..."> so it's a client-side
+// navigation (no full page reload/server round-trip) — the standard
+// no-framework SPA pattern. Deliberately narrow about what it takes:
+// only a plain left-click on a same-origin link whose path is one of
+// THIS app's known routes. Anything else (an API link, a synthetic
+// download anchor like admin's PDF-export `<a download>`, a blob: URL,
+// a modified click meant to open a new tab) is left to the browser's
+// default handling untouched.
+function onDocumentClick(event) {
+  if (event.defaultPrevented || event.button !== 0) return;
+  if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+
+  const anchor = event.target.closest("a");
+  if (!anchor || anchor.target || anchor.hasAttribute("download")) return;
+
+  let url;
+  try {
+    url = new URL(anchor.href, window.location.href);
+  } catch {
+    return;
+  }
+  if (url.origin !== window.location.origin) return;
+
+  const path = normalizePath(url.pathname);
+  if (path !== "/" && !(path in routes)) return;
+
+  event.preventDefault();
+  const target = path === "/" ? DEFAULT_PATH : path;
+  if (target === currentPath()) return;
+  navigate(target);
+}
+
 export function startRouter() {
-  window.addEventListener("hashchange", handleRoute);
+  window.addEventListener("popstate", handleRoute);
+  document.addEventListener("click", onDocumentClick);
   handleRoute();
 }

@@ -69,15 +69,17 @@ export async function renderRooms(container) {
 async function loadRooms(container, writable) {
   const root = container.querySelector("#rooms-list");
   if (!root) return;
-  root.innerHTML = `<div class="skeleton" style="height: 48px;"></div>`;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 48px;"></div>`);
 
   let rooms;
   try {
     rooms = await api.get(`${CONFIG.STORAGE_BASE}/rooms`);
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load rooms</div>`;
     return;
   }
+  cancelSkeleton();
 
   if (rooms.length === 0) {
     root.innerHTML = `<div class="empty-state">${icons.box}<p style="margin-top: var(--space-2);">No rooms yet</p></div>`;
@@ -122,4 +124,16 @@ function escapeHtml(str) {
 
 function escapeAttr(str) {
   return escapeHtml(str);
+}
+
+// A skeleton shown immediately flashes for anything that resolves fast
+// (typical on a local network) — delaying when it's allowed to appear
+// means a quick response never shows one at all, only a genuinely slow
+// one does. Call this right before the request starts, then call the
+// returned function as soon as it settles.
+function showSkeletonAfterDelay(root, html, delayMs = 200) {
+  const timer = setTimeout(() => {
+    root.innerHTML = html;
+  }, delayMs);
+  return () => clearTimeout(timer);
 }

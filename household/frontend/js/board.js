@@ -4,7 +4,7 @@ import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
-import { escapeHtml, escapeAttr, dueBadge, initials } from "./util.js";
+import { escapeHtml, escapeAttr, dueBadge, initials, showSkeletonAfterDelay } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -18,6 +18,7 @@ const STATUS_FILTERS = [
 const state = { status: "open" };
 let usersCache = null;
 let tasksCache = null;
+let categoriesCache = null;
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -76,19 +77,35 @@ async function loadTasks() {
   return tasksCache;
 }
 
+async function loadCategories() {
+  if (!categoriesCache) {
+    try {
+      categoriesCache = await api.get(`${HB}/categories`);
+    } catch {
+      categoriesCache = [];
+    }
+  }
+  return categoriesCache;
+}
+
 async function refreshTodos(container, writable) {
   const root = container.querySelector("#todo-list");
   if (!root) return;
-  root.innerHTML = `<div class="skeleton" style="height: 64px;"></div><div class="skeleton" style="height: 64px; margin-top: 8px;"></div>`;
+  const cancelSkeleton = showSkeletonAfterDelay(
+    root,
+    `<div class="skeleton" style="height: 64px;"></div><div class="skeleton" style="height: 64px; margin-top: 8px;"></div>`
+  );
 
   let todos;
   try {
     const qs = state.status ? `?status=${encodeURIComponent(state.status)}` : "";
     todos = await api.get(`${HB}/todos${qs}`);
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load the todo board</div>`;
     return;
   }
+  cancelSkeleton();
 
   if (todos.length === 0) {
     root.innerHTML = `<div class="empty-state">${icons.board}<p style="margin-top: var(--space-2);">Nothing here</p></div>`;
@@ -146,12 +163,29 @@ function todoRow(todo, container, writable) {
     ${
       writable && todo.status === "open"
         ? `<div class="list-row-actions">
+             ${
+               !todo.assigned_to
+                 ? `<button class="btn btn-icon" data-action="claim" aria-label="Claim todo" title="Claim — assign this to me">${icons.handRaised}</button>`
+                 : ""
+             }
              <button class="btn btn-icon btn-danger" data-action="cancel" aria-label="Cancel todo">${icons.close}</button>
              <button class="btn btn-icon btn-primary" data-action="complete" aria-label="Complete todo">${icons.check}</button>
            </div>`
         : ""
     }
   `;
+
+  if (writable && todo.status === "open" && !todo.assigned_to) {
+    row.querySelector('[data-action="claim"]').addEventListener("click", async () => {
+      try {
+        await api.post(`${HB}/todos/${todo.id}/claim`);
+        showToast(`Claimed "${todo.title}"`, "success");
+        refreshTodos(container, writable);
+      } catch {
+        /* api.js already showed a toast (e.g. 409 if someone else just claimed it) */
+      }
+    });
+  }
 
   if (writable && todo.status === "open") {
     row.querySelector('[data-action="complete"]').addEventListener("click", async () => {
@@ -185,7 +219,7 @@ function todoRow(todo, container, writable) {
 }
 
 async function openTodoModal(container) {
-  const [users, tasks] = await Promise.all([loadUsers(), loadTasks()]);
+  const [users, tasks, categories] = await Promise.all([loadUsers(), loadTasks(), loadCategories()]);
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -197,11 +231,11 @@ async function openTodoModal(container) {
       </div>
       <div class="stack">
         <div class="field">
-          <label for="t-task">From task</label>
-          <select class="select" id="t-task">
-            <option value="">Custom (one-off)</option>
-            ${tasks.map((t) => `<option value="${t.id}">${escapeAttr(t.name)}</option>`).join("")}
-          </select>
+          <label>From task</label>
+          <button type="button" class="btn btn-block" id="t-task-btn" style="justify-content: space-between;">
+            <span id="t-task-label">Custom (one-off)</span>
+            ${icons.chevronRight}
+          </button>
         </div>
         <div class="field">
           <label for="t-title">Title</label>
@@ -252,11 +286,21 @@ async function openTodoModal(container) {
   // Picking a task prefills title/description/points as a starting point
   // — the board item created is still a plain, independent TodoItem (not
   // linked back to the task), so it's fine to tweak these before posting.
-  overlay.querySelector("#t-task").addEventListener("change", (e) => {
-    const task = tasks.find((t) => String(t.id) === e.target.value);
-    overlay.querySelector("#t-title").value = task ? task.name : "";
-    overlay.querySelector("#t-description").value = task ? task.description || "" : "";
-    overlay.querySelector("#t-points").value = task ? task.points : 1;
+  // A native <select> here turns into an unusably long, un-searchable
+  // list on mobile once there are more than a handful of tasks — a
+  // popup picker with search + category filtering stays usable at any
+  // size (see openTaskPickerModal).
+  overlay.querySelector("#t-task-btn").addEventListener("click", () => {
+    openTaskPickerModal({
+      tasks,
+      categories,
+      onSelect: (task) => {
+        overlay.querySelector("#t-task-label").textContent = task ? task.name : "Custom (one-off)";
+        overlay.querySelector("#t-title").value = task ? task.name : "";
+        overlay.querySelector("#t-description").value = task ? task.description || "" : "";
+        overlay.querySelector("#t-points").value = task ? task.points : 1;
+      },
+    });
   });
 
   overlay.querySelector("#t-save").addEventListener("click", async () => {
@@ -287,4 +331,114 @@ async function openTodoModal(container) {
       /* api.js already showed a toast */
     }
   });
+}
+
+// A full-screen popup for picking a task, stacked on top of whatever
+// modal opened it (same nested-overlay pattern confirmDialog.js already
+// uses) — search + category chips keep it usable with a list of any
+// size, unlike a native <select> on mobile.
+function openTaskPickerModal({ tasks, categories, onSelect }) {
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>Choose a task</h2>
+        <button class="btn btn-icon btn-ghost" id="tp-close" aria-label="Close">${icons.close}</button>
+      </div>
+      <div class="search-bar" style="margin-bottom: var(--space-3);">
+        ${icons.search}
+        <input type="search" id="tp-search" placeholder="Search tasks…" />
+      </div>
+      <div class="chip-row" id="tp-categories" style="margin-bottom: var(--space-3);"></div>
+      <div id="tp-list" class="stack" style="max-height: 55vh; overflow-y: auto;"></div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  const close = () => overlay.remove();
+  overlay.querySelector("#tp-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  const pickerState = { q: "", categoryId: "" };
+
+  const catRoot = overlay.querySelector("#tp-categories");
+  const chips = [
+    { id: "", label: "All" },
+    ...categories.map((c) => ({ id: String(c.id), label: c.icon ? `${c.icon} ${c.name}` : c.name })),
+  ];
+  catRoot.innerHTML = chips
+    .map(
+      (c) =>
+        `<span class="chip${pickerState.categoryId === c.id ? " chip-active" : ""}" data-cat="${escapeAttr(c.id)}">${escapeHtml(c.label)}</span>`
+    )
+    .join("");
+  catRoot.querySelectorAll(".chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      pickerState.categoryId = chip.dataset.cat;
+      catRoot.querySelectorAll(".chip").forEach((c) => c.classList.toggle("chip-active", c === chip));
+      renderList();
+    });
+  });
+
+  let searchDebounce = null;
+  overlay.querySelector("#tp-search").addEventListener("input", (e) => {
+    clearTimeout(searchDebounce);
+    searchDebounce = setTimeout(() => {
+      pickerState.q = e.target.value.trim().toLowerCase();
+      renderList();
+    }, 200);
+  });
+
+  function renderList() {
+    const listRoot = overlay.querySelector("#tp-list");
+    let filtered = tasks;
+    if (pickerState.q) filtered = filtered.filter((t) => t.name.toLowerCase().includes(pickerState.q));
+    if (pickerState.categoryId) {
+      filtered = filtered.filter((t) => t.categories.some((c) => String(c.id) === pickerState.categoryId));
+    }
+
+    listRoot.innerHTML = "";
+
+    const customRow = document.createElement("button");
+    customRow.type = "button";
+    customRow.className = "list-row";
+    customRow.innerHTML = `<div class="list-row-body"><div class="list-row-title">Custom (one-off)</div></div>`;
+    customRow.addEventListener("click", () => {
+      onSelect(null);
+      close();
+    });
+    listRoot.appendChild(customRow);
+
+    if (filtered.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty-state";
+      empty.textContent = "No tasks match";
+      listRoot.appendChild(empty);
+      return;
+    }
+
+    filtered.forEach((t) => {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "list-row";
+      const catLabel = t.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
+      row.innerHTML = `
+        <div class="list-row-body">
+          <div class="list-row-title">${escapeHtml(t.name)}</div>
+          ${catLabel ? `<div class="list-row-meta"><span>${escapeHtml(catLabel)}</span></div>` : ""}
+        </div>
+        <div class="list-row-points"><span>${t.points}</span><span class="muted">pts</span></div>
+      `;
+      row.addEventListener("click", () => {
+        onSelect(t);
+        close();
+      });
+      listRoot.appendChild(row);
+    });
+  }
+
+  renderList();
 }

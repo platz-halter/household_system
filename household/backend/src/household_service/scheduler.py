@@ -37,9 +37,47 @@ async def _weekly_nudge_tick() -> None:
     async with async_session_factory() as db:
         result = await crud.run_scheduled_nudge_if_due(db)
     if result is not None:
-        notified, skipped = result
+        notified, skipped_goal, skipped_sub = result
         logger.info(
-            "Scheduled weekly nudge sent: notified=%s skipped=%s", notified, skipped
+            "Scheduled weekly nudge sent: notified=%s skipped_already_met_goal=%s "
+            "skipped_no_subscription=%s",
+            notified,
+            skipped_goal,
+            skipped_sub,
+        )
+
+
+async def _balancing_tick() -> None:
+    """Runs every hour on the hour; most ticks are no-ops (see
+    crud.run_scheduled_balancing_if_due — it only actually runs once per
+    calendar day, whichever tick gets there first)."""
+    async with async_session_factory() as db:
+        outcome = await crud.run_scheduled_balancing_if_due(db)
+    if outcome is not None:
+        logger.info(
+            "Scheduled balancing run: %s task(s), %s todo(s) assigned, %s reassigned, "
+            "%s task(s)/%s todo(s) left unassigned",
+            len(outcome.new_task_assignments),
+            len(outcome.new_todo_assignments),
+            len(outcome.reassignments),
+            outcome.unassigned_task_count,
+            outcome.unassigned_todo_count,
+        )
+
+
+async def _auto_report_tick() -> None:
+    """Runs every hour on the hour; most ticks are no-ops (see
+    crud.run_scheduled_auto_report_if_due — it's a "catch up" check, not
+    a weekday/hour match, so it still fires correctly even after
+    downtime right when a week rolled over)."""
+    async with async_session_factory() as db:
+        report = await crud.run_scheduled_auto_report_if_due(db)
+    if report is not None:
+        logger.info(
+            "Scheduled weekly report generated/confirmed: id=%s %s – %s",
+            report.id,
+            report.period_start,
+            report.period_end,
         )
 
 
@@ -50,6 +88,20 @@ def start() -> None:
         _weekly_nudge_tick,
         CronTrigger(minute=0),
         id="weekly_nudge_tick",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _balancing_tick,
+        CronTrigger(minute=5),
+        id="balancing_tick",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _auto_report_tick,
+        CronTrigger(minute=10),
+        id="auto_report_tick",
         replace_existing=True,
         misfire_grace_time=3600,
     )

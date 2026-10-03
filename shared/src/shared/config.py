@@ -21,11 +21,31 @@ class Settings(BaseSettings):
     # Both verification paths below are always active (see shared/auth.py)
     # — which one runs is decided per-token, not by a mode switch here.
 
-    authentik_issuer: str = "https://authentik.pressnet.duckdns.org/application/o/household-system/"
+    # These seven fields are the static fallback used only until an admin
+    # saves an override through the Authentik admin panel (see auth
+    # service's `authentik_settings` table and `GET/PUT /authentik-config`)
+    # — every service calls that endpoint (over `auth_service_url` below)
+    # rather than reading these directly, so changing them here without
+    # also clearing any saved override has no effect once one exists.
+    # They used to be the ONLY source (hand-edited here plus duplicated
+    # in both frontends' `config.js`); kept as real working defaults
+    # rather than placeholders so a fresh deploy with no .env changes and
+    # no admin-panel use yet still has a complete, working config.
+    authentik_issuer: str = (
+        "https://authentik.pressnet.duckdns.org/application/o/household-system/"
+    )
     authentik_jwks_url: str = (
         "https://authentik.pressnet.duckdns.org/application/o/household-system/jwks/"
     )
     authentik_client_id: str = ""
+    authentik_authorize_url: str = (
+        "https://authentik.pressnet.duckdns.org/application/o/authorize/"
+    )
+    authentik_token_url: str = (
+        "https://authentik.pressnet.duckdns.org/application/o/token/"
+    )
+    authentik_end_session_url: str = "https://authentik.pressnet.duckdns.org/application/o/household-system/end-session/"
+    authentik_scope: str = "openid profile email groups"
 
     # The local auth service signs its own JWTs with this secret so other
     # services can verify them the same way they'd verify an Authentik

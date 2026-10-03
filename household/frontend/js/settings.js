@@ -5,7 +5,7 @@ import { getCurrentUserInfo, logout } from "./auth.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
-import { escapeHtml } from "./util.js";
+import { escapeHtml, showSkeletonAfterDelay } from "./util.js";
 import { isPushSupported, getPushSubscription, subscribeToPush, unsubscribeFromPush } from "./push.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -53,24 +53,24 @@ export async function renderSettings(container) {
 
       <div class="settings-section">
         <h3>Break mode</h3>
-        <div id="break-mode-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="break-mode-root"></div>
       </div>
 
       <div class="settings-section">
         <h3>Notifications</h3>
-        <div id="push-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="push-root"></div>
       </div>
 
       <div class="settings-section">
         <h3>Household</h3>
-        <div id="household-settings-root"><div class="skeleton" style="height: 56px;"></div></div>
+        <div id="household-settings-root"></div>
       </div>
 
       ${
         admin
           ? `<div class="settings-section">
                <h3>Admin</h3>
-               <a href="#/admin" class="list-row">
+               <a href="/admin" class="list-row">
                  <div class="list-row-body">
                    <div class="list-row-title">Admin panel</div>
                    <div class="list-row-meta"><span>Settings only admins can change</span></div>
@@ -181,8 +181,10 @@ async function loadAvatar(container, writable) {
 async function loadBreakMode(container, writable) {
   const root = container.querySelector("#break-mode-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
   try {
     const me = await api.get(`${HB}/me`);
+    cancelSkeleton();
     root.innerHTML = `
       <div class="switch-row">
         <div class="switch-row-text">
@@ -221,6 +223,7 @@ async function loadBreakMode(container, writable) {
       });
     }
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load break status</div>`;
   }
 }
@@ -228,13 +231,16 @@ async function loadBreakMode(container, writable) {
 async function loadPushSection(container, writable) {
   const root = container.querySelector("#push-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
 
   if (!isPushSupported()) {
+    cancelSkeleton();
     root.innerHTML = `<div class="muted" style="font-size: var(--font-size-sm);">Not supported in this browser</div>`;
     return;
   }
 
   const subscription = await getPushSubscription();
+  cancelSkeleton();
   root.innerHTML = `
     <div class="switch-row">
       <div class="switch-row-text">
@@ -291,13 +297,15 @@ async function loadPushSection(container, writable) {
   }
 }
 
-// Read-only for everyone here — only the Admin panel (#/admin) can change
+// Read-only for everyone here — only the Admin panel (/admin) can change
 // it, which is why there's no input/save button in this section anymore.
 async function loadHouseholdSettings(container) {
   const root = container.querySelector("#household-settings-root");
   if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
   try {
     const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
     root.innerHTML = `
       <div class="row-between">
         <span class="muted">Weekly points goal</span>
@@ -305,6 +313,7 @@ async function loadHouseholdSettings(container) {
       </div>
     `;
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load household settings</div>`;
   }
 }

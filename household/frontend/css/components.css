@@ -507,8 +507,10 @@
 
 .section-heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
+  gap: var(--space-2);
   margin: var(--space-6) 0 var(--space-3);
 }
 
@@ -735,6 +737,32 @@
 .segmented button.active {
   background: var(--color-accent);
   color: var(--color-accent-contrast);
+}
+
+/* The leaderboard's period toggle has 4 options with longer labels
+   ("This week", "Last week") than any other segmented control in the
+   app — on a narrow phone it doesn't fit next to the "Leaderboard"
+   title on one line and visibly collided with it. Drop it to its own
+   full-width row (section-heading's flex-wrap above already allows
+   this) with evenly-stretched buttons; once there's enough width for
+   both on one line again, go back to the compact inline look every
+   other segmented control uses. */
+#period-segmented {
+  width: 100%;
+}
+
+#period-segmented button {
+  flex: 1;
+}
+
+@media (min-width: 560px) {
+  #period-segmented {
+    width: auto;
+  }
+
+  #period-segmented button {
+    flex: none;
+  }
 }
 
 /* --- Leaderboard --- */

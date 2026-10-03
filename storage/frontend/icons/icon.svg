@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#111111"/>
+  <!-- isometric box: top face white, two side faces in grays, thin dark
+       seams between faces for crispness -->
+  <polygon points="256,96 394.6,176 256,256 117.4,176" fill="#ffffff"/>
+  <polygon points="117.4,176 256,256 256,416 117.4,336" fill="#8c8c8c"/>
+  <polygon points="394.6,176 394.6,336 256,416 256,256" fill="#c7c7c7"/>
+  <path d="M256 96 L394.6 176 L394.6 336 L256 416 L117.4 336 L117.4 176 Z M256 256 L256 416 M256 256 L117.4 176 M256 256 L394.6 176"
+        fill="none" stroke="#111111" stroke-width="6" stroke-linejoin="round"/>
+</svg>

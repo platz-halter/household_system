@@ -1,6 +1,6 @@
 import { getStoredTheme, applyTheme } from "./theme.js";
 import { handleAuthentikCallback } from "./auth.js";
-import { startRouter } from "./router.js";
+import { startRouter, navigate } from "./router.js";
 import { showToast } from "./toast.js";
 import { registerServiceWorker } from "./push.js";
 
@@ -14,7 +14,7 @@ applyTheme(getStoredTheme());
 // (a service worker can't touch this page's window.location directly).
 navigator.serviceWorker?.addEventListener("message", (event) => {
   if (event.data?.type === "navigate" && event.data.url) {
-    window.location.hash = event.data.url;
+    navigate(event.data.url);
   }
 });
 
@@ -29,8 +29,11 @@ async function boot() {
   if (hadCallback && !loggedIn) {
     showToast("Login with Authentik failed", "danger");
   }
+  // Not navigate() — the router's click/popstate listeners aren't
+  // attached yet, and startRouter()'s own initial render below would
+  // then render a second time on top of this one.
   if (loggedIn) {
-    window.location.hash = "#/home";
+    window.history.replaceState({}, "", "/home");
   }
 
   registerServiceWorker();

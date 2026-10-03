@@ -4,7 +4,7 @@ import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
-import { escapeHtml, escapeAttr, WEEKDAY_LABELS } from "./util.js";
+import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -71,15 +71,17 @@ async function loadCategories(container, writable) {
 async function loadTasks(container, writable) {
   const root = container.querySelector("#task-list");
   if (!root) return;
-  root.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 64px;"></div>`);
 
   let tasks;
   try {
     tasks = await api.get(`${HB}/tasks`);
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load tasks</div>`;
     return;
   }
+  cancelSkeleton();
 
   if (tasks.length === 0) {
     root.innerHTML = `<div class="empty-state">No tasks yet${writable ? " — add one below" : ""}</div>`;
@@ -90,12 +92,19 @@ async function loadTasks(container, writable) {
   tasks.forEach((task) => root.appendChild(taskRow(task, container, writable)));
 }
 
+function scheduleLabel(task) {
+  if (task.recurrence === "weekly") {
+    return task.weekdays && task.weekdays.length ? task.weekdays.map((w) => WEEKDAY_LABELS[w]).join(" ") : "Weekly";
+  }
+  if (task.recurrence === "monthly") return "Monthly";
+  return "Every day";
+}
+
 function taskRow(task, container, writable) {
   const row = document.createElement("div");
   row.className = "list-row";
   const catLabel = task.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
-  const schedule =
-    task.weekdays && task.weekdays.length ? task.weekdays.map((w) => WEEKDAY_LABELS[w]).join(" ") : "Every day";
+  const schedule = scheduleLabel(task);
 
   row.innerHTML = `
     <div class="list-row-body">
@@ -205,7 +214,7 @@ function openCategoryModal(container, writable, category = null) {
 function openTaskModal(container, writable, task = null) {
   const selectedCats = new Set((task?.categories || []).map((c) => c.id));
   const selectedWeekdays = new Set(task?.weekdays || []);
-  const hasSchedule = Boolean(task?.weekdays && task.weekdays.length);
+  const recurrence = task?.recurrence || "daily";
 
   const { body, close } = openModalShell(task ? "Edit task" : "New task");
 
@@ -231,8 +240,17 @@ function openTaskModal(container, writable, task = null) {
       </div>
 
       <div class="field">
-        <label class="row"><input type="checkbox" id="f-has-schedule" ${hasSchedule ? "checked" : ""} /> <span>Only on specific weekdays</span></label>
-        <div class="weekday-picker" id="f-weekdays" style="margin-top: var(--space-2);">
+        <label for="f-recurrence">Repeats</label>
+        <select class="select" id="f-recurrence">
+          <option value="daily" ${recurrence === "daily" ? "selected" : ""}>Daily — a standing chore, every day</option>
+          <option value="weekly" ${recurrence === "weekly" ? "selected" : ""}>Weekly — specific weekdays</option>
+          <option value="monthly" ${recurrence === "monthly" ? "selected" : ""}>Monthly</option>
+        </select>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
+          Only weekly/monthly tasks are handed out by the balancing tool (Admin panel) — a
+          daily task stays a standing chore anyone can log any day.
+        </p>
+        <div class="weekday-picker" id="f-weekdays" style="margin-top: var(--space-2); ${recurrence === "weekly" ? "" : "display:none;"}">
           ${WEEKDAY_LABELS.map((label, i) => `<div class="weekday-pill${selectedWeekdays.has(i) ? " on" : ""}" data-day="${i}">${label}</div>`).join("")}
         </div>
       </div>
@@ -271,6 +289,11 @@ function openTaskModal(container, writable, task = null) {
     </div>
   `;
 
+  const weekdayPicker = body.querySelector("#f-weekdays");
+  body.querySelector("#f-recurrence").addEventListener("change", (e) => {
+    weekdayPicker.style.display = e.target.value === "weekly" ? "" : "none";
+  });
+
   body.querySelectorAll(".weekday-pill").forEach((pill) => {
     pill.addEventListener("click", () => {
       const day = Number(pill.dataset.day);
@@ -301,10 +324,10 @@ function openTaskModal(container, writable, task = null) {
       showToast("Name is required", "warning");
       return;
     }
-    const scheduled = body.querySelector("#f-has-schedule").checked;
-    const weekdays = scheduled ? [...selectedWeekdays].sort((a, b) => a - b) : null;
-    if (scheduled && weekdays.length === 0) {
-      showToast('Pick at least one weekday, or turn off "specific weekdays"', "warning");
+    const newRecurrence = body.querySelector("#f-recurrence").value;
+    const weekdays = newRecurrence === "weekly" ? [...selectedWeekdays].sort((a, b) => a - b) : null;
+    if (newRecurrence === "weekly" && weekdays.length === 0) {
+      showToast("Pick at least one weekday for a weekly task", "warning");
       return;
     }
 
@@ -313,6 +336,7 @@ function openTaskModal(container, writable, task = null) {
       description: body.querySelector("#f-description").value.trim() || null,
       points: Number(body.querySelector("#f-points").value || 0),
       active: body.querySelector("#f-active").checked,
+      recurrence: newRecurrence,
       times_per_day: Number(body.querySelector("#f-times").value || 1),
       weekdays,
       ramp_up_enabled: rampCheckbox.checked,

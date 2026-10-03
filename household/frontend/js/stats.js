@@ -1,6 +1,6 @@
 import { CONFIG } from "./config.js";
 import { api, fetchImageUrl } from "./api.js";
-import { escapeHtml, initials, timeAgo, startOfWeekIso, startOfMonthIso, lastWeekRangeIso } from "./util.js";
+import { escapeHtml, initials, timeAgo, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -47,7 +47,7 @@ export async function renderStats(container) {
       <div class="heatmap-wrap">
         <div class="heatmap-daylabels-col">
           <div class="heatmap-months-spacer"></div>
-          <div class="heatmap-daylabels"><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span><span>Su</span></div>
+          <div class="heatmap-daylabels" id="heatmap-daylabels"></div>
         </div>
         <div class="heatmap-scroll" id="heatmap-scroll">
           <div class="heatmap-months" id="heatmap-months"></div>
@@ -92,24 +92,20 @@ function wireSegmented(container, rootSel, attr, onChange) {
   });
 }
 
-function periodRange() {
-  if (state.period === "week") return { since: startOfWeekIso(), until: null };
-  if (state.period === "lastweek") return lastWeekRangeIso();
-  if (state.period === "month") return { since: startOfMonthIso(), until: null };
-  return { since: null, until: null };
-}
+// Maps this page's own period ids to the backend's `period` values —
+// resolved server-side (against the admin's configured week start, in
+// UTC) rather than computed here, so this page never has to know that
+// setting or juggle the local-vs-UTC day-boundary gap plain client-side
+// date math had (see crud.resolve_leaderboard_bounds).
+const PERIOD_PARAM = { all: "all", week: "this_week", lastweek: "last_week", month: "this_month" };
 
 async function loadLeaderboard(container) {
   const root = container.querySelector("#leaderboard-list");
   if (!root) return;
-  root.innerHTML = `<div class="skeleton" style="height: 48px;"></div>`;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 48px;"></div>`);
   try {
-    const { since, until } = periodRange();
-    const params = new URLSearchParams();
-    if (since) params.set("since", since);
-    if (until) params.set("until", until);
-    const qs = params.toString() ? `?${params}` : "";
-    const rows = await api.get(`${HB}/points/leaderboard${qs}`);
+    const rows = await api.get(`${HB}/points/leaderboard?period=${PERIOD_PARAM[state.period]}`);
+    cancelSkeleton();
     if (rows.length === 0) {
       root.innerHTML = `<div class="empty-state">No one on the leaderboard yet</div>`;
       return;
@@ -128,6 +124,7 @@ async function loadLeaderboard(container) {
       .join("");
     hydrateAvatars(root);
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load the leaderboard</div>`;
   }
 }
@@ -150,9 +147,10 @@ async function hydrateAvatars(root) {
 async function loadRecent(container) {
   const root = container.querySelector("#recent-list");
   if (!root) return;
-  root.innerHTML = `<div class="skeleton" style="height: 40px;"></div>`;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 40px;"></div>`);
   try {
     const entries = await api.get(`${HB}/points/recent?limit=20`);
+    cancelSkeleton();
     if (entries.length === 0) {
       root.innerHTML = `<div class="empty-state">No activity yet</div>`;
       return;
@@ -173,6 +171,7 @@ async function loadRecent(container) {
       .join("");
     hydrateAvatars(root);
   } catch {
+    cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load recent activity</div>`;
   }
 }
@@ -188,18 +187,30 @@ async function getMe() {
   return meCache;
 }
 
-/** Lays flat [{date, points}, ...] (ascending, contiguous) into weeks of 7
- * (Monday-first, matching the backend's weekday convention), padding both
- * ends with nulls so every week column has exactly 7 slots. */
-function buildWeeks(days) {
+/** Lays flat [{date, points}, ...] (ascending, contiguous) into weeks of 7,
+ * starting on the household's configured week-start weekday (0=Mon..6=Sun,
+ * same convention as the backend's `crud.week_bounds` — see
+ * PROJECT_STATE.md), padding both ends with nulls so every week column has
+ * exactly 7 slots. */
+function buildWeeks(days, weekStart) {
   if (days.length === 0) return [];
   const first = new Date(`${days[0].date}T00:00:00`);
-  const firstWeekday = (first.getDay() + 6) % 7; // Monday = 0
+  const mondayFirst = (first.getDay() + 6) % 7; // JS getDay(): 0=Sun..6=Sat -> 0=Mon..6=Sun
+  const firstWeekday = (mondayFirst - weekStart + 7) % 7;
   const padded = Array(firstWeekday).fill(null).concat(days);
   while (padded.length % 7 !== 0) padded.push(null);
   const weeks = [];
   for (let i = 0; i < padded.length; i += 7) weeks.push(padded.slice(i, i + 7));
   return weeks;
+}
+
+/** Same Mon..Sun labels as elsewhere in this app (`util.js`'s
+ * WEEKDAY_LABELS, trimmed to 2 letters), rotated so the configured
+ * week-start weekday comes first — keeps the label row above the grid
+ * in sync with how buildWeeks() above actually lays out columns. */
+function dayLabels(weekStart) {
+  const monFirst = WEEKDAY_LABELS.map((l) => l.slice(0, 2));
+  return monFirst.slice(weekStart).concat(monFirst.slice(0, weekStart));
 }
 
 /** Buckets a day's points into 5 shades (0-4) relative to the busiest day
@@ -216,9 +227,18 @@ function heatBucket(points, max) {
 async function loadHeatmap(container) {
   const gridRoot = container.querySelector("#heatmap-grid");
   const monthsRoot = container.querySelector("#heatmap-months");
+  const dayLabelsRoot = container.querySelector("#heatmap-daylabels");
   if (!gridRoot) return;
   gridRoot.innerHTML = "";
   monthsRoot.innerHTML = "";
+
+  const { week_start_weekday } = await getSettings();
+  const weekStart = week_start_weekday ?? 0;
+  if (dayLabelsRoot) {
+    dayLabelsRoot.innerHTML = dayLabels(weekStart)
+      .map((label) => `<span>${label}</span>`)
+      .join("");
+  }
 
   let householdUserId = null;
   if (state.scope === "me") {
@@ -237,7 +257,7 @@ async function loadHeatmap(container) {
   }
 
   const max = Math.max(1, ...days.map((d) => d.points));
-  const weeks = buildWeeks(days);
+  const weeks = buildWeeks(days, weekStart);
 
   let lastMonth = null;
   weeks.forEach((week) => {

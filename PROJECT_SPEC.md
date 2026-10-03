@@ -51,10 +51,20 @@ see `PROJECT_STATE.md`.
 - **Three roles**, same across every service: `admin`, `user`, `viewer`.
   - Viewers: read-only everywhere.
   - Users and Admins: normal full use.
-  - (Admin/User are otherwise undistinguished — the one exception is
-    Household's weekly points goal, which only Admins can change; see
-    "Admin tools" below. Anything else admin-only, e.g. user
-    management, isn't designed yet.)
+  - In **Storage**, Admin/User are fully undistinguished — both have
+    full read/write access everywhere. This is deliberate, not an
+    unfinished gap: the household is a trusted group, and nothing in
+    Storage's domain (editing items, locations, rooms) is sensitive
+    enough to need gatekeeping beyond "logged-in member vs. read-only
+    viewer." `admin` still exists as a role there only because the
+    same three roles are shared across every service.
+  - In **Household**, every "Admin tools" action below (weekly goal,
+    money rate, reminder schedule, running the balancer on demand,
+    generating/marking-paid reports, and the Authentik connection
+    settings) is Admin-only; User is otherwise identical to Admin
+    everywhere else in that app. Local-account user management (adding
+    a user beyond the first bootstrap admin) is Admin-only too, but has
+    no UI yet — API only (`auth`'s `POST /users`).
 - Authentik groups map to roles: `household-system-admins`,
   `household-system-users`, `household-system-viewers`.
 - An unrecognized or missing group/role fails closed to `viewer`.
@@ -96,33 +106,82 @@ Tracks physical items (cellar, pantry, etc.).
 - Reachable both from home (via Caddy) and on the go (away from the home
   network, through the same Caddy/Netbird/Authentik chain already used
   for other homelab services).
+- **Installable to homescreen** (PWA-style — manifest + icons, not
+  necessarily full offline support; no Web Push here, so no service
+  worker either — see the matching bullet under Household below).
 
 ## Household System (chores/points)
 
 - **Points**: multiple users collect points for completing chores.
 - **Reminders**: push notifications (native Web Push, not a third-party
   service) nudging users to log points during the week.
-- **Scheduling**: tasks can be set up as a repeating weekly schedule
-  (e.g. "dishwasher, 2x/day").
-- **Balancing tool**: auto-assigns tasks, varies which user gets which
-  task over time (avoids always assigning the same person the same
-  task), and favors users currently sitting on fewer points.
+- **Scheduling**: a task has a recurrence of `daily` (a standing chore,
+  no auto-assignment — anyone logs it whenever), `weekly` (specific
+  weekdays, e.g. "dishwasher, Mon/Wed/Fri, 2x/day"), or `monthly`.
+- **Balancing tool**: two passes, run together.
+  - *Sweep*: auto-assigns `weekly`/`monthly` tasks and any unclaimed
+    Board todo to whoever's currently carrying the least load (points
+    already earned this week, plus whatever they're already carrying
+    into this run) — favoring users sitting on fewer points, rotating a
+    task away from whoever last had it when another eligible person
+    exists, and capping how many new items any one person can get in a
+    single run so nobody's overwhelmed.
+  - *Mid-week rebalance*: after the sweep, pulls an unfinished task away
+    from whoever's pulled well ahead and hands it to whoever's still
+    meaningfully behind, so one person getting a head start early in the
+    week doesn't just sit uncorrected until the next sweep. Only moves a
+    task nobody's made any progress on yet, never one with the weekly
+    goal already on the line (it won't newly cause the person losing it
+    to miss their goal if they weren't going to already), and a given
+    task can only be pulled once per period, so it can't bounce back and
+    forth.
+  - A ramp-up task (see below) is exempt from both rotation and
+    pulling — it stays with its current solo completer, since moving it
+    would permanently kill the bonus for everyone.
+  - Runs automatically once a day (not just at the start of a period —
+    the rebalance pass needs regular rechecking to actually catch
+    someone falling behind mid-week), or on demand from the Admin panel.
+    A user going on break releases whatever they haven't finished yet,
+    so it can be picked back up instead of staying stuck.
 - **Todo board**: users can post one-off tasks requesting completion
   within a set number of days (or "today"), and can request a specific
   other user take a task — which sends that user a push notification.
+  An unclaimed, unrequested todo can also be self-claimed by anyone, or
+  picked up by the balancing tool above.
 - **Ramp-up tasks**: a task can be configured to give a bonus if the
   same user always completes it alone (bonus amount configurable per
   task).
 - **Admin tools**:
+  - A configurable week start (which weekday "this week" begins on) —
+    applies everywhere points/goals are tracked by week: Home, Stats,
+    the balancing tool, and weekly reports.
   - A points-to-money (EUR) conversion rate, for admins to track payout
     amounts. Display/reference only — no connection to an actual
     payment or payout process.
-  - Downloadable PDF reports, by week or month. Past reports of the past months can also be downloaded.
+  - Downloadable PDF reports, by week or month. Past reports of the past
+    months can also be downloaded. Can auto-generate the past week's
+    report as soon as each week ends, in addition to generating one for
+    any period on demand; either way, a push notification goes to
+    admins when a new report is ready. The admin panel's reports list
+    flags whichever one covers last week, and each report can be marked
+    paid (reference only, same as the conversion rate above — no real
+    payout is connected) to track which have actually been settled.
+  - The Authentik connection itself (issuer, JWKS URL, client ID,
+    authorize/token/end-session URLs, scope) is editable here too,
+    instead of hand-editing `.env` on the server. Saving requires a
+    separate local-admin re-authentication (not just a currently-valid
+    admin session) and takes effect across every service within about
+    a minute, no restart needed — see `shared/auth.py` and
+    `auth_service.main`'s `/authentik-config` routes.
 - **Break mode**: a user can mark themselves on break (vacation,
   sickness), which excludes them from the leaderboard and from new task
-  assignments until they turn it off.
+  assignments until they turn it off. It only hides them from those two
+  things — it never touches points already earned: those keep counting
+  toward their own personal stats and still show up in weekly/monthly
+  PDF reports exactly as earned, break or not.
 - **Installable to homescreen** (PWA-style — manifest + icons, not
-  necessarily full offline support).
+  necessarily full offline support). Both frontends have this, not just
+  Household — see the matching bullet under Storage above.
 
 ### Household planned pages
 

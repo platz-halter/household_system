@@ -19,8 +19,11 @@ async function boot() {
   if (hadCallback && !loggedIn) {
     showToast("Login with Authentik failed", "danger");
   }
+  // Not navigate() — the router's click/popstate listeners aren't
+  // attached yet, and startRouter()'s own initial render below would
+  // then render a second time on top of this one.
   if (loggedIn) {
-    window.location.hash = "#/overview";
+    window.history.replaceState({}, "", "/overview");
   }
 
   startRouter();

@@ -2,6 +2,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
+from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,9 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from household_service import crud, scheduler
 from household_service import reports as reports_pdf
-from household_service.models import TodoStatus
+from household_service.models import ReportPeriod, TodoStatus
 from household_service.schemas import (
     ActivityDay,
+    BalancingRunResult,
+    BalancingUserSummary,
     CategoryIn,
     CategoryOut,
     CategoryUpdate,
@@ -29,8 +32,11 @@ from household_service.schemas import (
     PointsEntryOut,
     PushSubscriptionIn,
     PushUnsubscribeIn,
+    ReassignmentOut,
     ReportCreate,
+    ReportMarkPaidIn,
     ReportOut,
+    TaskAssignmentOut,
     TaskCompleteRequest,
     TaskCreate,
     TaskOut,
@@ -75,7 +81,19 @@ can_admin = require_role("admin")
 
 
 async def _self(db: AsyncSession, user: CurrentUser):
-    return await crud.get_or_create_household_user(db, user.subject)
+    """Resolves (and auto-provisions) this request's HouseholdUser, and
+    keeps its cached `role` hint in sync with the token's actual role —
+    called on nearly every route, so in practice this stays fresh.
+    `role` is never read for authorization (that's always the live token,
+    same as everywhere else in this app) — it only exists so a
+    background job (an auto-generated report) can know who's an admin to
+    push-notify without a live request/token to check against."""
+    household_user = await crud.get_or_create_household_user(db, user.subject)
+    if household_user.role != user.role:
+        household_user.role = user.role
+        await db.commit()
+        await db.refresh(household_user)
+    return household_user
 
 
 @app.get("/health")
@@ -263,6 +281,17 @@ async def create_task(
     return TaskOut.from_model(task)
 
 
+# Must stay declared before /tasks/{task_id} below, same reason as
+# storage's /items/bulk* — otherwise FastAPI tries to parse
+# "completions-today" as the {task_id} int path param instead.
+@app.get("/tasks/completions-today", response_model=dict[int, int])
+async def tasks_completions_today(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    return await crud.task_completions_today(db)
+
+
 @app.get("/tasks/{task_id}", response_model=TaskOut)
 async def get_task(
     task_id: int,
@@ -344,7 +373,12 @@ async def complete_task(
     else:
         target = await _self(db, user)
 
-    entry = await crud.complete_task(db, task, target)
+    try:
+        entry = await crud.complete_task(db, task, target)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     return PointsEntryOut.from_model(entry)
 
 
@@ -453,6 +487,83 @@ async def delete_todo(
     await crud.delete_todo(db, todo)
 
 
+@app.post("/todos/{todo_id}/claim", response_model=TodoOut)
+async def claim_todo(
+    todo_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    if await crud.get_todo(db, todo_id) is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found"
+        )
+    claimer = await _self(db, user)
+    todo = await crud.claim_todo(db, todo_id, claimer)
+    if todo is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This item has already been claimed or assigned",
+        )
+    return TodoOut.model_validate(todo)
+
+
+# ---- Task assignments / balancing tool -----------------------------------
+
+
+@app.get("/assignments", response_model=list[TaskAssignmentOut])
+async def list_assignments(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    assignments = await crud.list_current_assignments(db)
+    return [TaskAssignmentOut.from_model(a) for a in assignments]
+
+
+@app.post("/balancing/run", response_model=BalancingRunResult)
+async def run_balancing(
+    as_of: date | None = None,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    outcome = await crud.run_balancing(db, as_of=as_of)
+    users_by_id = {u.id: u for u in await crud.list_household_users(db)}
+    return BalancingRunResult(
+        week_period_start=outcome.week_start,
+        week_period_end=outcome.week_end,
+        month_period_start=outcome.month_start,
+        month_period_end=outcome.month_end,
+        task_assignments=[
+            TaskAssignmentOut.from_model(a) for a in outcome.new_task_assignments
+        ],
+        todo_assignments=[
+            TodoOut.model_validate(t) for t in outcome.new_todo_assignments
+        ],
+        reassignments=[
+            ReassignmentOut(
+                task_name=row.task.name,
+                points=pts,
+                from_user=HouseholdUserBrief.model_validate(users_by_id[from_uid]),
+                to_user=HouseholdUserBrief.model_validate(row.household_user),
+            )
+            for row, from_uid, _to_uid, pts in outcome.reassignments
+        ],
+        unassigned_task_count=outcome.unassigned_task_count,
+        unassigned_todo_count=outcome.unassigned_todo_count,
+        by_user=[
+            BalancingUserSummary(
+                household_user=HouseholdUserBrief.model_validate(t.user),
+                new_task_count=t.new_task_count,
+                new_todo_count=t.new_todo_count,
+                new_expected_points=t.new_expected_points,
+                reassigned_in_count=t.reassigned_in_count,
+                reassigned_out_count=t.reassigned_out_count,
+                reassigned_net_points=t.reassigned_net_points,
+            )
+            for t in outcome.user_summaries
+        ],
+    )
+
+
 # ---- Points -------------------------------------------------------------
 
 
@@ -460,10 +571,26 @@ async def delete_todo(
 async def points_leaderboard(
     since: datetime | None = None,
     until: datetime | None = None,
+    # A convenience alternative to since/until: resolves server-side
+    # (against the admin's configured week_start_weekday, in UTC) so
+    # neither Home nor Stats needs its own date math — see
+    # crud.resolve_leaderboard_bounds. since/until still work directly if
+    # both are given; period is ignored in that case.
+    period: Literal["all", "this_week", "last_week", "this_month"] | None = None,
+    # Always resolved from the caller's own token, never a client-supplied
+    # id — this only ever means "include me," not "include anyone I name."
+    include_me: bool = False,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_read),
+    user: CurrentUser = Depends(can_read),
 ):
-    rows = await crud.leaderboard(db, since=since, until=until)
+    if since is None and until is None and period is not None:
+        since, until = await crud.resolve_leaderboard_bounds(db, period)
+    include_user_id = None
+    if include_me:
+        include_user_id = (await _self(db, user)).id
+    rows = await crud.leaderboard(
+        db, since=since, until=until, include_user_id=include_user_id
+    )
     return [
         LeaderboardEntry(user=HouseholdUserBrief.model_validate(u), total_points=total)
         for u, total in rows
@@ -593,12 +720,28 @@ async def push_test(
 # ---- Reports --------------------------------------------------------------
 
 
+async def _last_week_start(db: AsyncSession) -> date:
+    settings = await crud.get_settings_row(db)
+    this_week_start, _ = crud.week_bounds(
+        datetime.now(UTC).date(), settings.week_start_weekday
+    )
+    return this_week_start - timedelta(days=7)
+
+
 @app.get("/reports", response_model=list[ReportOut])
 async def list_reports(
     db: AsyncSession = Depends(get_db),
     _user: CurrentUser = Depends(can_admin),
 ):
-    return [ReportOut.model_validate(r) for r in await crud.list_reports(db)]
+    last_week_start = await _last_week_start(db)
+    return [
+        ReportOut.from_model(
+            r,
+            is_last_week=r.period_type == ReportPeriod.week
+            and r.period_start == last_week_start,
+        )
+        for r in await crud.list_reports(db)
+    ]
 
 
 @app.post("/reports", response_model=ReportOut, status_code=status.HTTP_201_CREATED)
@@ -609,7 +752,34 @@ async def create_report(
 ):
     generator = await _self(db, user)
     report = await crud.create_report(db, data, generator)
-    return ReportOut.model_validate(report)
+    await crud.notify_new_report(db, report, exclude_user_id=generator.id)
+    last_week_start = await _last_week_start(db)
+    return ReportOut.from_model(
+        report,
+        is_last_week=report.period_type == ReportPeriod.week
+        and report.period_start == last_week_start,
+    )
+
+
+@app.patch("/reports/{report_id}", response_model=ReportOut)
+async def patch_report(
+    report_id: int,
+    data: ReportMarkPaidIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    report = await crud.get_report(db, report_id)
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Report not found"
+        )
+    report = await crud.mark_report_paid(db, report, data.paid)
+    last_week_start = await _last_week_start(db)
+    return ReportOut.from_model(
+        report,
+        is_last_week=report.period_type == ReportPeriod.week
+        and report.period_start == last_week_start,
+    )
 
 
 @app.get("/reports/{report_id}/download")

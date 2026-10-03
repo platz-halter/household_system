@@ -40,7 +40,12 @@ async function request(url, options = {}) {
       }
     }
     clearToken();
-    window.location.hash = "#/login";
+    // A full reload, not router.js's navigate() — this is a low-level
+    // module nearly every page imports; importing the router back into
+    // it would create a router -> page -> api -> router cycle. A hard
+    // reload also guarantees any module-level cache gets dropped along
+    // with the now-cleared token.
+    window.location.assign("/login");
     throw new ApiError("Session expired", 401);
   }
 

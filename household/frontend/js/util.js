@@ -14,29 +14,22 @@ export const escapeAttr = escapeHtml;
 // Mirrors Task.weekdays on the backend: 0=Monday .. 6=Sunday.
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
-export function todayWeekday() {
-  return (new Date().getDay() + 6) % 7;
-}
+// Loading skeletons are meant for genuinely slow requests — showing one
+// for a request that resolves in 50ms just makes it flash in and back
+// out, which reads as a glitch rather than a loading state. Delaying
+// when it's allowed to appear fixes that without adding any real delay
+// to a fast response: call this right before the request starts, then
+// call the returned function as soon as it settles (success or
+// failure) — if that happens before DELAY_MS, the skeleton never
+// renders at all; if the request is genuinely slow, it still shows up,
+// just not for the first instant.
+const SKELETON_DELAY_MS = 200;
 
-export function startOfWeekIso() {
-  const now = new Date();
-  const diff = (now.getDay() + 6) % 7; // days since Monday
-  const monday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - diff);
-  return monday.toISOString();
-}
-
-export function startOfMonthIso() {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-}
-
-/** {since, until} bounding the previous Monday-Sunday week — a closed,
- * final range (unlike "this week", which is still in progress). */
-export function lastWeekRangeIso() {
-  const thisMonday = new Date(startOfWeekIso());
-  const lastMonday = new Date(thisMonday);
-  lastMonday.setDate(lastMonday.getDate() - 7);
-  return { since: lastMonday.toISOString(), until: thisMonday.toISOString() };
+export function showSkeletonAfterDelay(root, html, delayMs = SKELETON_DELAY_MS) {
+  const timer = setTimeout(() => {
+    root.innerHTML = html;
+  }, delayMs);
+  return () => clearTimeout(timer);
 }
 
 export function initials(name) {
@@ -44,12 +37,23 @@ export function initials(name) {
 }
 
 /** {label, tone} badge describing a due date relative to today, or null
- * if there's no due date. */
+ * if there's no due date.
+ *
+ * Both sides are anchored to UTC, not the viewer's local timezone. The
+ * backend writes `due_date` from `datetime.now(UTC).date()` (see
+ * crud._todo_due_date) — comparing against a LOCAL "today" meant that
+ * for any viewer not in UTC, there's a stretch of every day where the
+ * browser's calendar date has already rolled over past midnight but
+ * UTC's hasn't (or vice versa), making a todo due "today" compute one
+ * day off and show as "Overdue" the moment it was created. Comparing in
+ * UTC on both sides keeps this agreeing with whatever day the backend
+ * actually meant, regardless of the viewer's own clock.
+ */
 export function dueBadge(dueDateStr) {
   if (!dueDateStr) return null;
-  const due = new Date(`${dueDateStr}T00:00:00`);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const due = new Date(`${dueDateStr}T00:00:00Z`);
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const diffDays = Math.round((due - today) / 86400000);
   if (diffDays < 0) return { label: "Overdue", tone: "danger" };
   if (diffDays === 0) return { label: "Due today", tone: "warning" };

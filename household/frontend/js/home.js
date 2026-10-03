@@ -3,9 +3,10 @@ import { api } from "./api.js";
 import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
-import { escapeHtml, escapeAttr, todayWeekday, startOfWeekIso, WEEKDAY_LABELS } from "./util.js";
+import { escapeHtml, escapeAttr, dueBadge, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
+const PAGE_SIZE = 20;
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -13,10 +14,17 @@ function canWrite() {
 }
 
 // Persists across re-renders within the same page load, resets on reload.
-const state = { q: "", categoryId: "" };
+const state = { q: "", categoryId: "", offset: 0, total: 0 };
 
 let categoriesCache = null;
 let allTasksCache = null;
+let assignmentsCache = null;
+// Open Board todos assigned to the current user — the "sync" between
+// the Board and Home's "Assigned to you" section (see loadAssignments).
+let myTodosCache = [];
+let completionsTodayCache = {};
+let meCache = null;
+let pageSelection = null;
 let debounceTimer = null;
 
 function debounce(fn, delay) {
@@ -31,14 +39,11 @@ export async function renderHome(container) {
 
   container.innerHTML = `
     <div class="page">
-      <div class="stat-card-row" id="stat-cards">
-        <div class="stat-card"><div class="skeleton" style="height: 36px;"></div></div>
-        <div class="stat-card"><div class="skeleton" style="height: 36px;"></div></div>
-      </div>
+      <div class="stat-card-row" id="stat-cards"></div>
       <div id="goal-progress"></div>
 
-      <div class="section-heading"><h2>Today</h2></div>
-      <div id="today-list" class="stack"></div>
+      <div class="section-heading"><h2>Assigned to you</h2></div>
+      <div id="assigned-list" class="stack"></div>
 
       <div class="section-heading"><h2>All tasks</h2></div>
       <div class="row" style="margin-bottom: var(--space-3);">
@@ -50,16 +55,19 @@ export async function renderHome(container) {
       </div>
       <div class="chip-row" id="category-chips" style="margin-bottom: var(--space-3);"></div>
       <div id="task-list" class="stack"></div>
+      <div id="pagination-root"></div>
     </div>
     <div id="bulk-bar-root"></div>
   `;
 
   const selection = { mode: false, ids: new Set() };
+  pageSelection = selection; // so a completion triggered from "Assigned to you" (which has no selection of its own) can still refresh the All-tasks list below it
 
   container.querySelector("#search-input").addEventListener(
     "input",
     debounce((e) => {
       state.q = e.target.value;
+      state.offset = 0;
       refreshTaskList(container, selection, writable);
     }, 250)
   );
@@ -75,8 +83,103 @@ export async function renderHome(container) {
   }
 
   await Promise.all([loadStats(container), loadCategories(container, selection, writable)]);
-  await loadToday(container);
+  await loadAssignments(container);
+  await refreshCompletionsToday();
   await refreshTaskList(container, selection, writable);
+}
+
+// How many times each task's already been completed today (by anyone) —
+// feeds the "Done today" badge/disabled complete button in the full
+// task list below.
+async function refreshCompletionsToday() {
+  try {
+    completionsTodayCache = await api.get(`${HB}/tasks/completions-today`);
+  } catch {
+    completionsTodayCache = {};
+  }
+}
+
+function doneForToday(task) {
+  return (completionsTodayCache[task.id] || 0) >= task.times_per_day;
+}
+
+// Shared refresh after a task completion, wherever it was tapped from
+// (All tasks or the bulk-complete bar) — a task can gain a "Done today"
+// badge the moment it hits its times_per_day for the day.
+async function afterTaskCompletion(container) {
+  await refreshCompletionsToday();
+  loadStats(container);
+  if (pageSelection) refreshTaskList(container, pageSelection, canWrite());
+}
+
+async function completeTask(container, task) {
+  try {
+    await api.post(`${HB}/tasks/${task.id}/complete`);
+    showToast(`Logged "${task.name}" (+${task.points} pts)`, "success");
+    afterTaskCompletion(container);
+  } catch {
+    /* api.js already showed a toast (e.g. 409 if it already hit times_per_day for today) */
+  }
+}
+
+// Open Board todos assigned to the current user — fetched alongside the
+// recurring-task assignments above so "Assigned to you" reflects a
+// Board request the moment it's assigned/claimed, not just recurring
+// Task assignments from the balancer.
+async function refreshMyTodos() {
+  if (!meCache) {
+    myTodosCache = [];
+    return;
+  }
+  try {
+    myTodosCache = await api.get(`${HB}/todos?status=open&assigned_to_id=${meCache.id}`);
+  } catch {
+    myTodosCache = [];
+  }
+}
+
+async function afterTodoCompletion(container) {
+  await refreshMyTodos();
+  loadStats(container);
+  renderAssignedToYou(container);
+}
+
+// A Board todo assigned to you, rendered in the "Assigned to you"
+// section — a one-off request, not a recurring Task, so it gets its own
+// row shape (a due-date badge instead of a weekday schedule, no
+// times-per-day/ramp-up/category concepts).
+function boardTodoRow(todo, container) {
+  const row = document.createElement("div");
+  row.className = "list-row";
+  row.style.cursor = "default";
+  const badge = dueBadge(todo.due_date);
+  const writable = canWrite();
+
+  row.innerHTML = `
+    <div class="list-row-body">
+      <div class="list-row-title">${escapeHtml(todo.title)}</div>
+      <div class="list-row-meta">
+        <span class="badge badge-neutral">From the board</span>
+        ${badge ? `<span class="badge badge-${badge.tone}">${escapeHtml(badge.label)}</span>` : ""}
+      </div>
+    </div>
+    <div class="list-row-points"><span>${todo.points}</span><span class="muted">pts</span></div>
+    ${writable ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="Complete ${escapeAttr(todo.title)}">${icons.check}</button></div>` : ""}
+  `;
+
+  if (writable) {
+    row.querySelector('[data-action="complete"]').addEventListener("click", async () => {
+      try {
+        await api.post(`${HB}/todos/${todo.id}/complete`);
+        showToast(`Logged "${todo.title}" (+${todo.points} pts)`, "success");
+        afterTodoCompletion(container);
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+  }
+
+  return row;
 }
 
 async function loadStats(container) {
@@ -84,12 +187,27 @@ async function loadStats(container) {
   const goalRoot = container.querySelector("#goal-progress");
   if (!statRoot) return;
 
+  const cancelSkeleton = showSkeletonAfterDelay(
+    statRoot,
+    `<div class="stat-card"><div class="skeleton" style="height: 36px;"></div></div>
+     <div class="stat-card"><div class="skeleton" style="height: 36px;"></div></div>`
+  );
   try {
     const [me, settings, board] = await Promise.all([
       api.get(`${HB}/me`),
       api.get(`${HB}/settings`),
-      api.get(`${HB}/points/leaderboard?since=${encodeURIComponent(startOfWeekIso())}`),
+      // period=this_week resolves server-side against the admin's
+      // configured week start, in UTC (crud.resolve_leaderboard_bounds)
+      // — this card doesn't need to know that setting itself. include_me:
+      // this card shows YOUR OWN points this week, not a comparison
+      // ranking — it should keep counting even while on break (break only
+      // hides you from everyone else's leaderboard/assignments, see
+      // crud.leaderboard), not silently read 0 just because the
+      // household-wide ranking excludes you.
+      api.get(`${HB}/points/leaderboard?period=this_week&include_me=true`),
     ]);
+    cancelSkeleton();
+    meCache = me;
     const mine = board.find((row) => row.user.id === me.id);
     const weekPoints = mine ? mine.total_points : 0;
 
@@ -116,23 +234,62 @@ async function loadStats(container) {
       goalRoot.innerHTML = "";
     }
   } catch {
+    cancelSkeleton();
     statRoot.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">Couldn't load stats</div>`;
   }
 }
 
-async function loadToday(container) {
-  const root = container.querySelector("#today-list");
+async function loadAssignments(container) {
+  const root = container.querySelector("#assigned-list");
   if (!root) return;
-  root.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
-
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 64px;"></div>`);
   try {
-    if (!allTasksCache) allTasksCache = await api.get(`${HB}/tasks?active=true`);
-    const wd = todayWeekday();
-    const todays = allTasksCache.filter((t) => !t.weekdays || t.weekdays.includes(wd));
-    renderTaskRows(root, todays, container, null, "Nothing scheduled for today");
+    assignmentsCache = await api.get(`${HB}/assignments`);
   } catch {
-    root.innerHTML = `<div class="empty-state">Couldn't load today's tasks</div>`;
+    assignmentsCache = [];
   }
+  cancelSkeleton();
+  await refreshMyTodos();
+  renderAssignedToYou(container);
+}
+
+function renderAssignedToYou(container) {
+  const root = container.querySelector("#assigned-list");
+  if (!root) return;
+  const myAssignments = meCache ? (assignmentsCache || []).filter((a) => a.household_user.id === meCache.id) : [];
+  const myTodos = myTodosCache || [];
+
+  if (myAssignments.length === 0 && myTodos.length === 0) {
+    root.innerHTML = `<div class="empty-state">Nothing assigned to you right now</div>`;
+    return;
+  }
+  root.innerHTML = "";
+  myAssignments.forEach((a) => {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    row.style.cursor = "default";
+    row.innerHTML = `
+      <div class="list-row-body">
+        <div class="list-row-title">${escapeHtml(a.task_name)}</div>
+        <div class="list-row-meta"><span>${escapeHtml(a.period_start)} – ${escapeHtml(a.period_end)}</span></div>
+      </div>
+      <div class="list-row-points"><span>${a.task_points}</span><span class="muted">pts</span></div>
+    `;
+    root.appendChild(row);
+  });
+  myTodos.forEach((todo) => root.appendChild(boardTodoRow(todo, container)));
+}
+
+// Who (if anyone) currently holds this task, for a badge on its row in
+// the All-tasks list — looked up from the same /assignments the
+// "Assigned to you" section above uses, not refetched per task.
+function assignmentBadge(task) {
+  const a = (assignmentsCache || []).find((x) => x.task_id === task.id);
+  if (!a) return "";
+  const isMe = meCache && a.household_user.id === meCache.id;
+  return `<span class="badge badge-${isMe ? "success" : "neutral"}">${
+    isMe ? "Assigned to you" : `Assigned to ${escapeHtml(a.household_user.display_name)}`
+  }</span>`;
 }
 
 async function loadCategories(container, selection, writable) {
@@ -165,6 +322,7 @@ function renderCategoryChips(container, selection, writable) {
   root.querySelectorAll(".chip").forEach((chip) => {
     chip.addEventListener("click", () => {
       state.categoryId = chip.dataset.cat;
+      state.offset = 0;
       renderCategoryChips(container, selection, writable);
       refreshTaskList(container, selection, writable);
     });
@@ -176,13 +334,15 @@ async function refreshTaskList(container, selection, writable) {
   if (!root) return;
 
   if (!allTasksCache) {
-    root.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
+    const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 64px;"></div>`);
     try {
       allTasksCache = await api.get(`${HB}/tasks?active=true`);
     } catch {
+      cancelSkeleton();
       root.innerHTML = `<div class="empty-state">Couldn't load tasks</div>`;
       return;
     }
+    cancelSkeleton();
   }
 
   let filtered = allTasksCache;
@@ -194,8 +354,55 @@ async function refreshTaskList(container, selection, writable) {
     filtered = filtered.filter((t) => t.categories.some((c) => String(c.id) === state.categoryId));
   }
 
-  renderTaskRows(root, filtered, container, writable ? selection : null, "No tasks match");
+  // All tasks are already fetched in one shot (fine at this app's scale
+  // — a household's task list, unlike storage's inventory, isn't likely
+  // to reach the point a server round-trip per page would pay for
+  // itself) — pagination here just slices what's already in memory, so
+  // paging doesn't re-fetch anything.
+  state.total = filtered.length;
+  if (state.offset >= state.total) state.offset = 0;
+  const pageItems = filtered.slice(state.offset, state.offset + PAGE_SIZE);
+
+  renderTaskRows(root, pageItems, container, writable ? selection : null, "No tasks match");
+  renderPagination(container.querySelector("#pagination-root"), container, selection, writable);
   renderBulkBar(container, selection, writable);
+}
+
+function renderPagination(root, container, selection, writable) {
+  if (!root) return;
+  root.innerHTML = "";
+  if (state.total <= PAGE_SIZE) return;
+
+  const totalPages = Math.max(1, Math.ceil(state.total / PAGE_SIZE));
+  const currentPage = Math.floor(state.offset / PAGE_SIZE) + 1;
+
+  const wrap = document.createElement("div");
+  wrap.className = "pagination";
+
+  const prev = document.createElement("button");
+  prev.className = "btn btn-icon";
+  prev.innerHTML = icons.chevronLeft;
+  prev.disabled = currentPage <= 1;
+  prev.addEventListener("click", () => {
+    state.offset = Math.max(0, state.offset - PAGE_SIZE);
+    refreshTaskList(container, selection, writable);
+  });
+
+  const label = document.createElement("span");
+  label.className = "page-label";
+  label.textContent = `Page ${currentPage} of ${totalPages}`;
+
+  const next = document.createElement("button");
+  next.className = "btn btn-icon";
+  next.innerHTML = icons.chevronRight;
+  next.disabled = currentPage >= totalPages;
+  next.addEventListener("click", () => {
+    state.offset += PAGE_SIZE;
+    refreshTaskList(container, selection, writable);
+  });
+
+  wrap.append(prev, label, next);
+  root.appendChild(wrap);
 }
 
 function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
@@ -207,7 +414,15 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
   row.classList.toggle("selected", isSelected);
 
   const catLabel = task.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
-  const schedule = task.weekdays && task.weekdays.length ? task.weekdays.map((w) => WEEKDAY_LABELS[w]).join(" ") : "Every day";
+  const schedule =
+    task.recurrence === "weekly"
+      ? task.weekdays && task.weekdays.length
+        ? task.weekdays.map((w) => WEEKDAY_LABELS[w]).join(" ")
+        : "Weekly"
+      : task.recurrence === "monthly"
+        ? "Monthly"
+        : "Every day";
+  const doneToday = doneForToday(task);
 
   row.innerHTML = `
     ${inSelectMode ? `<div class="list-row-select">${icons.check}</div>` : ""}
@@ -217,10 +432,12 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
         <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${task.times_per_day}×/day` : ""}</span>
         ${task.ramp_up_enabled ? `<span class="badge badge-info">+${task.ramp_up_bonus_points} bonus</span>` : ""}
+        ${assignmentBadge(task)}
+        ${doneToday ? `<span class="badge badge-success">Done today</span>` : ""}
       </div>
     </div>
     <div class="list-row-points"><span>${task.points}</span><span class="muted">pts</span></div>
-    ${writable && !inSelectMode ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="Complete ${escapeAttr(task.name)}">${icons.check}</button></div>` : ""}
+    ${writable && !inSelectMode && !doneToday ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="Complete ${escapeAttr(task.name)}">${icons.check}</button></div>` : ""}
   `;
 
   row.addEventListener("click", (e) => {
@@ -253,15 +470,7 @@ function renderTaskRows(root, tasks, container, selection, emptyMessage) {
           else selection.ids.add(id);
           refreshTaskList(container, selection, writable);
         },
-        onComplete: async (t) => {
-          try {
-            await api.post(`${HB}/tasks/${t.id}/complete`);
-            showToast(`Logged "${t.name}" (+${t.points} pts)`, "success");
-            loadStats(container);
-          } catch {
-            /* api.js already showed a toast */
-          }
-        },
+        onComplete: (t) => completeTask(container, t),
       })
     );
   });
@@ -270,8 +479,10 @@ function renderTaskRows(root, tasks, container, selection, emptyMessage) {
 function renderBulkBar(container, selection, writable) {
   const root = container.querySelector("#bulk-bar-root");
   if (!root) return;
+  const page = container.querySelector(".page");
   if (!writable || !selection.mode) {
     root.innerHTML = "";
+    if (page) page.style.paddingBottom = "";
     return;
   }
 
@@ -283,6 +494,19 @@ function renderBulkBar(container, selection, writable) {
       <button class="btn btn-primary grow" id="bulk-complete-btn" ${count === 0 ? "disabled" : ""}>${icons.check}<span>Complete</span></button>
     </div>
   `;
+
+  // The bulk bar floats fixed above the bottom nav, so without this the
+  // last row (and the pagination controls below it) sit underneath it,
+  // only partly visible — the exact "can't see which task you're
+  // selecting" bug this is fixing. Measured rather than a guessed
+  // constant, since the bar's real height depends on font size/viewport.
+  if (page) {
+    requestAnimationFrame(() => {
+      const bar = root.querySelector(".bulk-bar");
+      const barHeight = bar ? bar.getBoundingClientRect().height : 0;
+      page.style.paddingBottom = `${Math.max(barHeight, 64) + 24}px`;
+    });
+  }
 
   const exitSelectMode = () => {
     selection.mode = false;
@@ -312,7 +536,6 @@ function renderBulkBar(container, selection, writable) {
       completed === ids.length ? "success" : "warning"
     );
     exitSelectMode();
-    loadStats(container);
-    refreshTaskList(container, selection, writable);
+    afterTaskCompletion(container);
   });
 }

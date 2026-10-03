@@ -1,6 +1,7 @@
 import { login, loginWithAuthentik } from "./auth.js";
 import { showToast } from "./toast.js";
 import { icons } from "./icons.js";
+import { navigate } from "./router.js";
 
 export function renderLogin(container) {
   container.innerHTML = `
@@ -27,8 +28,16 @@ export function renderLogin(container) {
     </div>
   `;
 
-  container.querySelector("#authentik-login-btn").addEventListener("click", () => {
-    loginWithAuthentik(); // redirects the browser away — nothing more to do here
+  container.querySelector("#authentik-login-btn").addEventListener("click", async () => {
+    // On success this redirects the browser away and never returns. On
+    // failure (auth service unreachable, or Authentik simply not
+    // configured yet on a fresh deploy) it throws instead — show that
+    // as an ordinary toast rather than an unhandled rejection.
+    try {
+      await loginWithAuthentik();
+    } catch {
+      showToast("Authentik isn't reachable right now — try a local account instead", "danger");
+    }
   });
 
   const form = container.querySelector("#login-form");
@@ -48,7 +57,7 @@ export function renderLogin(container) {
     submitBtn.textContent = "Logging in…";
     try {
       await login(username, password);
-      window.location.hash = "#/home";
+      navigate("/home");
     } catch (err) {
       showToast(err.message || "Login failed", "danger");
       submitBtn.disabled = false;

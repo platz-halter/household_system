@@ -79,10 +79,16 @@ services:
     networks:
       - hs-internal
     profiles: ["household"]
-    # Not published directly — put Caddy in front (see
-    # household/frontend/README.md). Uncomment only for quick local testing:
+    # Published on all interfaces (not just the Docker host's own
+    # localhost) because Caddy here runs in a separate Proxmox LXC, not
+    # as a container on this Docker network — it reaches this frontend
+    # over the LAN, the same way it already reaches other homelab
+    # services. See household/frontend/README.md for the Caddy block.
+    # If your Caddy ever *does* run as a container on this same Docker
+    # network instead, you can drop this published port entirely and
+    # have Caddy reverse_proxy straight to the container name/network.
     ports:
-      - "127.0.0.1:8081:80"
+      - "8081:80"
 
   storage-backend:
     build:
@@ -115,10 +121,16 @@ services:
     networks:
       - hs-internal
     profiles: ["storage"]
-    # Not published directly — put Caddy in front (see storage/frontend/README.md
-    # for a sample Caddyfile snippet). Uncomment only for quick local testing:
+    # Published on all interfaces (not just the Docker host's own
+    # localhost) because Caddy here runs in a separate Proxmox LXC, not
+    # as a container on this Docker network — it reaches this frontend
+    # over the LAN, the same way it already reaches other homelab
+    # services. See storage/frontend/README.md for the Caddy block. If
+    # your Caddy ever *does* run as a container on this same Docker
+    # network instead, you can drop this published port entirely and
+    # have Caddy reverse_proxy straight to the container name/network.
     ports:
-      - "127.0.0.1:8080:80"
+      - "8080:80"
 
 networks:
   hs-internal:
