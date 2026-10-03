@@ -1,5 +1,15 @@
 # Household System V2 — Project State
 
+**Version 1.0.0** — the first declared release: every `PROJECT_SPEC.md`
+item is implemented (see that file's own note at the top), production
+hardening and a full pre-deploy security pass are done (see this file's
+own entries below). `shared/src/shared/__init__.py`'s `__version__` is
+the single source of truth, surfaced in every service's `GET /health`
+and OpenAPI `info.version`, and in both frontends' Settings page footer
+(`js/version.js`) — all five `pyproject.toml` files' `version` fields
+are kept in sync with it by hand (no publish step reads them, so
+there's nothing to automate the sync with).
+
 What's actually built and working right now, as of this writing. For what
 the system is meant to become, see `PROJECT_SPEC.md`.
 
@@ -188,6 +198,88 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     (plain `CREATE TABLE`, no backfill needed since it's a brand-new
     always-fully-specified singleton row), `alembic check` and a
     fresh-DB upgrade both verified clean.
+- ✅ **Pre-deployment security pass** (full XSS/SQL-injection/route-auth/
+  file-upload/JWT-verification audit across every service, requested
+  explicitly before the first real deploy). Came back clean except for
+  two real findings, both addressed:
+  - `shared/config.py`'s `Settings` gained a `model_validator` that
+    refuses to start (raises on `Settings()` construction) when
+    `ENVIRONMENT=prod` and `LOCAL_JWT_SECRET` is either of its two
+    known-insecure placeholder values (this class's own default
+    `"dev-only-change-me"`, or `.env.example`'s
+    `"changeme-generate-a-real-secret"`) or under 16 characters —
+    without this, a deploy that forgot to set a real secret would
+    silently run with a value anyone who's seen this repo already
+    knows, letting them forge a local-account JWT for any
+    subject/role, admin included. Gated on `ENVIRONMENT=prod`
+    specifically (not always-on) so local dev doesn't need a
+    throwaway secret generated just to run the app — `environment`
+    already exists for exactly this kind of "relax a check for local
+    dev" distinction (see `shared/db.py`'s SQL-echo toggle). Verified
+    all three cases live: placeholder+prod raises with a clear message,
+    a real secret+prod starts clean, placeholder+dev still works.
+  - **`POST /token` had no rate limiting at all** — new
+    `auth_service/rate_limit.py`, a small in-memory lockout (5 failed
+    attempts / 15 minutes, 429 + `Retry-After` past that) keyed on the
+    *username being attempted*, not client IP. IP-keying was considered
+    and rejected: requests reach this service through two reverse-proxy
+    hops (external Caddy, then this container's own nginx), and
+    getting the real client IP right through both isn't guaranteed to
+    be configured correctly in every deployment; keying on the account
+    actually being targeted matches the real threat (repeated password
+    guessing against one account) regardless of proxy setup. Checked
+    *before* touching the DB/password, so a locked-out account can't
+    keep being guessed against; only failed attempts count (a
+    legitimate user logging in repeatedly is never penalized,
+    `record_success` clears the counter); a nonexistent username is
+    rate-limited identically to a real one, so there's no
+    username-enumeration oracle via differing lockout behavior. Bounded
+    to `MAX_TRACKED_USERNAMES = 10_000` distinct usernames (oldest
+    evicted past that) so spraying many fake usernames at the endpoint
+    can't exhaust memory — this project's actual scale (a handful of
+    real accounts) never comes close. A single uvicorn worker per
+    service (see `shared/entrypoint.sh`) means this in-memory state is
+    authoritative for the whole process; no shared store like Redis
+    needed at this scale. Verified live: 5 failed attempts against a
+    bogus username pass through as 401, the 6th 429s with a correct
+    `Retry-After`, and a *different* username is unaffected by another
+    username's lockout.
+  - **Noted, intentionally not changed**: `.env`'s current
+    `LOCAL_JWT_SECRET`/`BOOTSTRAP_ADMIN_PASSWORD` share the same value
+    — flagged, but the user confirmed this `.env` is dev/test-only and
+    the real deployment will be a fresh machine with its own generated
+    secrets, so no rotation was needed here.
+  - **Accepted, lower-priority residual risk, left as-is**: the
+    Authentik panel's `_validate_issuer` fetches whatever `.well-known`
+    URL an admin submits — a mild SSRF primitive, but only reachable by
+    an already-authenticated, already-reauth'd admin who has much
+    stronger primitives available through that same endpoint anyway,
+    so it doesn't meaningfully raise their actual privilege.
+  - Everything else checked came back clean: no raw SQL anywhere in any
+    service (confirmed via `grep` for string-built queries — ORM-only
+    throughout); every route across all three backends has an explicit
+    `CurrentUser` auth dependency except the intentionally-public ones
+    (health checks, `/token`, `/bootstrap-admin`, the public
+    `/authentik-config` GET — verified programmatically, not by eye);
+    `shared/auth.py`'s HS256/RS256 dispatch is safe against
+    algorithm-confusion attacks (the token's own claimed `alg` only
+    selects which verifier function runs, never which key it trusts —
+    each branch pins its own fixed algorithm/key pair); both image/
+    photo upload routes (`storage`'s item images, `household`'s
+    avatars) validate content-type against an allowlist that excludes
+    `image/svg+xml` (the classic image-upload stored-XSS vector) and,
+    more importantly, generate the stored filename server-side from
+    that validated type plus a random UUID — never from the uploaded
+    file's own name — which also makes path traversal structurally
+    impossible on every file-serving route checked (item images,
+    avatars, PDF reports); and a full sweep of every `innerHTML`
+    assignment across both frontends for unescaped user data turned up
+    nothing — `toast.js` uses `.textContent` (immune by construction),
+    `confirmDialog.js`/`openModalShell` escape their whole message/
+    title internally so every caller is safe by default even when the
+    caller itself doesn't escape, and every other list-rendering
+    template (items, tasks, categories, todos, rooms, reports) escapes
+    each interpolated field individually at its actual render site.
 
 ## Storage service — backend
 

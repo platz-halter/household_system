@@ -47,6 +47,7 @@ from household_service.schemas import (
     TodoUpdate,
     VapidPublicKeyOut,
 )
+from shared import __version__
 
 
 @asynccontextmanager
@@ -61,7 +62,11 @@ AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp"}
 MAX_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB — plenty for a profile photo
 
-app = FastAPI(title="Household System — Household (chores/points)", lifespan=lifespan)
+app = FastAPI(
+    title="Household System — Household (chores/points)",
+    version=__version__,
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -98,7 +103,7 @@ async def _self(db: AsyncSession, user: CurrentUser):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": __version__}
 
 
 # ---- Current user / household users ---------------------------------

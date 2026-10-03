@@ -12,13 +12,15 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from auth_service.models import AuthentikSettings, LocalUser
+from auth_service.rate_limit import login_rate_limiter
 from auth_service.security import (
     create_local_access_token,
     hash_password,
     verify_password,
 )
+from shared import __version__
 
-app = FastAPI(title="Household System — Auth (local fallback)")
+app = FastAPI(title="Household System — Auth (local fallback)", version=__version__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -31,7 +33,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": __version__}
 
 
 @app.post("/token")
@@ -42,6 +44,10 @@ async def login(
     """Local-account login. Only relevant for dev/testing or when
     Authentik is unreachable — normal usage should authenticate against
     Authentik directly and never hit this service."""
+    # Checked before touching the DB/password at all, so a locked-out
+    # account can't be used to keep guessing — see rate_limit.py.
+    login_rate_limiter.check(form_data.username)
+
     result = await db.execute(
         select(LocalUser).where(LocalUser.username == form_data.username)
     )
@@ -52,11 +58,13 @@ async def login(
         or not user.is_active
         or not verify_password(form_data.password, user.hashed_password)
     ):
+        login_rate_limiter.record_failure(form_data.username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
         )
 
+    login_rate_limiter.record_success(form_data.username)
     token = create_local_access_token(subject=user.username, role=user.role)
     return {"access_token": token, "token_type": "bearer"}
 

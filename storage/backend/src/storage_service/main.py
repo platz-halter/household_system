@@ -9,6 +9,7 @@ from shared.config import cors_origin_list, get_settings
 from shared.db import get_db
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from shared import __version__
 from storage_service import crud
 from storage_service.schemas import (
     BulkDeleteRequest,
@@ -32,7 +33,10 @@ MAX_IMAGE_BYTES = (
 )  # 8 MB — plenty for item photos, keeps the volume sane
 
 
-app = FastAPI(title="Household System — Storage (cellar/item tracking)")
+app = FastAPI(
+    title="Household System — Storage (cellar/item tracking)",
+    version=__version__,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -49,7 +53,7 @@ can_write = require_role("admin", "user")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "version": __version__}
 
 
 @app.get("/items", response_model=ItemPage)

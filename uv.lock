@@ -241,7 +241,7 @@ wheels = [
 
 [[package]]
 name = "auth"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "auth" }
 dependencies = [
     { name = "asyncpg" },
@@ -775,7 +775,7 @@ wheels = [
 
 [[package]]
 name = "household-backend"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "household/backend" }
 dependencies = [
     { name = "apscheduler" },
@@ -804,7 +804,7 @@ requires-dist = [
 
 [[package]]
 name = "household-system"
-version = "0.1.0"
+version = "1.0.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
@@ -1681,7 +1681,7 @@ wheels = [
 
 [[package]]
 name = "shared"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "shared" }
 dependencies = [
     { name = "alembic" },
@@ -1770,7 +1770,7 @@ wheels = [
 
 [[package]]
 name = "storage-backend"
-version = "0.1.0"
+version = "1.0.0"
 source = { editable = "storage/backend" }
 dependencies = [
     { name = "asyncpg" },

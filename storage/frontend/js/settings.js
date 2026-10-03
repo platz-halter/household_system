@@ -2,6 +2,7 @@ import { THEMES, getStoredTheme, applyTheme } from "./theme.js";
 import { getCurrentUserInfo, logout } from "./auth.js";
 import { icons } from "./icons.js";
 import { showConfirmDialog } from "./confirmDialog.js";
+import { APP_VERSION } from "./version.js";
 
 export function renderSettings(container) {
   const user = getCurrentUserInfo() || {};
@@ -36,6 +37,8 @@ export function renderSettings(container) {
       <div class="settings-section">
         <button class="btn btn-block" id="logout-btn">${icons.logout}<span>Log out</span></button>
       </div>
+
+      <p class="muted" style="font-size: var(--font-size-xs); text-align: center;">Storage v${escapeHtml(APP_VERSION)}</p>
     </div>
   `;
 

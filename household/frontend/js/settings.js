@@ -7,6 +7,7 @@ import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { escapeHtml, showSkeletonAfterDelay } from "./util.js";
 import { isPushSupported, getPushSubscription, subscribeToPush, unsubscribeFromPush } from "./push.js";
+import { APP_VERSION } from "./version.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -89,6 +90,8 @@ export async function renderSettings(container) {
       <div class="settings-section">
         <button class="btn btn-block" id="logout-btn">${icons.logout}<span>Log out</span></button>
       </div>
+
+      <p class="muted" style="font-size: var(--font-size-xs); text-align: center;">Household v${escapeHtml(APP_VERSION)}</p>
     </div>
   `;
 

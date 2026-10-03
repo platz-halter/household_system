@@ -4,6 +4,11 @@ This is the design target: what the system is meant to do, independent of
 how much is actually built. For what's actually implemented right now,
 see `PROJECT_STATE.md`.
 
+**As of version 1.0.0, every item in this document is implemented** —
+see `PROJECT_STATE.md` for the verified, tested detail behind each one.
+Treat this file as the design record going forward: a future feature
+request gets added here first, then built.
+
 ## Goals
 
 - A self-hosted household management system covering two domains:

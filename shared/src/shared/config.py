@@ -8,7 +8,18 @@ class definition covers auth, household and storage without duplication.
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Known-insecure placeholder values for local_jwt_secret: this class's own
+# default, and .env.example's placeholder. Both are visible to anyone who's
+# seen this repo, so a deploy that silently keeps either one would let
+# anyone forge a local-account JWT for any subject/role (including admin)
+# — see Settings._reject_insecure_secret_in_prod below.
+_INSECURE_LOCAL_JWT_SECRETS = {
+    "dev-only-change-me",
+    "changeme-generate-a-real-secret",
+}
 
 
 class Settings(BaseSettings):
@@ -75,6 +86,26 @@ class Settings(BaseSettings):
 
     # --- Misc -----------------------------------------------------------
     environment: Literal["dev", "prod"] = "dev"
+
+    @model_validator(mode="after")
+    def _reject_insecure_secret_in_prod(self) -> "Settings":
+        # Gated on ENVIRONMENT=prod rather than always-on, so local dev
+        # (where nothing's exposed to an untrusted network) doesn't have
+        # to generate a throwaway secret just to run the app. A real
+        # deploy's .env should set ENVIRONMENT=prod anyway — see
+        # shared/db.py, which already uses it to turn off SQL echo.
+        if self.environment == "prod" and (
+            self.local_jwt_secret in _INSECURE_LOCAL_JWT_SECRETS
+            or len(self.local_jwt_secret) < 16
+        ):
+            raise ValueError(
+                "LOCAL_JWT_SECRET is still a placeholder (or too short) "
+                "while ENVIRONMENT=prod. Anyone who's seen this repository "
+                "knows the default value and could forge a local-account "
+                "admin token. Generate a real one — `openssl rand -hex 32` "
+                "— and set it in .env before deploying."
+            )
+        return self
 
 
 @lru_cache
