@@ -70,9 +70,16 @@ request gets added here first, then built.
     everywhere else in that app. Local-account user management (adding
     a user beyond the first bootstrap admin) is Admin-only too, but has
     no UI yet — API only (`auth`'s `POST /users`).
-- Authentik groups map to roles: `household-system-admins`,
-  `household-system-users`, `household-system-viewers`.
-- An unrecognized or missing group/role fails closed to `viewer`.
+- Authentik groups map to roles — default names
+  `household-system-admins`/`-users`/`-viewers`, but admin-editable
+  (see "Admin tools" below), so an actual deployment's real group
+  names (e.g. a homelab-wide `svc-` naming convention) don't need to
+  match these literally.
+- **Explicit allow-list**: an Authentik token belonging to none of the
+  three configured groups is rejected outright, not let in as a
+  viewer. A valid account on a shared Authentik instance that also
+  serves unrelated homelab services is not, by itself, a reason to be
+  let into this application at all.
 
 ## Storage System
 

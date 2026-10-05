@@ -1,5 +1,5 @@
 import { getStoredTheme, applyTheme } from "./theme.js";
-import { handleAuthentikCallback } from "./auth.js";
+import { handleAuthentikCallback, warmGroupRoleMap } from "./auth.js";
 import { startRouter } from "./router.js";
 import { showToast } from "./toast.js";
 
@@ -26,6 +26,14 @@ async function boot() {
     window.history.replaceState({}, "", "/overview");
   }
 
+  // Deliberately NOT awaited — an unreachable auth service must not
+  // delay the first render (same reasoning as the rest of this file's
+  // network calls, see fetchWithTimeout's own comment in auth.js). The
+  // role mapping it warms self-corrects within this page load once it
+  // resolves; the brief window before then only matters for role-gated
+  // UI a user couldn't reach this fast anyway (e.g. the /admin route,
+  // which needs at least one more navigation to get to).
+  warmGroupRoleMap();
   startRouter();
 }
 

@@ -1,11 +1,45 @@
 # Household System V2 — Project State
 
-**Version 1.0.1** — patch release on top of 1.0.0 (the first declared
-release: every `PROJECT_SPEC.md` item implemented, production hardening
-and a full pre-deploy security pass done — see this file's own entries
-below). 1.0.1 makes the Authentik group→role mapping admin-editable
-(see its own entry under "Auth service"), on top of 1.0.0's Authentik
-connection panel. `shared/src/shared/__init__.py`'s `__version__` is
+**Version 1.0.4** — four patch releases on top of 1.0.0 (the first
+declared release: every `PROJECT_SPEC.md` item implemented, production
+hardening and a full pre-deploy security pass done — see this file's
+own entries below).
+- 1.0.1 made the Authentik group→role mapping admin-editable (see its
+  own entry under "Auth service"), on top of 1.0.0's Authentik
+  connection panel.
+- 1.0.2 excludes viewers from the Household points leaderboard (see its
+  own entry under "Household service — backend") — found while
+  investigating the issue that led to 1.0.3, reported directly by the
+  user once the actual bug was found.
+- 1.0.3 fixes a real bug 1.0.1 introduced: both frontends' `js/auth.js`
+  kept a hardcoded mirror of the group→role mapping, so a group renamed
+  through the new 1.0.1 admin panel left that admin stuck on `viewer`
+  *client-side* — including blocked from `/admin` by the router's own
+  guard — even though the backend was already authorizing them
+  correctly the whole time (confirmed live: the same bearer token got a
+  200 from an admin-only route called directly, while the same page's
+  own UI showed "viewer"). See its own entry under "Household service —
+  frontend" / `shared/auth.py`'s entry for the full trace — diagnosed by
+  decoding the actual production token in the browser console down to
+  "the group is right there in `groups`, the config matches it exactly,
+  so the bug can't be in the mapping at all."
+- 1.0.4 is a deliberate **access-control policy change**, not a bug fix:
+  Authentik tokens belonging to none of the three configured groups are
+  now rejected outright (401) instead of defaulting to `viewer`. Asked
+  for directly, in plain terms: "In a true single trust architecture
+  nobody that isn't explicitly given access should receive access."
+  Prompted by the SAME production investigation as 1.0.2/1.0.3 — the
+  user's real Authentik instance serves several other homelab services
+  (`svc-omada-admins`, `svc-proxmox-admins`, `svc-netbird-admins` all
+  showed up in their decoded token alongside the household-system
+  groups), so under the old fail-closed-to-viewer design, anyone with a
+  valid account on that shared instance — not just actual household
+  members — could log into this app and get read access, as long as
+  Authentik itself didn't separately restrict who could reach this
+  Application's login flow. See `shared/auth.py`'s entry for the
+  implementation and live verification.
+
+`shared/src/shared/__init__.py`'s `__version__` is
 the single source of truth, surfaced in every service's `GET /health`
 and OpenAPI `info.version`, and in both frontends' Settings page footer
 (`js/version.js`) — all five `pyproject.toml` files' `version` fields
@@ -39,9 +73,14 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 - ✅ `auth.py` — dual-mode token verification. Dispatches per-request by
   inspecting the JWT's signing algorithm header (`alg`): HS256 →
   local-account verification, RS256 → Authentik verification via JWKS.
-  `GROUP_ROLE_MAP` maps Authentik groups to `admin`/`user`/`viewer`;
-  unrecognized/missing groups fail closed to `viewer`. `require_role`
-  dependency factory for route-level permission checks.
+  Authentik groups map to `admin`/`user`/`viewer` via the admin-editable
+  `admin_group`/`user_group`/`viewer_group` config (no more hardcoded
+  `GROUP_ROLE_MAP` — see 1.0.1's and 1.0.4's own entries below for that
+  history); a token matching none of the three is rejected outright
+  (401), not downgraded to `viewer` (see 1.0.4's own entry — this used
+  to fail closed to viewer, changed once a real multi-service Authentik
+  instance made the gap concrete). `require_role` dependency factory
+  for route-level permission checks.
 - ✅ `migrations.py` — shared Alembic `env.py` logic used by all three
   services, with a guard that raises clearly if `DATABASE_URL` is unset.
 
@@ -333,20 +372,77 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     to `.env` defaults afterward. Temporary local admin (for reauth)
     and the fake IdP container both cleaned up afterward, same
     precedent as the original panel's test.
-  - **Deliberately out of scope, disclosed rather than silently
-    skipped**: both frontends' `ROLE_FROM_GROUPS` (`js/auth.js`) stays
-    a hardcoded, UI-display-only mirror — making it dynamic too would
-    mean converting `getCurrentUserInfo()` (called synchronously,
-    throughout both frontends, every time a page decides what to show
-    a given role) to async, a meaningfully bigger and riskier change
-    than what was actually asked for. The backend enforcement — the
-    real security boundary — is fully dynamic with no redeploy needed;
-    only the client-side display of role-gated UI elements can lag
-    behind an admin-panel group rename until that frontend is next
-    rebuilt, exactly the same "UI-only, needs manual sync" tradeoff
-    that already existed (see `CLAUDE.md`) before this change, just
-    narrowed from "every group rename" down to "a group rename, if you
-    want the UI to match it before the next deploy."
+  - **Originally shipped as deliberately out of scope — turned out to
+    be wrong, fixed in 1.0.3.** The reasoning at the time: both
+    frontends' `ROLE_FROM_GROUPS` (`js/auth.js`) staying a hardcoded
+    mirror seemed like a UI-display-only tradeoff, not a real risk,
+    since the backend independently enforces the real rule. What that
+    missed: `getCurrentUserInfo()` isn't just a display label — the
+    router's `/admin` route guard calls it too, so a stale mirror
+    doesn't just show the wrong badge, it actively blocks a real admin
+    from ever reaching the Admin panel client-side, even though the
+    backend would authorize every request they could still make
+    directly. This bit a real production deployment the very first
+    time a group got renamed through the panel. See 1.0.3's entry
+    under "Household service — frontend" for the actual fix
+    (`warmGroupRoleMap()`, same dynamic config the backend uses,
+    fire-and-forgotten at boot so an unreachable auth service still
+    can't delay the first render).
+- ✅ **1.0.4: Authentik access is now an explicit allow-list, not
+  fail-closed-to-viewer.** `_role_from_groups` returns `Role | None`
+  instead of always returning a `Role` — `None` means the token's
+  `groups` claim matched none of the three configured group names, and
+  `_verify_authentik_token` now raises `401` ("Not a member of any
+  group recognized by this application") in that case, rather than
+  constructing a `CurrentUser` with `role="viewer"`. A validly-signed
+  token from the right issuer/audience is no longer, by itself, enough
+  to get in — it also has to actually belong to this application's
+  user base. Local-account tokens are untouched (they never involved
+  group matching — an admin creates them with an explicit role already
+  assigned via `POST /users`, which was always an allow-list of one).
+  - **The actual motivating scenario, concretely**: the same real
+    production token from 1.0.3's investigation carried groups like
+    `svc-omada-admins`/`svc-proxmox-admins`/`svc-netbird-admins` —
+    other homelab services on the same shared Authentik instance. Under
+    the old design, an account in only those groups (no household-system
+    group at all) would still have been let into this app as a viewer.
+    Whether that's actually exploitable end-to-end also depends on
+    whether Authentik's own Application-level access policy restricts
+    who can reach this app's login flow at all — orthogonal to this
+    app's own code, and the user's own Authentik configuration, not
+    verified from here — but this app no longer silently waves through
+    an unrelated account on the backend's own say-so either way, which
+    is the only part of that question this codebase can actually
+    control.
+  - **Verified live** with the same fake-IdP methodology as every other
+    Authentik-adjacent change this project: minted two tokens against a
+    throwaway signed IdP — one with a recognized group
+    (`svc-household-system-admins`, confirmed still works, 200 from an
+    admin-only route, no regression) and one with *only* unrelated
+    groups (`svc-omada-admins`, `svc-proxmox-admins`, `mgmt-users` —
+    deliberately mirroring the real token's actual other-service
+    groups) — confirmed the second one now gets a clean `401` with the
+    new detail message, checked independently against **both**
+    `household-backend` and `storage-backend` (each verifies Authentik
+    tokens on its own, so both needed checking separately). Temporary
+    local admin and fake IdP container cleaned up afterward, config
+    reset to `.env` defaults.
+  - **Frontend left as-is, deliberately, disclosed rather than silently
+    decided**: an Authentik user who's now rejected still completes the
+    OIDC exchange from the browser's point of view (Authentik itself
+    issues them a token; this app's role check only happens once that
+    token hits the backend), so the frontend stores a session and
+    attempts to render before its first API call 401s — at which point
+    the *existing* `api.js` 401 handler (already built for session
+    expiry) clears the token and bounces them to `/login`. Functionally
+    correct and secure — the rejection is real and already verified
+    above — but the user-visible moment is a brief flash of the app
+    before being kicked back out, not an immediate "you don't have
+    access to this application" message at the point of login. Fixable
+    (decode the token client-side right after the exchange, before
+    ever calling `setSession`) but intentionally not built without
+    being asked, since it's pure UX polish on top of an already-enforced
+    rule, not a security gap.
 
 ## Storage service — backend
 
@@ -1088,6 +1184,30 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   pattern storage uses) already wired up too — found while auditing this
   file for accuracy during a production-readiness pass, not something
   changed this session.
+- 🐛 **Fixed: viewers permanently cluttered the points leaderboard.**
+  `crud.leaderboard()` only ever excluded on-break users; role was never
+  part of the filter. Since `complete_task`/`complete_todo` both require
+  `can_write` (admin/user only — `main.py`), a viewer can never actually
+  earn a point, so once auto-provisioned they'd sit at a permanent,
+  meaningless 0 on every leaderboard view forever. Fixed by also
+  excluding `HouseholdUser.role == "viewer"`, using the same cached
+  `role` hint `_self()` already keeps in sync (see that function's own
+  docstring) rather than a live token check. Treats an unsynced `NULL`
+  role as "not known to be a viewer" (included, not excluded) —
+  structurally this should never actually happen (a `household_users`
+  row can't exist without `_self()` having already run once, which sets
+  `role` in that same call), but costs nothing to guard against a future
+  row created some other way accidentally hiding a real admin/user.
+  `include_user_id` (the "show me my own total regardless" override,
+  originally built for break-mode) now also bypasses the viewer
+  exclusion — a viewer checking their own `include_me=true` standing
+  sees their real (0) total; everyone else's view of the leaderboard
+  still excludes them. Verified live: a test admin user appeared at 0
+  points (existing documented behavior for any non-viewer with no
+  completions yet); a test viewer user was absent from the general
+  leaderboard but appeared correctly in their own `include_me=true`
+  view; a real pre-existing admin user's real 352-point total was
+  unaffected. Test fixtures cleaned up afterward.
 
 ## Household service — frontend
 
@@ -1269,6 +1389,68 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   loaded the real page in headless Chromium at a 390px phone width and
   took an actual screenshot, confirming the login page renders
   correctly rather than just passing a jsdom-mocked assertion.
+- 🐛 **Fixed (1.0.3): a renamed Authentik group left the renamed-to admin
+  stuck on `viewer` client-side**, even though the backend was already
+  authorizing them correctly. Root cause: `js/auth.js`'s
+  `ROLE_FROM_GROUPS` was a hardcoded mirror of the generic default
+  group names, shipped alongside 1.0.1's admin-editable backend mapping
+  but never made to read it — so saving a custom `admin_group` through
+  the panel updated the backend (verified correct: an admin-only route
+  called directly with the same bearer token returned 200) but left
+  this frontend constant untouched, silently falling through to
+  `"viewer"` for any group name it didn't recognize. Worse than a
+  cosmetic mislabel: the router's `/admin` guard reads
+  `getCurrentUserInfo()` too, so this actively blocked the real admin
+  from ever reaching the Admin panel through the UI, not just showing
+  them a wrong badge.
+  - **Diagnosed on a real production deployment**, not reproduced
+    locally first: confirmed the configured `admin_group` and the
+    actual Authentik group name matched exactly (`GET
+    /authentik-config` vs. Authentik's own Groups page), confirmed
+    group *membership* was correct too, then had the user decode their
+    own live token in the browser console
+    (`JSON.parse(atob(localStorage.getItem("hs_token").split(".")[1]...))`)
+    — `svc-household-system-admins` was sitting right there in
+    `groups`, ruling out every config-side explanation. The decisive
+    check: calling an admin-only route directly from the browser
+    console with that same stored token (`fetch("/api/household/reports",
+    {headers: {Authorization: "Bearer " + localStorage.getItem("hs_token")}})`)
+    returned 200 — proving the backend was correct and isolating the
+    bug to the frontend's own role display/routing.
+  - **Fix**: `getCurrentUserInfo()` now reads a module-level
+    `groupRoleConfig` (same `admin_group`/`user_group`/`viewer_group`
+    shape, and the same fixed admin > user > viewer precedence, as
+    `shared.auth._role_from_groups` — previously this frontend copy
+    used "whichever recognized group the token lists first," an
+    accident of the old hardcoded dict's lookup order, not a real
+    design). A new `warmGroupRoleMap()` fetches the real values from
+    the same `/authentik-config` this file's `getAuthentikConfig()`
+    already calls for the OIDC flow, and updates that module-level
+    config on success. Deliberately starts at the old generic defaults
+    (safe fallback before the first fetch resolves or if it fails) and
+    is called from `main.js`'s `boot()` **without `await`** — an
+    unreachable auth service must not delay the very first render, the
+    same principle behind every other network call in `auth.js` (see
+    `fetchWithTimeout`'s own comment) — so it self-corrects within the
+    same page load once the fetch resolves rather than blocking
+    startup. The brief window before it resolves only matters for
+    role-gated UI a user couldn't reach that fast anyway (reaching
+    `/admin` needs at least one more navigation/render cycle).
+  - **Verified with a real reproduction of the exact bug**, not just
+    code review: a jsdom test imported the actual, unmodified
+    `auth.js` from both frontends, stored a fake-but-decodable token
+    carrying `groups: ["svc-household-system-admins"]` (mirroring the
+    real token's custom, non-default group name), and asserted
+    `getCurrentUserInfo().role` was `"viewer"` *before*
+    `warmGroupRoleMap()` resolved — reproducing the live bug exactly —
+    then `"admin"` immediately after, on the same token, with no other
+    change. Ran against both frontends' copies (kept byte-identical,
+    the established convention). Hit an unrelated jsdom/Node version
+    incompatibility in this environment (`atob`/`btoa` throwing on
+    valid input) while building the test harness — worked around with
+    a `Buffer`-based polyfill in the test only; not a real app bug,
+    the actual app runs these in a real browser, already verified
+    separately via headless-Chromium screenshots earlier this session.
 
 - ✅ Alembic set up per service (independent revision histories), using
   the shared `shared/migrations.py` env logic.

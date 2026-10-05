@@ -132,7 +132,19 @@ class _JWKSCache:
 _jwks_cache = _JWKSCache()
 
 
-def _role_from_groups(groups: list[str], config: dict[str, str]) -> Role:
+def _role_from_groups(groups: list[str], config: dict[str, str]) -> Role | None:
+    """Returns None if `groups` contains none of the three configured
+    group names — the caller (_verify_authentik_token) treats that as
+    an outright rejection (401), not a fallback to viewer. Explicit
+    allow-list, not "anyone who can get a token from Authentik is in":
+    being a valid user on a shared Authentik instance that also serves
+    other homelab services (its own admin groups, read-only groups,
+    etc. — none of which have anything to do with this app) is not by
+    itself a reason to be let into THIS application at all. This used
+    to default to "viewer" for an unrecognised token; that was a real,
+    deliberate design choice early in the project, revisited and
+    reversed once a real multi-service Authentik instance made the gap
+    concrete rather than theoretical."""
     # Read fresh from the live config on every call rather than a
     # module-level dict — this is what makes an admin-saved group
     # rename take effect within the usual _AuthentikConfigCache TTL,
@@ -149,9 +161,7 @@ def _role_from_groups(groups: list[str], config: dict[str, str]) -> Role:
         return "user"
     if config["viewer_group"] in groups:
         return "viewer"
-    # Default to the least-privileged role if the token carries no
-    # recognised group — fail closed, not open.
-    return "viewer"
+    return None
 
 
 async def _verify_authentik_token(token: str) -> CurrentUser:
@@ -181,9 +191,21 @@ async def _verify_authentik_token(token: str) -> CurrentUser:
         ) from exc
 
     groups = claims.get("groups", [])
+    role = _role_from_groups(groups, config)
+    if role is None:
+        # A validly-signed token from the right issuer/audience, but not
+        # from this application's point of view — e.g. a different
+        # service's account on a shared Authentik instance. Rejected
+        # outright rather than let in as a viewer; see _role_from_groups'
+        # own docstring.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not a member of any group recognized by this application",
+        )
+
     return CurrentUser(
         subject=claims.get("preferred_username", claims["sub"]),
-        role=_role_from_groups(groups, config),
+        role=role,
         source="authentik",
     )
 

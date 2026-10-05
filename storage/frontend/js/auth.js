@@ -11,16 +11,58 @@ const END_SESSION_URL_KEY = "hs_end_session_url";
 const OIDC_STATE_KEY = "hs_oidc_state"; // sessionStorage
 const OIDC_VERIFIER_KEY = "hs_oidc_verifier"; // sessionStorage
 
-// Mirrors shared/src/shared/auth.py's GROUP_ROLE_MAP. This copy is for
-// UI display/gating ONLY (hiding the add-item button for viewers, etc.)
-// — the backend independently enforces the real rule from the same
-// groups claim, so a stale copy here is a UX annoyance, never a
-// security hole. Keep the two in sync when group names change.
-const ROLE_FROM_GROUPS = {
-  "household-system-admins": "admin",
-  "household-system-users": "user",
-  "household-system-viewers": "viewer",
+// The admin/user/viewer group NAMES, for UI display/gating ONLY (hiding
+// the add-item button for viewers, the router's /admin guard, etc.) —
+// the backend independently enforces the real rule from the same groups
+// claim via its own copy of this same config, so a stale value here is a
+// UX annoyance, never a security hole (proved live: a real production
+// user whose Authentik groups had been renamed via the admin panel kept
+// getting 200s from admin-only API routes the whole time, while the
+// frontend wrongly showed them as "viewer" and blocked /admin — this
+// mapping was still the old hardcoded default and nothing had told it
+// otherwise).
+//
+// Starts at the same generic defaults the project always shipped with,
+// in case warmGroupRoleMap() below hasn't completed yet or fails — gets
+// replaced with the real values (same admin_group/user_group/
+// viewer_group an admin can set through the panel) once that first
+// fetch resolves. Deliberately the SAME field names/shape as the
+// backend's own config dict (shared.auth._role_from_groups) rather than
+// a {groupName: role} map, so the matching logic below can mirror the
+// backend's fixed admin > user > viewer precedence exactly, instead of
+// the old "whichever recognized group the token happens to list first"
+// behavior, which was never a deliberate design, just an artifact of
+// how the old hardcoded dict got checked.
+let groupRoleConfig = {
+  admin_group: "household-system-admins",
+  user_group: "household-system-users",
+  viewer_group: "household-system-viewers",
 };
+
+/**
+ * Kicks off a fetch to pick up the real, possibly-admin-customized group
+ * names — call this once at boot, but NEVER awaited there (see
+ * main.js's boot()): an unreachable auth service must not delay the
+ * very first render the same way an unawaited Authentik token exchange
+ * could, which is exactly the failure mode `fetchWithTimeout` elsewhere
+ * in this file already exists to prevent. Safe to call repeatedly;
+ * cheap no-op once `getAuthentikConfig()`'s own cache is warm.
+ */
+export async function warmGroupRoleMap() {
+  try {
+    const config = await getAuthentikConfig();
+    groupRoleConfig = {
+      admin_group: config.admin_group,
+      user_group: config.user_group,
+      viewer_group: config.viewer_group,
+    };
+  } catch {
+    // Keep whatever's already in groupRoleConfig (the default, or a
+    // previously successful fetch) — same "don't let an unreachable
+    // auth service break what's already working" principle as every
+    // other getAuthentikConfig() caller in this file.
+  }
+}
 
 // Full-page redirects go through this indirection ONLY so tests can
 // observe the target URL — jsdom doesn't implement real navigation, so
@@ -91,13 +133,13 @@ export function getCurrentUserInfo() {
     return { subject: payload.sub, role: payload.role, source: "local" };
   }
   if (payload.groups) {
+    // Fixed admin > user > viewer precedence, matching
+    // shared.auth._role_from_groups exactly — not whatever order the
+    // token happens to list its groups in.
     let role = "viewer";
-    for (const group of payload.groups) {
-      if (group in ROLE_FROM_GROUPS) {
-        role = ROLE_FROM_GROUPS[group];
-        break;
-      }
-    }
+    if (payload.groups.includes(groupRoleConfig.admin_group)) role = "admin";
+    else if (payload.groups.includes(groupRoleConfig.user_group)) role = "user";
+    else if (payload.groups.includes(groupRoleConfig.viewer_group)) role = "viewer";
     return { subject: payload.preferred_username || payload.sub, role, source: "authentik" };
   }
   return { subject: payload.sub || "unknown", role: "viewer", source: getAuthSource() || "unknown" };

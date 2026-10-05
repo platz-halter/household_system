@@ -987,17 +987,24 @@ async def leaderboard(
     until: datetime | None = None,
     include_user_id: int | None = None,
 ) -> list[tuple[HouseholdUser, int]]:
-    """Total points per non-break user, highest first. Users on break are
-    excluded entirely (not just zeroed) per the break-mode spec — break
-    only hides someone from everyone ELSE's leaderboard/assignments, it
-    doesn't touch their actual points, which keep accumulating normally
-    underneath (see complete_task/complete_todo — neither checks
-    on_break at all). `include_user_id` punches one specific user back
-    in regardless of their break status — for a user checking their OWN
-    standing (e.g. Home's "points this week" card), which needs their
-    real total, not a forced 0 just because the household-wide ranking
-    view excludes them. Users with no completions in range still appear,
-    with a total of 0."""
+    """Total points per non-break, non-viewer user, highest first. Users
+    on break are excluded entirely (not just zeroed) per the break-mode
+    spec — break only hides someone from everyone ELSE's leaderboard/
+    assignments, it doesn't touch their actual points, which keep
+    accumulating normally underneath (see complete_task/complete_todo —
+    neither checks on_break at all). Viewers are excluded for a
+    different reason: `can_write` already blocks them from completing
+    anything, so they can only ever appear pinned at 0 — pure clutter,
+    not a real ranking entry. Uses the cached `HouseholdUser.role` hint
+    (synced in `_self` on nearly every request, see its own docstring),
+    treating an unsynced NULL as "not known to be a viewer" rather than
+    excluding it, so a role this cache hasn't caught up to yet can't
+    accidentally hide a real admin/user. `include_user_id` punches one
+    specific user back in regardless of break OR viewer status — for a
+    user checking their OWN standing (e.g. Home's "points this week"
+    card), which needs their real total, not a forced 0 just because
+    the household-wide ranking view would otherwise exclude them. Users
+    with no completions in range still appear, with a total of 0."""
     points_subq = select(PointsEntry.household_user_id, PointsEntry.points)
     if since is not None:
         points_subq = points_subq.where(PointsEntry.earned_at >= since)
@@ -1010,7 +1017,12 @@ async def leaderboard(
         select(HouseholdUser, total.label("total"))
         .outerjoin(points_subq, points_subq.c.household_user_id == HouseholdUser.id)
         .where(
-            or_(HouseholdUser.on_break.is_(False), HouseholdUser.id == include_user_id)
+            or_(HouseholdUser.on_break.is_(False), HouseholdUser.id == include_user_id),
+            or_(
+                HouseholdUser.role.is_(None),
+                HouseholdUser.role != "viewer",
+                HouseholdUser.id == include_user_id,
+            ),
         )
         .group_by(HouseholdUser.id)
         .order_by(total.desc())
