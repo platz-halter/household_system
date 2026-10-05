@@ -11,10 +11,11 @@ pre-deploy security pass done — see this file's own entries below).
   separately scheduled (and over-scheduled) by the balancer on their
   own cadence. See its own entry under "Household service — backend"
   for the full design (same-person-direct vs. different-person-via-
-  balancer semantics, multi-level chains, cycle rejection, the "one
-  source of instances" exclusion from the sweep/direct-completion/
-  Home's standalone list) and "Household service — frontend" for the
-  Tasks-page chain-link editor and the "After: {parent}" todo label.
+  balancer semantics, the one-level depth cap that makes a chained loop
+  structurally impossible, the "one source of instances" exclusion
+  from the sweep/direct-completion/Home's standalone list) and
+  "Household service — frontend" for the Tasks-page chain-link editor,
+  the "After: {parent}" todo label, and the Tasks-page calendar view.
 - 1.1.0 also adds (same uncommitted release — nothing from this version
   has shipped yet, so these three ride along rather than bumping to
   1.2.0): on-break users are now excluded from every "assign this to
@@ -43,6 +44,29 @@ pre-deploy security pass done — see this file's own entries below).
   flat unexplained 409, with an explicit override to proceed anyway.
   See "Household service — backend"/"— frontend" for each one's own
   entry.
+- 1.1.0 also picked up a fourth round: an admin reassign now notifies
+  the new assignee (previously silent); chaining is capped at exactly
+  one level, not just cycle-rejected (a task is a pure parent, a pure
+  chain child, or neither — never both, closing a real gap a first
+  attempt at this left open, caught via live testing); and the Tasks
+  page gained a calendar view for a month-at-a-glance of weekly/monthly
+  task schedules. Also fixed, found along the way: `.hidden = true` on
+  a `.btn`-classed element (the notification bell, a disabled chain
+  button) didn't actually hide it — a CSS specificity conflict with
+  `.btn`'s own `display` rule — now using this codebase's existing
+  `.hidden` class convention instead of the native attribute. See
+  "Household service — backend"/"— frontend" for each one's own entry.
+- 1.1.0 also picked up a fifth round: every notification-worthy event
+  (admin reassign, a new chore request, a takeover request/response,
+  the weekly nudge, a new report) now creates a durable in-app
+  `Notification` row through one shared `crud._notify()`, not just a
+  one-shot push that's invisible without a subscription — this is what
+  was actually missing when an admin reassign "didn't show up in the
+  notifications window." Found and fixed a second, more serious bug
+  while verifying it: `pywebpush`'s call had no timeout, so one slow or
+  unreachable push endpoint could hang the whole request indefinitely
+  (reproduced live at 2+ minutes) — now capped at 10s. See "Household
+  service — backend"/"— frontend" for the full entry.
 - 1.0.1 made the Authentik group→role mapping admin-editable (see its
   own entry under "Auth service"), on top of 1.0.0's Authentik
   connection panel.
@@ -1429,6 +1453,52 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     than handed to the one remaining viewer — before the fix this would
     have gone to them, since they'd read as the only/least-loaded
     "eligible" candidate. Test fixtures cleaned up afterward.
+- ✅ **1.1.0 follow-up: admin reassign now notifies the new assignee.**
+  User report. `crud.notify_todo_reassigned` (new, distinct wording
+  from `notify_todo_assigned`'s "asked you to" — a reassign is a done
+  deal, not a request) is called from the `/todos/{id}/reassign` route
+  after a successful reassign. Verified live: reassigning a todo
+  returns 200 and the notify call executes cleanly (no subscriptions in
+  this dev environment, so it correctly no-ops rather than erroring,
+  same as every other push call in this codebase).
+- ✅ **1.1.0 follow-up: chaining is now capped at exactly one level,
+  closing a real gap in the earlier cycle-prevention logic.** User
+  request: "chained tasks should not be able to chain another chained
+  task in order to avoid a chained loop." `crud.create_chain_link` now
+  rejects a new link if the proposed parent is already someone's chain
+  child, **or** the proposed child already chains something else
+  itself (new `crud.is_chain_parent`), **or** the proposed child is
+  already someone else's chain child — a task is a pure parent, a pure
+  child, or neither, never both, which makes a chained loop
+  structurally impossible (a cycle needs some task with both an
+  incoming and an outgoing chain edge). This replaces the older
+  `_reachable_task_ids` graph-walk cycle check entirely (now provably
+  redundant — removed, not just left unused) and ends support for
+  multi-level chains (A→B→C) that 1.1.0's original chain-tasks work
+  deliberately built; existing data from before this change isn't
+  retroactively touched, only new links are affected.
+  - **Caught a real bug in my own first pass at this**, via live
+    testing rather than just reasoning about it: an earlier version
+    only checked "is the proposed parent already a child" and "is the
+    proposed child already a child" — which missed the case where the
+    proposed CHILD is already a PARENT of something else. Chaining
+    C→A when A already chained B silently produced C→A→B, a two-level
+    chain the new rule was supposed to make impossible. Caught by
+    actually attempting it against the live dev API rather than trusting
+    the two-check version was complete; fixed by adding the missing
+    third check (`is_chain_parent` on the proposed child) and
+    re-verified all three directions live: parent-already-chained,
+    child-already-a-parent (the bug), and child-already-chained-twice,
+    all correctly 400; a task with multiple existing children can still
+    gain another one (that's still allowed — only *depth* is capped,
+    not fan-out).
+  - Tasks.js's chain-link editor now shows an explanation instead of
+    an "add" control when editing a task that's already a chain child
+    (fetches `GET /tasks/{id}/chain-parents`, naming which task(s) it's
+    chained from) rather than letting the user hit a 400 from the
+    picker. Verified live.
+  - Models/`PROJECT_SPEC.md`/`CLAUDE.md` updated to describe the
+    one-level cap instead of the old multi-level design.
 
 ## Household service — frontend
 
@@ -1848,6 +1918,104 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   untouched; confirming awards points and marks it "Done today"; the
   raw API confirms a force:false request still 409s and force:true
   succeeds. Test fixtures cleaned up afterward.
+- 🐛 **Fixed: `.hidden = true/false` on a `.btn`-classed element didn't
+  actually hide it.** Found while verifying the chain-link "add"
+  button's new disabled state (below), then confirmed the SAME bug had
+  already shipped last round in the notification bell's viewer-hiding
+  (`#notif-bell`) without being caught — the earlier test only checked
+  `getAttribute("hidden") !== null`, which confirms the IDL
+  property/attribute was set, not that the element was actually
+  invisible. Root cause: the browser's built-in `[hidden] { display:
+  none }` rule and `.btn { display: inline-flex }` have equal CSS
+  specificity, and `.btn`'s rule comes later in the stylesheet, so it
+  wins the cascade — the `hidden` attribute ends up present in the DOM
+  but has no visual effect on anything with a `.btn`-family class. This
+  codebase already has a `.hidden { display: none !important; }` class
+  (`base.css`) for exactly this, used elsewhere via
+  `classList.toggle("hidden", ...)` (e.g. login.js's form toggle) — the
+  bell and the chain-notice button just weren't using it. Fixed both
+  (`notifications.js`'s `refreshNotificationBadge`, `tasks.js`'s
+  `renderCappedNotice`) to use the class instead of the native
+  attribute; `index.html`'s `#notif-bell`/`#notif-badge` now start with
+  `class="... hidden"` rather than a `hidden` attribute, so the
+  default/pre-JS state is correctly invisible too. Verified live with
+  `isVisible()` (not just attribute presence) this time: a viewer-role
+  token on a chrome-visible page (not the login page, which would have
+  hidden the whole topbar and masked the bug) now actually hides the
+  bell; an admin token still shows it; the chain-notice button is
+  actually hidden, not just attribute-flagged.
+- 🐛 **Fixed: an admin reassign (and several other events) never showed
+  up in the notification bell.** User report: "Notification about new
+  admin assignment don't show up in the notifications window." Root
+  cause wasn't a bug in the reassign code itself — the bell's "Takeover
+  requests" panel only ever read `TakeoverRequest` rows; every OTHER
+  notification-worthy event (admin reassign, a new chore request, a
+  takeover request's response, the weekly nudge, a new report) only
+  ever fired a one-shot Web Push, which silently no-ops with no
+  subscription, a denied permission prompt, or a browser that lost it —
+  invisible with nothing in the UI to show for it. Fixed by making the
+  in-app record the primary thing, not an afterthought of push: new
+  `Notification` table/migration (`household_user_id`, `title`, `body`,
+  `url`, `created_at`, `read_at`) and a single `crud._notify()` that
+  every notify_* function now goes through — it always creates the
+  in-app row, then attempts push as a best-effort bonus, returning the
+  push-specific success count for the one caller (`send_weekly_nudge`)
+  that tracks delivery stats separately. New routes: `GET
+  /notifications` (`unread_only`/`limit`), `POST /notifications/{id}
+  /read`, `POST /notifications/read-all` (ownership-checked — a 404 if
+  the notification isn't yours, not someone else's to mark read). The
+  bell's badge count is now incoming-takeover-requests + unread-
+  notifications combined; the panel grew a "Recent" section below the
+  existing takeover-requests one, each entry dismissible (mark read) or
+  tappable (navigates to its `url` and closes the panel).
+  - **Found and fixed a second, more serious bug while verifying this**:
+    `pywebpush`'s `webpush()` call had no timeout, and the underlying
+    `requests.post()` it wraps has none by default either — a single
+    slow or unreachable push endpoint could hang the call, and
+    everything awaiting it (an admin's `/todos/{id}/reassign` request,
+    specifically, since that awaits `notify_todo_reassigned`
+    synchronously), for however long the OS-level TCP timeout happens
+    to be. Not hypothetical: reproduced live at **2+ minutes** hung on
+    a real stale subscription in a sandboxed dev environment with
+    restricted container network egress. Fixed with an explicit
+    `timeout=10` on the `webpush()` call in `push.py`'s `_send_one` —
+    a slow subscription now fails fast (caught by the existing generic
+    exception handler, same as any other delivery failure) instead of
+    blocking an unrelated request indefinitely.
+  - Verified live: reassigning a todo to a fresh user with no push
+    subscription now completes instantly and the recipient's `GET
+    /notifications` shows the "Task reassigned to you" entry — the
+    exact case the user reported as missing. Also verified: a
+    read notification drops out of `unread_only=true` but stays in the
+    full list; another user can't mark your notification read (404);
+    the bell badge count and panel update live in a real browser
+    session (dismiss clears the badge). Test fixtures cleaned up
+    afterward.
+- ✅ **1.1.0 follow-up: calendar view on the Tasks page.** A List/
+  Calendar toggle (chip-row, same pattern as Board's status filter)
+  next to the "Tasks" heading. The calendar is a standard month grid
+  (prev/next navigation, `Intl.DateTimeFormat` for the month/year
+  label, today's cell outlined) showing every **weekly** task on each
+  of its scheduled weekdays across the visible month, with every
+  **monthly** task called out in a separate "This month:" strip above
+  the grid (a monthly task has no specific day of the month to place it
+  on). Deliberately excludes daily tasks (on every cell by definition —
+  wouldn't tell anyone anything a list doesn't already) and chain-child
+  tasks (no independent schedule of their own). The grid's column order
+  respects the admin-configured week start (`GET /settings`'s
+  `week_start_weekday`), same rotation math as Stats' activity heatmap
+  (`(weekday - weekStart + 7) % 7`) — kept independent of that module
+  rather than importing it, since this is a one-off month grid, not a
+  scrolling year of days, and the padding logic differs (leading *and*
+  trailing blanks to complete the last week, not just leading). Minimal
+  new CSS (`.cal-grid`/`.cal-day`/`.cal-day-task`/`.cal-daylabels`).
+  Verified live: October 2026 showed the configured weekly task on
+  exactly 13 cells (4 Mondays + 4 Wednesdays + 5 Fridays, matching that
+  month's actual calendar — the weekday-math a manual check would
+  easily get subtly wrong), the monthly task only in the summary strip,
+  the daily task nowhere on the grid, today's cell visibly outlined,
+  and prev/next navigation working, all with zero console errors. Test
+  fixtures cleaned up afterward.
 - ✅ Alembic set up per service (independent revision histories), using
   the shared `shared/migrations.py` env logic.
 - ✅ `shared/entrypoint.sh` runs `alembic upgrade head` before `uvicorn`

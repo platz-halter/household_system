@@ -17,6 +17,13 @@ function canWrite() {
 let categoriesCache = [];
 let tasksCache = [];
 
+// Persists across re-renders within the same page load (same pattern as
+// board.js's status filter / home.js's search state) — switching to
+// Calendar, visiting another page via the bottom nav, then coming back
+// shouldn't reset either the chosen view or which month was showing.
+const taskViewState = { view: "list" };
+let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+
 export async function renderTasks(container) {
   const writable = canWrite();
 
@@ -28,8 +35,14 @@ export async function renderTasks(container) {
       </div>
       <div class="chip-row" id="category-list" style="margin-bottom: var(--space-2);"></div>
 
-      <div class="section-heading"><h2>Tasks</h2></div>
-      <div id="task-list" class="stack"></div>
+      <div class="section-heading">
+        <h2>Tasks</h2>
+        <div class="chip-row" id="task-view-toggle">
+          <span class="chip${taskViewState.view === "list" ? " chip-active" : ""}" data-view="list">List</span>
+          <span class="chip${taskViewState.view === "calendar" ? " chip-active" : ""}" data-view="calendar">Calendar</span>
+        </div>
+      </div>
+      <div id="task-view-root"></div>
     </div>
     ${writable ? `<button class="fab" id="add-task-fab" aria-label="New task">${icons.plus}</button>` : ""}
   `;
@@ -39,8 +52,126 @@ export async function renderTasks(container) {
     container.querySelector("#add-task-fab").addEventListener("click", () => openTaskModal(container, writable));
   }
 
+  container.querySelectorAll("#task-view-toggle .chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      taskViewState.view = chip.dataset.view;
+      container.querySelectorAll("#task-view-toggle .chip").forEach((c) => c.classList.toggle("chip-active", c === chip));
+      renderTaskView(container, writable);
+    });
+  });
+
   await loadCategories(container, writable);
-  await loadTasks(container, writable);
+  await renderTaskView(container, writable);
+}
+
+async function renderTaskView(container, writable) {
+  const root = container.querySelector("#task-view-root");
+  if (!root) return;
+
+  if (taskViewState.view === "calendar") {
+    root.innerHTML = `
+      <div class="row-between" style="margin-bottom: var(--space-3);">
+        <button class="btn btn-icon" id="cal-prev" aria-label="Previous month">${icons.chevronLeft}</button>
+        <h3 id="cal-month-label" style="margin: 0;"></h3>
+        <button class="btn btn-icon" id="cal-next" aria-label="Next month">${icons.chevronRight}</button>
+      </div>
+      <div id="cal-monthly-list" style="margin-bottom: var(--space-3);"></div>
+      <div class="cal-daylabels" id="cal-daylabels"></div>
+      <div id="cal-grid" class="cal-grid"></div>
+    `;
+    root.querySelector("#cal-prev").addEventListener("click", () => {
+      calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1);
+      renderCalendar(root);
+    });
+    root.querySelector("#cal-next").addEventListener("click", () => {
+      calendarMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1);
+      renderCalendar(root);
+    });
+    await renderCalendar(root);
+  } else {
+    root.innerHTML = `<div id="task-list" class="stack"></div>`;
+    await loadTasks(container, writable);
+  }
+}
+
+function isSameLocalDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+// A month grid of every WEEKLY task scheduled on each day, plus a
+// summary strip for MONTHLY ones (which have no specific day of the
+// month to place them on — just "sometime this month"). Deliberately
+// leaves out daily tasks: they're on every day by definition (a
+// "standing chore," not scheduled the way this app uses the word
+// elsewhere — see Recurrence's own docstring), so a calendar full of
+// the same entries on every cell wouldn't tell anyone anything a plain
+// list doesn't already. Also leaves out chain-child tasks — they have
+// no independent schedule of their own (see TaskChainLink).
+async function renderCalendar(root) {
+  const labelEl = root.querySelector("#cal-month-label");
+  const monthlyRoot = root.querySelector("#cal-monthly-list");
+  const dayLabelsRoot = root.querySelector("#cal-daylabels");
+  const gridRoot = root.querySelector("#cal-grid");
+  if (!gridRoot) return;
+
+  labelEl.textContent = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(calendarMonth);
+
+  let weekStart = 0;
+  try {
+    const settings = await api.get(`${HB}/settings`);
+    weekStart = settings.week_start_weekday ?? 0;
+  } catch {
+    weekStart = 0;
+  }
+  dayLabelsRoot.innerHTML = WEEKDAY_LABELS.slice(weekStart)
+    .concat(WEEKDAY_LABELS.slice(0, weekStart))
+    .map((l) => `<span>${l}</span>`)
+    .join("");
+
+  let tasks;
+  try {
+    tasks = await api.get(`${HB}/tasks?active=true`);
+  } catch {
+    gridRoot.innerHTML = `<div class="empty-state">Couldn't load tasks</div>`;
+    return;
+  }
+
+  const weeklyTasks = tasks.filter((t) => t.recurrence === "weekly" && !t.is_chain_child);
+  const monthlyTasks = tasks.filter((t) => t.recurrence === "monthly" && !t.is_chain_child);
+
+  monthlyRoot.innerHTML = monthlyTasks.length
+    ? `<div class="list-row-meta" style="flex-wrap: wrap;">
+         <span class="muted" style="font-size: var(--font-size-xs);">This month:</span>
+         ${monthlyTasks.map((t) => `<span class="badge badge-neutral">${escapeHtml(t.name)}</span>`).join("")}
+       </div>`
+    : "";
+
+  const year = calendarMonth.getFullYear();
+  const month = calendarMonth.getMonth();
+  const firstOfMonth = new Date(year, month, 1);
+  const daysInMonth = new Date(year, month + 1, 0).getDate();
+  const mondayFirst = (firstOfMonth.getDay() + 6) % 7; // JS getDay(): 0=Sun..6=Sat -> 0=Mon..6=Sun
+  const leadingBlanks = (mondayFirst - weekStart + 7) % 7;
+  const today = new Date();
+
+  const cells = Array(leadingBlanks).fill(null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+  while (cells.length % 7 !== 0) cells.push(null);
+
+  gridRoot.innerHTML = cells
+    .map((d) => {
+      if (d === null) return `<div class="cal-day cal-day-empty"></div>`;
+      const dateObj = new Date(year, month, d);
+      const weekday = (dateObj.getDay() + 6) % 7; // 0=Mon..6=Sun, matches Task.weekdays
+      const dayTasks = weeklyTasks.filter((t) => (t.weekdays || []).includes(weekday));
+      return `
+        <div class="cal-day${isSameLocalDay(dateObj, today) ? " cal-day-today" : ""}">
+          <div class="cal-day-number">${d}</div>
+          ${dayTasks.map((t) => `<div class="cal-day-task" title="${escapeAttr(t.name)} (${t.points} pts)">${escapeHtml(t.name)}</div>`).join("")}
+        </div>
+      `;
+    })
+    .join("");
 }
 
 async function loadCategories(container, writable) {
@@ -243,6 +374,42 @@ async function initChainLinksSection(body, task, writable) {
     }
   }
 
+  // A task that's already someone else's chain task can't itself chain
+  // further tasks (chaining is capped at one level — see
+  // crud.create_chain_link) — shown as an explanation instead of just
+  // letting the "add" control fail server-side.
+  async function renderCappedNotice() {
+    // `.hidden` CSS class, not the native `hidden` attribute — `.btn`'s
+    // own `display: inline-flex` otherwise wins the cascade over the
+    // browser's built-in `[hidden]` rule at equal specificity, and the
+    // button stays visually shown despite the attribute being set (see
+    // notifications.js's refreshNotificationBadge for the same fix,
+    // caught the same way).
+    childBtn.classList.add("hidden");
+    sameUserEl.classList.add("hidden");
+    // refresh() (and so this) can run more than once — e.g. removing an
+    // existing link re-triggers it — so reuse one notice element rather
+    // than inserting a new <p> after childBtn every time.
+    let notice = body.querySelector("#chain-capped-notice");
+    if (!notice) {
+      notice = document.createElement("p");
+      notice.id = "chain-capped-notice";
+      notice.className = "muted";
+      notice.style.fontSize = "var(--font-size-xs)";
+      childBtn.insertAdjacentElement("afterend", notice);
+    }
+    let parents = [];
+    try {
+      parents = await api.get(`${HB}/tasks/${task.id}/chain-parents`);
+    } catch {
+      /* fall through with an empty list — still correct, just less specific */
+    }
+    const names = parents.map((p) => p.parent_task_name).join(", ");
+    notice.textContent = names
+      ? `"${task.name}" is already chained from: ${names}. A chained task can't chain further tasks itself.`
+      : `"${task.name}" is already chained from another task and can't chain further tasks itself.`;
+  }
+
   async function refresh() {
     let links;
     try {
@@ -283,10 +450,15 @@ async function initChainLinksSection(body, task, writable) {
       });
     }
 
+    if (task.is_chain_child) {
+      await renderCappedNotice();
+      return;
+    }
+
     // Excludes this task itself, any task already chained to it, and any
-    // task that's already someone else's chain child — stacking a second
-    // parent onto an existing chain child is confusing and isn't a case
-    // the "After: {parent}" todo label can represent anyway.
+    // task that's already someone else's chain child — chaining is
+    // capped at one level (see crud.create_chain_link), so a task that's
+    // already a chain child can't be picked as a child here either.
     const linkedChildIds = new Set(links.map((l) => l.child_task_id));
     eligibleChildren = tasksCache.filter(
       (t) => t.id !== task.id && !linkedChildIds.has(t.id) && !t.is_chain_child
@@ -298,7 +470,7 @@ async function initChainLinksSection(body, task, writable) {
         : `${icons.plus}<span>Add a chain task…</span>`;
   }
 
-  if (writable) {
+  if (writable && !task.is_chain_child) {
     childBtn.addEventListener("click", () => {
       openTaskPickerModal({
         tasks: eligibleChildren,
@@ -308,7 +480,7 @@ async function initChainLinksSection(body, task, writable) {
         onSelect: addChainLink,
       });
     });
-  } else {
+  } else if (!task.is_chain_child) {
     childBtn.disabled = true;
     sameUserEl.disabled = true;
   }

@@ -13,6 +13,7 @@ from household_service.models import (
     Category,
     HouseholdSettings,
     HouseholdUser,
+    Notification,
     PointsEntry,
     PointsSource,
     PushSubscription,
@@ -302,6 +303,17 @@ async def is_chain_child(db: AsyncSession, task_id: int) -> bool:
     return result.scalar_one_or_none() is not None
 
 
+async def is_chain_parent(db: AsyncSession, task_id: int) -> bool:
+    """Whether `task_id` already chains at least one other task — the
+    other half of the one-level cap (see create_chain_link): a task
+    that's about to become someone's chain CHILD must not already be
+    a parent itself, or it'd sit in the middle of a two-level chain."""
+    result = await db.execute(
+        select(TaskChainLink.id).where(TaskChainLink.parent_task_id == task_id).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
 async def list_chain_links(
     db: AsyncSession, parent_task_id: int
 ) -> list[TaskChainLink]:
@@ -341,30 +353,6 @@ async def list_chain_parents(
     return list(result.scalars().all())
 
 
-async def _reachable_task_ids(db: AsyncSession, start_task_id: int) -> set[int]:
-    """Every task reachable from `start_task_id` by following existing
-    chain links downward (start's children, their children, ...) —
-    everything a cycle check needs to know "is already a descendant of
-    this task." Walks the whole link table in the worst case, which is
-    fine at this project's scale (a household's task list, not a graph
-    database) — correctness over a cleverer single query."""
-    seen: set[int] = set()
-    frontier = [start_task_id]
-    while frontier:
-        current = frontier.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        result = await db.execute(
-            select(TaskChainLink.child_task_id).where(
-                TaskChainLink.parent_task_id == current
-            )
-        )
-        frontier.extend(row[0] for row in result.all())
-    seen.discard(start_task_id)
-    return seen
-
-
 async def create_chain_link(
     db: AsyncSession, *, parent_task_id: int, child_task_id: int, same_user: bool
 ) -> TaskChainLink:
@@ -384,11 +372,32 @@ async def create_chain_link(
     if existing is not None:
         raise ValueError("This chain link already exists")
 
-    # Adding parent->child only closes a cycle if parent is already
-    # reachable FROM child (child -> ... -> parent already exists) —
-    # that would make parent a descendant of its own new child.
-    if parent_task_id in await _reachable_task_ids(db, child_task_id):
-        raise ValueError("This would create a cycle of chained tasks")
+    # Chains are capped at exactly one level: a task is a pure parent, a
+    # pure child, or neither — never both. This is what makes a chained
+    # loop structurally impossible, not a graph walk looking for one: a
+    # cycle needs at least one task with both an incoming and an
+    # outgoing chain edge, and these three checks together mean no task
+    # can ever have both, from either direction:
+    #   - the new PARENT can't already be a CHILD (would make it a
+    #     middle node, child-side)
+    #   - the new CHILD can't already be a PARENT (would make it a
+    #     middle node, parent-side — the case a two-check version of
+    #     this missed: C->A->B is still only "A is already a child" or
+    #     "A is already a parent" depending which link you look at
+    #     first, so both directions have to be checked on BOTH tasks)
+    #   - the new CHILD can't already be a CHILD of something else
+    #     (no double-parenting)
+    if await is_chain_child(db, parent_task_id):
+        raise ValueError(
+            "This task is already chained from another task and can't "
+            "chain further tasks itself"
+        )
+    if await is_chain_parent(db, child_task_id):
+        raise ValueError(
+            "This task already chains another task and can't be chained itself"
+        )
+    if await is_chain_child(db, child_task_id):
+        raise ValueError("This task is already chained to another task")
 
     max_position = await db.scalar(
         select(func.max(TaskChainLink.position)).where(
@@ -1546,42 +1555,31 @@ def _takeover_item_label(req: TakeoverRequest) -> str:
 
 
 async def notify_takeover_requested(db: AsyncSession, req: TakeoverRequest) -> None:
-    """Fire-and-forget push to the target when someone asks them to
-    take something over. Called by the route AFTER create_takeover_
-    request_for_* already committed — push.send_to_subscriptions commits
-    internally, so calling it mid-transaction would split one logical
-    write into several (see _spawn_chain_children's own note)."""
-    subs = await get_subscriptions_for_user(db, req.target_id)
-    if not subs:
-        return
-    await push.send_to_subscriptions(
+    """Notifies the target when someone asks them to take something
+    over — in-app always, push best-effort (see _notify). Called by the
+    route AFTER create_takeover_request_for_* already committed —
+    _notify commits internally too, so calling it mid-transaction would
+    split one logical write into several (see _spawn_chain_children's
+    own note)."""
+    await _notify(
         db,
-        subs,
-        {
-            "title": "Takeover request",
-            "body": f"{req.requester.display_name} asked you to take over: "
-            f"{_takeover_item_label(req)}",
-            "url": "/home",
-        },
+        req.target_id,
+        title="Takeover request",
+        body=f"{req.requester.display_name} asked you to take over: {_takeover_item_label(req)}",
+        url="/home",
     )
 
 
 async def notify_takeover_responded(db: AsyncSession, req: TakeoverRequest) -> None:
-    """Fire-and-forget push to the requester once the target answers.
-    Same after-commit timing as notify_takeover_requested."""
-    subs = await get_subscriptions_for_user(db, req.requester_id)
-    if not subs:
-        return
+    """Notifies the requester once the target answers. Same after-commit
+    timing as notify_takeover_requested."""
     verb = "accepted" if req.status == TakeoverStatus.accepted else "declined"
-    await push.send_to_subscriptions(
+    await _notify(
         db,
-        subs,
-        {
-            "title": f"Takeover request {verb}",
-            "body": f"{req.target.display_name} {verb} your request for: "
-            f"{_takeover_item_label(req)}",
-            "url": "/home",
-        },
+        req.requester_id,
+        title=f"Takeover request {verb}",
+        body=f"{req.target.display_name} {verb} your request for: {_takeover_item_label(req)}",
+        url="/home",
     )
 
 
@@ -1814,24 +1812,114 @@ async def get_subscriptions_for_user(
     return list(result.scalars().all())
 
 
+# ---- Notification inbox --------------------------------------------------
+
+
+async def _notify(
+    db: AsyncSession, household_user_id: int, *, title: str, body: str, url: str
+) -> int:
+    """The one place that creates a notification — both the durable
+    in-app record (`Notification`, what the bell/inbox actually reads)
+    and a best-effort push. Always creates the in-app record, even with
+    no push subscription — a push-only call site is exactly what let an
+    admin reassign go completely unnoticed by a user without push
+    enabled (no subscription, denied the permission prompt, or just a
+    browser that doesn't support it). Returns how many of the push
+    sends actually succeeded (0 if there's no subscription, or delivery
+    failed for all of them) — callers that track push-delivery stats
+    specifically (send_weekly_nudge) use this instead of duplicating
+    the subscription lookup themselves."""
+    db.add(
+        Notification(
+            household_user_id=household_user_id, title=title, body=body, url=url
+        )
+    )
+    await db.commit()
+    subs = await get_subscriptions_for_user(db, household_user_id)
+    if not subs:
+        return 0
+    return await push.send_to_subscriptions(
+        db, subs, {"title": title, "body": body, "url": url}
+    )
+
+
+async def get_notification(
+    db: AsyncSession, notification_id: int
+) -> Notification | None:
+    return await db.get(Notification, notification_id)
+
+
+async def list_notifications(
+    db: AsyncSession,
+    household_user_id: int,
+    *,
+    unread_only: bool = False,
+    limit: int = 30,
+) -> list[Notification]:
+    stmt = select(Notification).where(
+        Notification.household_user_id == household_user_id
+    )
+    if unread_only:
+        stmt = stmt.where(Notification.read_at.is_(None))
+    stmt = stmt.order_by(Notification.created_at.desc()).limit(limit)
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def mark_notification_read(
+    db: AsyncSession, notification: Notification
+) -> Notification:
+    if notification.read_at is None:
+        notification.read_at = datetime.now(UTC)
+        await db.commit()
+        await db.refresh(notification)
+    return notification
+
+
+async def mark_all_notifications_read(db: AsyncSession, household_user_id: int) -> int:
+    result = await db.execute(
+        update(Notification)
+        .where(
+            Notification.household_user_id == household_user_id,
+            Notification.read_at.is_(None),
+        )
+        .values(read_at=datetime.now(UTC))
+    )
+    await db.commit()
+    return result.rowcount
+
+
 async def notify_todo_assigned(
     db: AsyncSession, todo: TodoItem, requested_by: HouseholdUser
 ) -> None:
-    """Fire-and-forget push to whoever a new todo was requested from.
-    Silently no-ops if they have no subscription or VAPID isn't configured."""
+    """Notifies whoever a new todo was requested from — in-app always,
+    push best-effort (see _notify)."""
     if todo.assigned_to_id is None:
         return
-    subs = await get_subscriptions_for_user(db, todo.assigned_to_id)
-    if not subs:
-        return
-    await push.send_to_subscriptions(
+    await _notify(
         db,
-        subs,
-        {
-            "title": "New chore request",
-            "body": f"{requested_by.display_name} asked you to: {todo.title}",
-            "url": "/board",
-        },
+        todo.assigned_to_id,
+        title="New chore request",
+        body=f"{requested_by.display_name} asked you to: {todo.title}",
+        url="/board",
+    )
+
+
+async def notify_todo_reassigned(
+    db: AsyncSession, todo: TodoItem, reassigned_by: HouseholdUser
+) -> None:
+    """Notifies whoever an admin just handed a board item straight to
+    (crud.reassign_todo) — distinct wording from notify_todo_assigned's
+    "asked you to", since reassign is a done deal, not a request to
+    respond to."""
+    if todo.assigned_to_id is None:
+        return
+    await _notify(
+        db,
+        todo.assigned_to_id,
+        title="Task reassigned to you",
+        body=f'{reassigned_by.display_name} reassigned "{todo.title}" to you',
+        url="/board",
     )
 
 
@@ -1863,18 +1951,19 @@ async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int, int]:
         ):
             already_met_goal += 1
             continue
-        subs = await get_subscriptions_for_user(db, user.id)
-        if not subs:
-            no_subscription += 1
-            continue
         body = (
             f"You're at {points}/{settings.weekly_points_goal} points this week — "
             "don't forget your chores!"
             if settings.weekly_points_goal is not None
             else "Don't forget to log your points this week!"
         )
-        sent = await push.send_to_subscriptions(
-            db, subs, {"title": "Weekly reminder", "body": body, "url": "/home"}
+        # Always creates the in-app notification (see _notify), even
+        # with no push subscription — `no_subscription` below still
+        # measures push-delivery specifically, for the Admin panel's
+        # "sent: N, skipped: N" summary, not whether the nudge is
+        # visible at all.
+        sent = await _notify(
+            db, user.id, title="Weekly reminder", body=body, url="/home"
         )
         if sent:
             notified += 1
@@ -2087,11 +2176,6 @@ async def notify_new_report(
         return
     body = f"{report.period_type.value.capitalize()} report ready: {report.period_start} – {report.period_end}"
     for admin in admins:
-        subs = await get_subscriptions_for_user(db, admin.id)
-        if not subs:
-            continue
-        await push.send_to_subscriptions(
-            db,
-            subs,
-            {"title": "New report generated", "body": body, "url": "/admin"},
+        await _notify(
+            db, admin.id, title="New report generated", body=body, url="/admin"
         )

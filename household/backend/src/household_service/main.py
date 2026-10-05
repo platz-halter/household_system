@@ -31,6 +31,7 @@ from household_service.schemas import (
     HouseholdUserOut,
     HouseholdUserUpdate,
     LeaderboardEntry,
+    NotificationOut,
     NudgeResult,
     PointsEntryOut,
     PushSubscriptionIn,
@@ -619,7 +620,7 @@ async def reassign_todo(
     todo_id: int,
     data: TodoReassignIn,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_admin),
+    user: CurrentUser = Depends(can_admin),
 ):
     """Admin-only direct handoff — see crud.reassign_todo. Distinct from
     a takeover request below, which needs the target's consent."""
@@ -628,12 +629,14 @@ async def reassign_todo(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found"
         )
+    admin = await _self(db, user)
     try:
         todo = await crud.reassign_todo(db, todo, data.assigned_to_id)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
+    await crud.notify_todo_reassigned(db, todo, admin)
     return TodoOut.from_model(todo)
 
 
@@ -980,6 +983,48 @@ async def push_test(
     hu = await _self(db, user)
     sent = await crud.send_test_push(db, hu.id)
     return TestPushResult(sent=sent)
+
+
+# ---- Notification inbox ----------------------------------------------------
+
+
+@app.get("/notifications", response_model=list[NotificationOut])
+async def list_notifications(
+    unread_only: bool = False,
+    limit: int = Query(default=30, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_read),
+):
+    me = await _self(db, user)
+    items = await crud.list_notifications(
+        db, me.id, unread_only=unread_only, limit=limit
+    )
+    return [NotificationOut.model_validate(n) for n in items]
+
+
+@app.post("/notifications/{notification_id}/read", response_model=NotificationOut)
+async def mark_notification_read(
+    notification_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_read),
+):
+    me = await _self(db, user)
+    notification = await crud.get_notification(db, notification_id)
+    if notification is None or notification.household_user_id != me.id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Notification not found"
+        )
+    notification = await crud.mark_notification_read(db, notification)
+    return NotificationOut.model_validate(notification)
+
+
+@app.post("/notifications/read-all", status_code=status.HTTP_204_NO_CONTENT)
+async def mark_all_notifications_read(
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_read),
+):
+    me = await _self(db, user)
+    await crud.mark_all_notifications_read(db, me.id)
 
 
 # ---- Reports --------------------------------------------------------------

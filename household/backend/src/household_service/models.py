@@ -173,10 +173,12 @@ class TaskChainLink(Base):
     same-day chain todo sitting unassigned for hours), explicitly
     excluding whoever completed the parent (see TodoItem.exclude_user_id).
 
-    Chains can run more than one level deep (a child can itself be a
-    parent of further links) — `crud.create_chain_link` rejects a link
-    that would create a cycle back to an ancestor, since an endless
-    chore loop isn't something this is meant to allow."""
+    Capped at exactly one level: `crud.create_chain_link` rejects a new
+    link where either side is already part of an existing one (already
+    someone's chain child, or already chaining further tasks itself) —
+    a task is a pure parent, a pure child, or neither, never both. That
+    alone makes a chained loop structurally impossible, since a cycle
+    needs some task with both an incoming and an outgoing chain edge."""
 
     __tablename__ = "task_chain_links"
     __table_args__ = (
@@ -548,6 +550,40 @@ class PushSubscription(Base):
     auth: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+
+    household_user: Mapped[HouseholdUser] = relationship()
+
+
+class Notification(Base):
+    """A durable, in-app record of something that was pushed to a user —
+    this is what the notification bell (`GET /notifications`) actually
+    reads, separately from the one-shot Web Push attempt. The two are
+    created together (see `crud._notify`, the one place that creates
+    either): a push-only notification is invisible to anyone without a
+    push subscription (or whose browser lost it, or who denied the
+    permission prompt) — which is exactly the gap that let an admin
+    reassign go completely unnoticed by its new assignee. `read_at` is
+    null until the recipient dismisses it (or "mark all read"); there's
+    no separate "seen" state — unread is the only thing the bell's
+    badge count needs."""
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    household_user_id: Mapped[int] = mapped_column(
+        ForeignKey("household_users.id", ondelete="CASCADE")
+    )
+    title: Mapped[str] = mapped_column(String(200))
+    body: Mapped[str] = mapped_column(String(500))
+    # Where tapping the notification should take you — same convention
+    # as the push payload's own "url" field.
+    url: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     household_user: Mapped[HouseholdUser] = relationship()

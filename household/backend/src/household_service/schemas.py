@@ -550,3 +550,17 @@ class NudgeResult(BaseModel):
 
 class TestPushResult(BaseModel):
     sent: int
+
+
+# ---- Notification inbox -------------------------------------------------
+
+
+class NotificationOut(BaseModel):
+    id: int
+    title: str
+    body: str
+    url: str
+    created_at: datetime
+    read_at: datetime | None
+
+    model_config = {"from_attributes": True}

@@ -183,14 +183,19 @@ Tracks physical items (cellar, pantry, etc.).
       user), explicitly excluding whoever completed the parent. If
       nobody else is eligible, it's left open on the board rather than
       forced onto the parent's completer.
-  - A task can have multiple chain tasks, and a chain task can itself
-    have further chain tasks (a chain, not just one level) — but not a
-    cycle back to an ancestor.
+  - A task can have multiple chain tasks, but chaining is capped at one
+    level — a task that's already someone's chain task can't itself
+    chain further tasks, and a task that's already chained can't be
+    chained a second time to someone else. A task is a pure parent, a
+    pure chain task, or neither — never both, which is what makes a
+    chained loop structurally impossible to create in the first place.
   - A task that's a chain task (reachable only by being someone else's
     chain link) can't also be scheduled independently or completed
-    directly — one source of instances per task, so the same
-    occurrence can't earn points twice and the scheduler can't create
-    duplicates of something only meant to exist as a chain reaction.
+    directly without an explicit confirm — one source of instances per
+    task by default, so the same occurrence can't accidentally earn
+    points twice and the scheduler can't create duplicates of something
+    only meant to exist as a chain reaction. Completing it directly
+    anyway asks first, naming which task(s) chain it.
 - **Handing off an assigned task**: two ways, for two different
   situations.
   - *Takeover requests* (anyone): whoever currently holds a board todo
@@ -202,7 +207,9 @@ Tracks physical items (cellar, pantry, etc.).
     at a time.
   - *Admin reassign* (admin-only): a direct, no-consent handoff of an
     open board item to someone else, for when a request-and-wait isn't
-    the right tool (an admin just sorting out who's doing what).
+    the right tool (an admin just sorting out who's doing what). Still
+    sends the new assignee a push notification — just an FYI, not a
+    request to respond to.
   - Both exclude users on break from the picker, same as every other
     "assign this to someone" option in the app (see Break mode below).
 - **Admin tools**:
@@ -252,7 +259,14 @@ Tracks physical items (cellar, pantry, etc.).
 - **Admin panel**: generate/view reports, set the weekly points goal.
 - **Task management panel**: categories (with icons; a task can belong
   to more than one), per-task point values, weekday/frequency scheduling
-  per task.
+  per task, chain-task editing. A calendar view (List/Calendar toggle)
+  gives a month-at-a-glance of weekly tasks placed on their scheduled
+  weekdays, with monthly tasks (which have no specific day of the
+  month) called out separately — a quick overview of what's periodically
+  scheduled without needing to read every task's own schedule text.
+  Daily tasks and chain-child tasks are left off — a daily task is on
+  every cell by definition, and a chain-child task has no schedule of
+  its own to show (see Chained tasks above).
 - **User settings**: break mode toggle, profile picture.
 
 ## Non-functional

@@ -1,9 +1,12 @@
-// The bell icon in the topbar, next to Settings — a persistent inbox for
-// things that need a response, on top of the one-shot Web Push
-// notifications push.js already sends. Currently the only notification
-// kind is an incoming takeover request (see PROJECT_SPEC.md's "Handing
-// off an assigned task"); extend `fetchIncoming`/`renderPanel` here if a
-// second kind is ever added, rather than inventing a parallel mechanism.
+// The bell icon in the topbar, next to Settings — a persistent inbox,
+// on top of the one-shot Web Push notifications push.js already sends.
+// Two kinds live here: incoming takeover requests (actionable —
+// Accept/Decline right from the panel) and plain notifications (new
+// chore request, admin reassign, takeover responded, new report, the
+// weekly nudge — anything crud._notify creates; see that function's own
+// docstring for why these are a durable in-app record and not just a
+// push). Extend both `refreshNotificationBadge`/`renderPanelList` if a
+// third kind is ever needed, rather than inventing a parallel mechanism.
 //
 // Lives outside router.js on purpose — it's chrome (same as the topbar
 // itself), not a page, so it's wired up once from main.js's boot() and
@@ -17,14 +20,14 @@ import { CONFIG } from "./config.js";
 import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
-import { escapeHtml } from "./util.js";
+import { navigate } from "./router.js";
+import { escapeHtml, timeAgo } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 const POLL_INTERVAL_MS = 30_000;
 
 let bellBtn = null;
 let badgeEl = null;
-let incomingCache = [];
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -53,20 +56,34 @@ export async function refreshNotificationBadge() {
   if (!bellBtn || !badgeEl) return;
   if (!canWrite()) {
     // Not logged in, or a viewer — a viewer can never be a takeover
-    // request's target (see crud._validate_takeover_target), so their
-    // inbox is always empty. Hide the bell rather than show a control
-    // that can never do anything, and skip the network call.
-    bellBtn.hidden = true;
+    // request's target (see crud._validate_takeover_target) and gets
+    // none of the other notification kinds either, so their inbox is
+    // always empty. Hide the bell rather than show a control that can
+    // never do anything, and skip the network calls.
+    //
+    // Uses the `.hidden` CSS class (base.css, `!important`), not the
+    // native `hidden` IDL property/attribute — `.btn`'s own
+    // `display: inline-flex` has the same specificity as the browser's
+    // built-in `[hidden] { display: none }` and comes later in the
+    // cascade, so plain `bellBtn.hidden = true` silently loses that
+    // fight and the button stays visually shown despite the attribute
+    // being set (caught live: getAttribute("hidden") was correctly
+    // non-null, but isVisible() was still true).
+    bellBtn.classList.add("hidden");
     return;
   }
-  bellBtn.hidden = false;
+  bellBtn.classList.remove("hidden");
+  let incoming, unread;
   try {
-    incomingCache = await api.get(`${HB}/takeover-requests?direction=incoming`, { silent: true });
+    [incoming, unread] = await Promise.all([
+      api.get(`${HB}/takeover-requests?direction=incoming`, { silent: true }),
+      api.get(`${HB}/notifications?unread_only=true&limit=50`, { silent: true }),
+    ]);
   } catch {
     return; // transient network/auth hiccup — leave the last-known count showing
   }
-  const count = incomingCache.length;
-  badgeEl.hidden = count === 0;
+  const count = incoming.length + unread.length;
+  badgeEl.classList.toggle("hidden", count === 0);
   badgeEl.textContent = count > 9 ? "9+" : String(count);
 }
 
@@ -79,7 +96,12 @@ function openNotificationPanel() {
         <h2>Notifications</h2>
         <button class="btn btn-icon btn-ghost" id="notif-panel-close" aria-label="Close">${icons.close}</button>
       </div>
-      <div class="stack" id="notif-panel-list"></div>
+      <div id="notif-panel-takeover" class="stack"></div>
+      <div id="notif-panel-plain-section" class="section-heading" style="margin-top: var(--space-4);">
+        <h2>Recent</h2>
+        <button class="btn btn-ghost" id="notif-mark-all-read" style="font-size: var(--font-size-xs);">Mark all read</button>
+      </div>
+      <div id="notif-panel-plain" class="stack"></div>
     </div>
   `;
   document.body.appendChild(overlay);
@@ -88,28 +110,48 @@ function openNotificationPanel() {
   overlay.addEventListener("click", (e) => {
     if (e.target === overlay) close();
   });
+  overlay.querySelector("#notif-mark-all-read").addEventListener("click", async () => {
+    try {
+      await api.post(`${HB}/notifications/read-all`);
+      await renderPanelList(overlay);
+      refreshNotificationBadge();
+    } catch {
+      /* api.js already showed a toast */
+    }
+  });
 
   renderPanelList(overlay);
 }
 
 async function renderPanelList(overlay) {
-  const root = overlay.querySelector("#notif-panel-list");
-  root.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
+  const takeoverRoot = overlay.querySelector("#notif-panel-takeover");
+  const plainRoot = overlay.querySelector("#notif-panel-plain");
+  takeoverRoot.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
+  plainRoot.innerHTML = "";
+
+  let incoming, notifications;
   try {
-    incomingCache = await api.get(`${HB}/takeover-requests?direction=incoming`);
+    [incoming, notifications] = await Promise.all([
+      api.get(`${HB}/takeover-requests?direction=incoming`),
+      api.get(`${HB}/notifications?limit=30`),
+    ]);
   } catch {
-    root.innerHTML = `<div class="empty-state">Couldn't load notifications</div>`;
+    takeoverRoot.innerHTML = `<div class="empty-state">Couldn't load notifications</div>`;
     return;
   }
   await refreshNotificationBadge();
+  renderTakeoverSection(overlay, takeoverRoot, incoming);
+  renderPlainSection(overlay, plainRoot, notifications);
+}
 
-  if (incomingCache.length === 0) {
+function renderTakeoverSection(overlay, root, incoming) {
+  if (incoming.length === 0) {
     root.innerHTML = `<div class="empty-state">${icons.bell}<p style="margin-top: var(--space-2);">Nothing new</p></div>`;
     return;
   }
 
   root.innerHTML = "";
-  incomingCache.forEach((req) => {
+  incoming.forEach((req) => {
     const label = req.todo_title || req.task_name;
     const row = document.createElement("div");
     row.className = "list-row";
@@ -139,6 +181,52 @@ async function renderPanelList(overlay) {
         await api.post(`${HB}/takeover-requests/${req.id}/decline`);
         showToast("Declined", "success");
         await renderPanelList(overlay);
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+    root.appendChild(row);
+  });
+}
+
+// Plain notifications — nothing to accept/decline, just dismiss (mark
+// read) or tap to go wherever it points. Shown newest-first regardless
+// of read state (so dismissing one doesn't make the list visually jump
+// around), with unread ones visually distinct.
+function renderPlainSection(overlay, root, notifications) {
+  const sectionHeader = overlay.querySelector("#notif-panel-plain-section");
+  if (notifications.length === 0) {
+    sectionHeader.classList.add("hidden");
+    root.innerHTML = "";
+    return;
+  }
+  sectionHeader.classList.remove("hidden");
+
+  root.innerHTML = "";
+  notifications.forEach((n) => {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    row.innerHTML = `
+      <div class="list-row-body">
+        <div class="list-row-title">${!n.read_at ? `<span class="badge badge-info" style="margin-right:4px;">New</span>` : ""}${escapeHtml(n.title)}</div>
+        <div class="list-row-meta"><span>${escapeHtml(n.body)}</span></div>
+        <div class="list-row-meta"><span class="muted">${escapeHtml(timeAgo(n.created_at))}</span></div>
+      </div>
+      <div class="list-row-actions">
+        <button class="btn btn-icon btn-ghost" data-action="dismiss" aria-label="Dismiss">${icons.close}</button>
+      </div>
+    `;
+    row.addEventListener("click", (e) => {
+      if (e.target.closest('[data-action="dismiss"]')) return;
+      overlay.remove();
+      navigate(n.url);
+    });
+    row.querySelector('[data-action="dismiss"]').addEventListener("click", async (e) => {
+      e.stopPropagation();
+      try {
+        await api.post(`${HB}/notifications/${n.id}/read`);
+        await renderPanelList(overlay);
+        refreshNotificationBadge();
       } catch {
         /* api.js already showed a toast */
       }

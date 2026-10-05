@@ -31,7 +31,17 @@ def _send_one(subscription: PushSubscription, payload: dict) -> str:
     silently counted real failures (bad VAPID claim, 4xx/5xx from the
     push service, etc.) as successful deliveries. That's what made the
     Admin panel's test/nudge buttons look like they worked when nothing
-    actually arrived."""
+    actually arrived.
+
+    `timeout`: pywebpush passes this straight through to the underlying
+    `requests.post()`, which has NO default timeout of its own — without
+    this, one slow or unreachable push endpoint (a push service having
+    an outage, a network blip) hangs this call, and everything awaiting
+    it, for however long the OS-level TCP timeout happens to be (minutes,
+    not seconds — caught live: a stale subscription in a sandboxed dev
+    environment with restricted container egress hung an admin-reassign
+    request for 2+ minutes). A single slow subscription shouldn't be
+    able to make an unrelated API request hang this long."""
     settings = get_settings()
     try:
         webpush(
@@ -42,6 +52,7 @@ def _send_one(subscription: PushSubscription, payload: dict) -> str:
             data=json.dumps(payload),
             vapid_private_key=settings.vapid_private_key,
             vapid_claims={"sub": settings.vapid_subject},
+            timeout=10,
         )
         return "sent"
     except WebPushException as exc:
