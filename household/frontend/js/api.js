@@ -78,7 +78,7 @@ async function request(url, options = {}) {
 // which 403s for a WRONG REAUTH PASSWORD even though the caller already
 // has a perfectly valid admin bearer token.
 export const api = {
-  get: (url) => request(url),
+  get: (url, options) => request(url, options),
   post: (url, body, options) =>
     request(url, { method: "POST", body: body !== undefined ? JSON.stringify(body) : undefined, ...options }),
   patch: (url, body) => request(url, { method: "PATCH", body: JSON.stringify(body) }),

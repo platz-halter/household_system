@@ -1,6 +1,6 @@
 [project]
 name = "shared"
-version = "1.0.4"
+version = "1.1.0"
 description = "Shared config, DB session, and auth-verification code for all Household System services"
 requires-python = ">=3.12"
 dependencies = [

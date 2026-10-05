@@ -3,6 +3,9 @@ import { api } from "./api.js";
 import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
+import { takeoverControl } from "./takeover.js";
+import { refreshNotificationBadge } from "./notifications.js";
+import { showConfirmDialog } from "./confirmDialog.js";
 import { escapeHtml, escapeAttr, dueBadge, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -26,6 +29,13 @@ let completionsTodayCache = {};
 let meCache = null;
 let pageSelection = null;
 let debounceTimer = null;
+// Pending takeover requests: incoming (asking YOU to take something
+// over) and outgoing (things you've asked someone else to take). Both
+// drive "Assigned to you"'s per-row state (see renderAssignedToYou) —
+// outgoing swaps the "ask to take over" button for a pending/cancel
+// state, incoming gets its own section above it.
+let incomingRequestsCache = [];
+let outgoingRequestsCache = [];
 
 function debounce(fn, delay) {
   return (...args) => {
@@ -41,6 +51,11 @@ export async function renderHome(container) {
     <div class="page">
       <div class="stat-card-row" id="stat-cards"></div>
       <div id="goal-progress"></div>
+
+      <div id="incoming-requests-section" style="display:none;">
+        <div class="section-heading"><h2>Takeover requests</h2></div>
+        <div id="incoming-requests-list" class="stack" style="margin-bottom: var(--space-3);"></div>
+      </div>
 
       <div class="section-heading"><h2>Assigned to you</h2></div>
       <div id="assigned-list" class="stack"></div>
@@ -84,6 +99,7 @@ export async function renderHome(container) {
 
   await Promise.all([loadStats(container), loadCategories(container, selection, writable)]);
   await loadAssignments(container);
+  await loadTakeoverRequests(container);
   await refreshCompletionsToday();
   await refreshTaskList(container, selection, writable);
 }
@@ -109,12 +125,45 @@ function doneForToday(task) {
 async function afterTaskCompletion(container) {
   await refreshCompletionsToday();
   loadStats(container);
+  // A same-user chain spawn assigns the new todo straight to whoever just
+  // completed this task — refresh "Assigned to you" so it shows up right
+  // away instead of only after the next unrelated reload (see
+  // TaskChainLink / crud._spawn_chain_children).
+  await refreshMyTodos();
+  renderAssignedToYou(container);
   if (pageSelection) refreshTaskList(container, pageSelection, canWrite());
 }
 
-async function completeTask(container, task) {
+// A chain-child task normally only gets completed via the todo it's
+// spawned as (see TaskChainLink) — completing it directly here is still
+// allowed, but only after an explicit confirm naming whichever parent
+// task(s) chain it, since the backend otherwise rejects it outright
+// (crud.complete_task's `force` override exists specifically for this
+// confirmed-anyway path).
+async function confirmDirectChainCompletion(task) {
+  let parents;
   try {
-    await api.post(`${HB}/tasks/${task.id}/complete`);
+    parents = await api.get(`${HB}/tasks/${task.id}/chain-parents`);
+  } catch {
+    return false; // api.js already showed a toast
+  }
+  const names = parents.map((p) => p.parent_task_name).join(", ");
+  return showConfirmDialog({
+    title: "Already chained",
+    message: `"${task.name}" is normally completed automatically after: ${names}. Complete it directly anyway?`,
+    confirmLabel: "Complete anyway",
+  });
+}
+
+async function completeTask(container, task) {
+  let force = false;
+  if (task.is_chain_child) {
+    const ok = await confirmDirectChainCompletion(task);
+    if (!ok) return;
+    force = true;
+  }
+  try {
+    await api.post(`${HB}/tasks/${task.id}/complete`, force ? { force: true } : undefined);
     showToast(`Logged "${task.name}" (+${task.points} pts)`, "success");
     afterTaskCompletion(container);
   } catch {
@@ -154,12 +203,15 @@ function boardTodoRow(todo, container) {
   row.style.cursor = "default";
   const badge = dueBadge(todo.due_date);
   const writable = canWrite();
+  const sourceLabel = todo.chain_parent_task_name
+    ? `After: ${todo.chain_parent_task_name}`
+    : "From the board";
 
   row.innerHTML = `
     <div class="list-row-body">
       <div class="list-row-title">${escapeHtml(todo.title)}</div>
       <div class="list-row-meta">
-        <span class="badge badge-neutral">From the board</span>
+        <span class="badge badge-neutral">${escapeHtml(sourceLabel)}</span>
         ${badge ? `<span class="badge badge-${badge.tone}">${escapeHtml(badge.label)}</span>` : ""}
       </div>
     </div>
@@ -177,6 +229,7 @@ function boardTodoRow(todo, container) {
         /* api.js already showed a toast */
       }
     });
+    row.querySelector(".list-row-actions").prepend(takeoverControl({ requests: outgoingRequestsCache, kind: "todo", id: todo.id, label: todo.title, onChange: () => afterTakeoverAction(container) }));
   }
 
   return row;
@@ -253,6 +306,79 @@ async function loadAssignments(container) {
   renderAssignedToYou(container);
 }
 
+async function loadTakeoverRequests(container) {
+  try {
+    const [incoming, outgoing] = await Promise.all([
+      api.get(`${HB}/takeover-requests?direction=incoming`),
+      api.get(`${HB}/takeover-requests?direction=outgoing`),
+    ]);
+    incomingRequestsCache = incoming;
+    outgoingRequestsCache = outgoing;
+  } catch {
+    incomingRequestsCache = [];
+    outgoingRequestsCache = [];
+  }
+  renderIncomingRequests(container);
+  renderAssignedToYou(container);
+}
+
+async function afterTakeoverAction(container) {
+  await Promise.all([loadAssignments(container), loadTakeoverRequests(container)]);
+  loadStats(container);
+  refreshNotificationBadge();
+}
+
+function renderIncomingRequests(container) {
+  const section = container.querySelector("#incoming-requests-section");
+  const root = container.querySelector("#incoming-requests-list");
+  if (!section || !root) return;
+
+  if (incomingRequestsCache.length === 0) {
+    section.style.display = "none";
+    root.innerHTML = "";
+    return;
+  }
+  section.style.display = "";
+  root.innerHTML = "";
+  incomingRequestsCache.forEach((req) => {
+    const label = req.todo_title || req.task_name;
+    const row = document.createElement("div");
+    row.className = "list-row";
+    row.style.cursor = "default";
+    row.innerHTML = `
+      <div class="list-row-body">
+        <div class="list-row-title">${escapeHtml(label)}</div>
+        <div class="list-row-meta"><span>${escapeHtml(req.requester.display_name)} asked you to take this over</span></div>
+      </div>
+      <div class="list-row-actions">
+        <button class="btn btn-icon btn-danger" data-action="decline" aria-label="Decline">${icons.close}</button>
+        <button class="btn btn-icon btn-primary" data-action="accept" aria-label="Accept">${icons.check}</button>
+      </div>
+    `;
+    row.querySelector('[data-action="accept"]').addEventListener("click", async () => {
+      try {
+        await api.post(`${HB}/takeover-requests/${req.id}/accept`);
+        showToast(`Took over "${label}"`, "success");
+        afterTakeoverAction(container);
+      } catch {
+        /* api.js already showed a toast (e.g. 409 if it changed hands first) */
+        afterTakeoverAction(container);
+      }
+    });
+    row.querySelector('[data-action="decline"]').addEventListener("click", async () => {
+      try {
+        await api.post(`${HB}/takeover-requests/${req.id}/decline`);
+        showToast("Declined", "success");
+        afterTakeoverAction(container);
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+    root.appendChild(row);
+  });
+}
+
+
 function renderAssignedToYou(container) {
   const root = container.querySelector("#assigned-list");
   if (!root) return;
@@ -275,6 +401,12 @@ function renderAssignedToYou(container) {
       </div>
       <div class="list-row-points"><span>${a.task_points}</span><span class="muted">pts</span></div>
     `;
+    if (canWrite()) {
+      const actions = document.createElement("div");
+      actions.className = "list-row-actions";
+      actions.appendChild(takeoverControl({ requests: outgoingRequestsCache, kind: "assignment", id: a.id, label: a.task_name, onChange: () => afterTakeoverAction(container) }));
+      row.appendChild(actions);
+    }
     root.appendChild(row);
   });
   myTodos.forEach((todo) => root.appendChild(boardTodoRow(todo, container)));
@@ -432,6 +564,7 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
         <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${task.times_per_day}×/day` : ""}</span>
         ${task.ramp_up_enabled ? `<span class="badge badge-info">+${task.ramp_up_bonus_points} bonus</span>` : ""}
+        ${task.is_chain_child ? `<span class="badge badge-neutral">Chained</span>` : ""}
         ${assignmentBadge(task)}
         ${doneToday ? `<span class="badge badge-success">Done today</span>` : ""}
       </div>

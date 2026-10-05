@@ -1,9 +1,48 @@
 # Household System V2 — Project State
 
-**Version 1.0.4** — four patch releases on top of 1.0.0 (the first
-declared release: every `PROJECT_SPEC.md` item implemented, production
-hardening and a full pre-deploy security pass done — see this file's
-own entries below).
+**Version 1.1.0** — a new feature on top of 1.0.4's four patch releases
+(which sit on top of 1.0.0, the first declared release: every
+`PROJECT_SPEC.md` item implemented, production hardening and a full
+pre-deploy security pass done — see this file's own entries below).
+- 1.1.0 adds **chained tasks**: completing one task can auto-spawn
+  others onto the board as one-off todos, so a parent chore like "Set
+  the table" can define child chores like "Clear the table" that only
+  ever need to happen when the parent actually did, instead of being
+  separately scheduled (and over-scheduled) by the balancer on their
+  own cadence. See its own entry under "Household service — backend"
+  for the full design (same-person-direct vs. different-person-via-
+  balancer semantics, multi-level chains, cycle rejection, the "one
+  source of instances" exclusion from the sweep/direct-completion/
+  Home's standalone list) and "Household service — frontend" for the
+  Tasks-page chain-link editor and the "After: {parent}" todo label.
+- 1.1.0 also adds (same uncommitted release — nothing from this version
+  has shipped yet, so these three ride along rather than bumping to
+  1.2.0): on-break users are now excluded from every "assign this to
+  someone" picker and are rejected server-side if assigned anyway
+  (previously only the balancer itself respected break mode); an
+  **admin-only reassign** for open board todos (`POST /todos/{id}
+  /reassign`, no acceptance needed — distinct from a takeover request);
+  and **takeover requests** — anyone holding a board todo or a
+  recurring task assignment can ask a specific other eligible person to
+  take it over, consent-based (push-notified, accept/decline/cancel).
+  See "Household service — backend"/"— frontend" for the full design
+  and the live-verification notes.
+- 1.1.0 also picked up three rounds of user-reported follow-ups, still
+  the same uncommitted release: viewers are now excluded from the
+  balancer/chain-task auto-assigner (not just on-break users); the
+  reassign vs. takeover-request icons/wording were confusing and the
+  Board couldn't send a takeover request at all (both fixed); a real
+  bug where picking a chain task and pressing the main Save button
+  silently didn't chain it (fixed by making the pick itself the save,
+  no separate step to forget); the chain-task picker is now
+  mobile-friendly (search + category filter instead of a flooded native
+  `<select>`); a notification inbox (bell icon next to Settings) where
+  a takeover request can be accepted or declined directly, without
+  navigating to Home; and completing a chain-child task directly now
+  shows a confirm dialog naming which task(s) chain it, instead of a
+  flat unexplained 409, with an explicit override to proceed anyway.
+  See "Household service — backend"/"— frontend" for each one's own
+  entry.
 - 1.0.1 made the Authentik group→role mapping admin-editable (see its
   own entry under "Auth service"), on top of 1.0.0's Authentik
   connection panel.
@@ -1208,6 +1247,188 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   leaderboard but appeared correctly in their own `include_me=true`
   view; a real pre-existing admin user's real 352-point total was
   unaffected. Test fixtures cleaned up afterward.
+- ✅ **1.1.0: Chained tasks.** A new `TaskChainLink` table
+  (`parent_task_id`, `child_task_id`, `same_user`, `position`, unique on
+  the parent/child pair) lets a task define "when I'm completed, also
+  spawn these" — e.g. "Set the table" → "Clear the table". Routes:
+  `GET`/`POST /tasks/{id}/chain-links`, `DELETE
+  /tasks/{id}/chain-links/{link_id}` (`create_chain_link` rejects a
+  self-link, a duplicate, and — via a DFS over the existing link graph,
+  `crud._reachable_task_ids` — anything that would close a cycle).
+  - **Trigger is completion, not scheduling** — deliberately, to solve
+    the "overscheduling" problem named in the request: a child only ever
+    gets an instance when its parent actually happened, not on its own
+    independent recurring schedule. Wired into both `crud.complete_task`
+    (recurring Task) and `crud.complete_todo` (a todo, including one
+    that was itself chain-spawned — so a chain can run multiple levels
+    deep, A→B→C, each completion re-checking for its own further links).
+    Each spawned child is a `TodoItem`, not a `TaskAssignment` — a chain
+    child can legitimately happen more than once a day (every time its
+    parent does), which `TaskAssignment`'s one-per-task-per-period
+    uniqueness can't represent.
+  - **`same_user=True`** assigns the spawned todo directly to whoever
+    completed the parent, bypassing the balancer entirely.
+    **`same_user=False`** assigns it immediately (not left for the next
+    scheduled sweep) via the pure `balancing.balance()` function — the
+    same fairness picture `run_balancing`'s own sweep uses
+    (`crud._gather_balancer_load`, extracted out of `run_balancing` so
+    both share one implementation) — always excluding whoever completed
+    the parent. Left open/unassigned on the board if nobody else is
+    eligible (everyone else on break), exactly like an ordinary sweep
+    leftover; `TodoItem.exclude_user_id` persists that exclusion so (a)
+    the daily sweep, if it later picks up the same still-unassigned
+    todo, still won't hand it to the excluded person, and (b) that
+    person can't just tap "claim" on the open board item to route around
+    it (`crud.claim_todo`'s conditional UPDATE now also checks
+    `exclude_user_id`).
+  - **One source of instances.** A task reachable only as someone's
+    chain child (`crud.is_chain_child`/`chain_child_task_ids`, derived
+    live from the link table on every call, never a stored flag that
+    could drift) is excluded from `run_balancing`'s own sweep candidates
+    (it has no independent schedule to be swept for), from the Tasks
+    page's implied "pick a child task" cycle-avoidance (chain children
+    are filtered out of that selector), and `crud.complete_task` rejects
+    completing it directly with a 409 — its points only ever come from
+    completing the spawned todo. Creating a link also deletes the
+    child's own open `TaskAssignment` for the current period, if it had
+    one from before becoming a chain child.
+  - Push notification (`notify_todo_assigned`) fires for a
+    different-person spawn, not a same-person one (nothing to notify
+    someone about assigning to themselves).
+  - **Found and fixed one real bug via live testing** (not caught by the
+    balancing unit tests, since it only manifests with existing load):
+    `crud._assign_chain_todo_now` originally hardcoded
+    `max_new_items_per_user=1` for its single-item `balance()` call —
+    since `balance()`'s cap filter is `count[uid] < max_new_items_per_
+    user`, anyone who already held even one existing item (count ≥ 1)
+    was wrongly skipped as "over the cap," even when they were the only
+    eligible candidate — the todo fell through to unassigned instead of
+    being handed to them. Fixed by computing the cap as `max(load_count
+    .values(), default=0) + 1`, which always exceeds everyone's current
+    count for this one-item call. Reproduced and confirmed fixed against
+    the live dev stack (self-minted local-admin JWTs, matching this
+    project's established fake-IdP/self-signed-token live-testing
+    pattern): same-person spawn, different-person spawn excluding the
+    completer, a 2-level chain (A→B→C) via completing the spawned todo,
+    cycle rejection, self-link rejection, duplicate-link rejection,
+    direct-completion-of-a-chain-child 409, and the exclude_user_id
+    self-claim block. Test fixtures (tasks, todos, a temporary local
+    user) cleaned up afterward.
+- ✅ **1.1.0: On-break exclusion from assignment, admin reassign, and
+  takeover requests.** Three related small features, built together.
+  - **On-break exclusion**: `crud._check_assignable` is now the one
+    place that validates "can this person be handed this" — unknown
+    user id, or `on_break=True` (→ 400 "{name} is on break"). Used by
+    `create_todo`/`update_todo` (closing a pre-existing gap — assigning
+    a todo to an on-break user was only ever stopped by the balancer
+    skipping them, never by the direct-assignment path), the new
+    `reassign_todo`, and takeover-request creation.
+  - **Admin reassign** (`POST /todos/{id}/reassign`, `can_admin`,
+    body `{assigned_to_id}`): a direct, no-consent handoff —
+    `crud.reassign_todo`. Open todos only (including a currently
+    unassigned one — this doubles as an admin "just assign it"
+    control). Still respects a chain todo's `exclude_user_id` (the
+    "not the parent's completer" fairness rule — an admin override
+    shouldn't quietly undo that), and cancels any pending takeover
+    request on the item (its "requester currently holds this"
+    assumption just became stale). Deliberately scoped to board
+    todos only, not recurring `TaskAssignment`s — "the board" in the
+    request is the Board page, which only ever showed todos; reassigning
+    a recurring assignment has no existing UI to anchor it to and would
+    be a bigger feature (a new "who has what" admin view) than this
+    batch's "small features and improvements" framing.
+  - **Takeover requests** — a new `TakeoverRequest` table/migration
+    (`takeover_status` enum; `CheckConstraint` ensuring exactly one of
+    `todo_item_id`/`task_assignment_id` is set; two partial unique
+    indexes, one per item-kind column, each `WHERE status = 'pending'`,
+    so only one pending request can exist per item — a plain composite
+    unique index wouldn't have worked here, since NULL-vs-NULL never
+    counts as a duplicate in SQL, so two separate single-column partial
+    indexes were needed instead of one). Routes: `POST /todos/{id}
+    /takeover-requests`, `POST /assignments/{id}/takeover-requests`,
+    `GET /takeover-requests?direction=incoming|outgoing`, `POST
+    /takeover-requests/{id}/{accept,decline,cancel}` — all `can_write`
+    (any writable user, admin or not — "Non-admins can use this too"
+    was explicit in the request), ownership checked in the route
+    (target-only for accept/decline, requester-only for cancel).
+    - **create**: requester must currently hold the item; target can't
+      be self, on break, a viewer (role is only a cached hint — see
+      `HouseholdUser.role`'s own docstring — but good enough to fail
+      clearly at creation instead of leaving a request that can never
+      be accepted, since accept is `can_write`-gated), or a chain
+      todo's `exclude_user_id`; only one pending request per item.
+    - **accept** re-validates the requester still holds the item with
+      a conditional `UPDATE ... WHERE <holder column> = requester`
+      (same pattern as `claim_todo`) rather than a read-then-write —
+      the holder can change out from under a pending request (admin
+      reassign, the balancer's rebalance pass, the requester going on
+      break). A lost race marks the request `cancelled` and returns
+      409 rather than leaving it dangling in `pending`. For an
+      assignment, accepting also stamps `reassigned_at` so the
+      balancer's `rebalance()` pass won't immediately pull it back —
+      verified live: ran `/balancing/run` again right after an
+      accepted assignment takeover and confirmed the holder stuck.
+    - **Stale-request cleanup**, so a pending request never outlives
+      the situation it was about: `_release_user_assignments` (break
+      mode) now also cancels any pending request where this user is
+      the target (can't accept while on break), and any on a todo this
+      user just lost (now unassigned) — a `TaskAssignment`-based
+      request cancels itself automatically via `ON DELETE CASCADE`
+      when break mode deletes the assignment outright.
+      `run_balancing`'s rebalance pass cancels pending requests on
+      whatever it just pulled away from its holder.
+      `complete_todo`/`cancel_todo`/`reassign_todo` all cancel any
+      pending request on that todo (can't take over something that's
+      done, cancelled, or just changed hands).
+    - Push notifications: target gets one when asked
+      (`notify_takeover_requested`), requester gets one when the
+      target answers (`notify_takeover_responded`) — both called from
+      the route AFTER the crud function's own commit, same ordering
+      fix applied to `_spawn_chain_children`'s notification below.
+  - **Found and fixed one real bug while wiring this up (not new code,
+    pre-existing since 1.1.0's chain-tasks work)**:
+    `_spawn_chain_children` was calling `notify_todo_assigned` — which
+    calls `push.send_to_subscriptions`, which commits internally to
+    prune dead subscriptions — *inside* the loop that spawns chain
+    children, before `complete_task`/`complete_todo`'s own final
+    commit. With more than one chain link, this silently split one
+    logical transaction (the points entry plus every spawned child)
+    into several separate commits, undermining the atomicity the
+    surrounding code's own comments promised. Fixed by having
+    `_spawn_chain_children` return the children that need notifying
+    instead of notifying them itself, so both callers now notify AFTER
+    their own single final commit.
+  - Verified live against the dev stack (self-minted local-admin/user
+    JWTs, same methodology as the rest of this session): on-break
+    users correctly rejected (400) by todo creation, reassign, and
+    takeover-create; non-admin reassign correctly 403s, admin reassign
+    works and still blocks an on-break or excluded target; the full
+    takeover lifecycle (create → duplicate-pending rejection → wrong-
+    user accept/cancel rejected with 403 → accept → verified the item's
+    new holder) for both a todo and a recurring assignment; the
+    accept-time race (simulated by changing the holder out from under
+    a pending request directly in the database) correctly 409s and
+    auto-cancels the request; both on-break cleanup paths (target going
+    on break cancels an incoming request; requester going on break
+    cancels an outgoing one on their now-unassigned todo); a completed
+    multi-step UI flow in a real headless Chromium session (ask →
+    accept on Home, admin reassign on Board) with zero console errors.
+    Test fixtures cleaned up afterward.
+  - **Follow-up fix, same 1.1.0**: while testing the takeover-request
+    viewer exclusion, noticed `run_balancing`'s and
+    `_assign_chain_todo_now`'s own `eligible` lists only filtered on
+    `on_break`, never role — meaning a viewer could still end up
+    holding a balancer-swept task or a chain-spawned todo (they just
+    couldn't complete it themselves, same structural gap the 1.0.2
+    leaderboard fix patched a *symptom* of). Flagged rather than fixed
+    unilaterally at the time; the user confirmed it should be fixed.
+    Both call sites now build `eligible` via a new shared
+    `crud._is_eligible_for_tasks(user)` (not on break, not a viewer).
+    Verified live: with every non-viewer user on break, a weekly task
+    is correctly left unassigned (`unassigned_task_count: 1`) rather
+    than handed to the one remaining viewer — before the fix this would
+    have gone to them, since they'd read as the only/least-loaded
+    "eligible" candidate. Test fixtures cleaned up afterward.
 
 ## Household service — frontend
 
@@ -1451,7 +1672,182 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     a `Buffer`-based polyfill in the test only; not a real app bug,
     the actual app runs these in a real browser, already verified
     separately via headless-Chromium screenshots earlier this session.
-
+- ✅ **1.1.0: Chained-tasks UI.** The Tasks page's edit-task modal grew a
+  "Chain tasks" section (existing-task edit only — a link needs a real
+  parent id) listing that task's chain links with a remove button, plus
+  an add control (a select of eligible child tasks — excludes itself,
+  anything already linked to it, and any task that's already someone
+  else's chain child, to keep the obvious cycle case out of the picker
+  entirely rather than relying on the backend's 400) and a same/
+  different-person select. A task that's someone else's chain child
+  shows a "Chained" badge in the Tasks list. Home's "Assigned to you"
+  and the Board both label a chain-spawned todo "After: {parent task
+  name}" instead of the generic "From the board" (`TodoOut
+  .chain_parent_task_name`). Completing a task now also refreshes
+  "Assigned to you" on Home (`afterTaskCompletion` now calls
+  `refreshMyTodos`/`renderAssignedToYou`, not just the stats/task-list
+  refresh it already did) — without this, a same-person chain spawn
+  wouldn't show up there until an unrelated reload. Verified against
+  the live dev stack with Playwright + the system's actual Chromium
+  binary (not a mocked DOM): created a parent/child task pair, added a
+  chain link through the real modal, confirmed the child picked up the
+  "Chained" badge after a reload, completed the parent, and confirmed
+  the spawned todo appeared on the Board with the correct "After: …"
+  label and assignee, with zero console/page errors throughout. Test
+  tasks/todos cleaned up afterward.
+- ✅ **1.1.0: On-break hiding, admin reassign, takeover requests UI.**
+  - Every "assign this to someone" picker (Board's "Request from" on a
+    new todo, the new admin reassign modal, the new "ask someone to
+    take over" modal) filters out on-break users client-side
+    (`assignableUsers()` in board.js, inlined in home.js) — the
+    backend's `_check_assignable` is still the real enforcement, this
+    is just so the option isn't offered in the first place. The user
+    list backing these pickers is now force-refetched each time one of
+    these opens (`loadUsers(true)`) rather than the page-load-cached
+    list the Board already had — break status changes often enough
+    that a stale cache would show someone who's since gone on break.
+  - Board rows gained an admin-only reassign button (the new `swap`
+    icon) next to claim/cancel/complete, gated on
+    `getCurrentUserInfo().role === "admin"` the same way Tasks/Admin
+    already gate admin-only controls — opens a small picker, posts to
+    `POST /todos/{id}/reassign`.
+  - Home gained a "Takeover requests" section above "Assigned to you"
+    (hidden entirely when there are none pending) listing incoming
+    requests with Accept/Decline. Every row in "Assigned to you" — both
+    the recurring-assignment rows and the board-todo rows — now renders
+    either an "ask someone to take over" button or, if one's already
+    pending, an "Asked {target}" badge with a cancel control
+    (`takeoverControls()`, shared by both row shapes since both post to
+    their own `/todos/{id}/takeover-requests` or `/assignments/{id}
+    /takeover-requests`). A completion/claim/accept doesn't leave stale
+    pending-request state on screen — every action that changes this
+    state refetches both the assignment/todo lists and the takeover
+    lists together (`afterTakeoverAction`).
+  - Verified in a real headless Chromium session end to end: admin asks
+    uitest2 to take over a board todo → "Asked uitest2" badge appears
+    on admin's own "Assigned to you" row → uitest2 sees it under
+    "Takeover requests" on their own Home → accepts → item moves to
+    their "Assigned to you" → admin reassigns it back via the Board's
+    new button. Zero console/page errors throughout. Test fixtures
+    cleaned up afterward.
+  - **Follow-up, same 1.1.0 — user feedback: "can't really tell the
+    difference" between reassign and a takeover request, and couldn't
+    ask for one from the Board at all.** Three fixes:
+    - The reassign icon (`icons.swap`) and the ask-to-take-over icon
+      got visually separated — ask now uses a new `icons.send` (paper
+      plane) instead of also being `swap` — plus explicit tooltips:
+      reassign says "moves it instantly, no approval needed"; ask says
+      "they'll need to accept before it moves."
+    - The Board now offers "ask to take over" too, not just admin
+      reassign — on any open row the viewer currently holds
+      (`todo.assigned_to.id === me.id`), writable or admin alike. This
+      needed the Board to start tracking who "me" is at all
+      (`meCache`, fetched via `/me` alongside the todo list) and to
+      fetch outgoing requests the same way Home does, so a pending ask
+      shows the same "Asked {target} [cancel]" state there too.
+    - Extracted the actual modal + pending/cancel row-builder (previously
+      duplicated between home.js's `takeoverControls`/`openTakeoverModal`
+      and the new Board code) into a shared `household/frontend/js
+      /takeover.js` (`takeoverControl()`, `outgoingRequestFor()`) — both
+      pages now import the same implementation instead of drifting.
+    - Verified live (mobile viewport, Playwright): the Board row for an
+      item admin holds shows both the send and swap icons with the
+      expected tooltip text; asking from the Board opens the same modal
+      Home uses. Zero console errors.
+- ✅ **1.1.0 follow-up: mobile-friendly chain-task picker.** User
+  feedback: the chain-link "pick a child task" native `<select>` would
+  flood with every task in the household on a real-sized list. Fixed by
+  reusing board.js's existing task-picker popup (search box + category
+  chips + scrollable list) instead of a native dropdown — extracted it
+  out of board.js into a shared `household/frontend/js/taskPicker.js`
+  (`openTaskPickerModal()`, parameterized with an optional `customOption`
+  row so board.js's "Custom (one-off)" escape hatch still works, and an
+  optional `title`/`emptyMessage`), so it's no longer board.js-only.
+  Tasks.js's chain-link section now opens this picker from a button
+  instead of a `<select id="chain-child-select">`. Verified live at a
+  390px mobile viewport with Playwright and 15+ candidate tasks: the
+  picker opens, search narrows the list, category chips filter it,
+  picking a task sets the add button's target and label, and adding
+  the link works end to end — zero console errors. (While debugging an
+  apparent search-filter miss during this verification, traced it to a
+  stale test assumption, not a real bug — a task that an *earlier* test
+  run in the same session had already linked as a chain child was
+  correctly excluded from the picker's candidate list; re-tested
+  against an unlinked task and confirmed search filtering narrows the
+  list exactly as expected.) Test fixtures cleaned up afterward.
+- 🐛 **Fixed: picking a chain task and pressing Save silently didn't
+  chain it.** User report: "I select the task to be chained and press
+  save → No result, task stays unchained." Root cause was a UX trap the
+  mobile-picker refactor above introduced: picking a task in the popup
+  only staged it (set a label, enabled a separate "Add chain task"
+  button) — it didn't persist anything. A user who pressed the Edit
+  Task modal's main **Save** button afterward, reasonably assuming the
+  pick was already part of the form state being saved, got no chain
+  link and no error, since Save only ever persisted the task's own
+  fields. Fixed by collapsing pick-and-add into one action — picking a
+  task in `taskPicker.js`'s popup now immediately posts the chain link
+  and refreshes the list, with no separate confirm step to forget.
+  Verified live: picked a task, pressed **only** the main Save button
+  (not any chain-specific control, reproducing the reported flow
+  exactly) — the link was already attached, and survived a full page
+  reload. Test fixtures cleaned up afterward.
+- ✅ **1.1.0 follow-up: notification inbox.** A bell icon next to
+  Settings in the topbar (`household/frontend/index.html`, wired from
+  `household/frontend/js/notifications.js`) — a persistent, checkable
+  inbox on top of the one-shot Web Push notifications this app already
+  sent. Currently surfaces incoming takeover requests (the only
+  notification kind that exists so far), each **actionable right from
+  the panel** — Accept/Decline without navigating to Home. A numeric
+  badge (polled every 30s, plus refreshed immediately after any
+  takeover action anywhere in the app) shows the pending count, capped
+  at "9+". Hidden entirely for a viewer (and before login) — a viewer
+  can never be a takeover request's target (`crud._validate_takeover_
+  target`), so their inbox is structurally always empty.
+  - `api.get()` gained an optional `options` passthrough (previously
+    `post`/`put` had it, `get` didn't) so the 30s poll can pass
+    `{silent: true}` and not toast a "network error" on every
+    transient hiccup, the way an interactive action correctly does.
+  - **Local login doesn't reload the page** (`navigate("/home")`, not a
+    real browser navigation — unlike the Authentik redirect flow,
+    which does), so the one-time `initNotificationInbox()` call from
+    `main.js`'s `boot()` can't just check "is this a writable user" once
+    at startup and be done — at boot time, before login, nobody's
+    logged in yet. Fixed by having `refreshNotificationBadge()` (not
+    just the one-time init) re-check role on every call, including
+    every poll tick, so the bell self-corrects within 30s of a login
+    either way; `login.js` also calls it directly right after a
+    successful local login so it doesn't have to wait that long.
+  - Verified live: badge shows the correct count for a real pending
+    request, the panel lists it with the requester's name, Accept from
+    the panel moves the item and clears both the panel and the badge,
+    and the bell stays hidden for a viewer-role token. Zero console
+    errors. Test fixtures cleaned up afterward.
+- ✅ **1.1.0 follow-up: confirm-and-override completing a chain-child
+  task directly.** User request, after clarifying between three
+  readings of the ask (completing directly / editing its schedule /
+  chaining it twice — the user picked the first): tapping Complete on a
+  task that's someone's chain child used to be a flat, unexplained 409.
+  Now Home shows a confirm dialog naming which task(s) chain it (new
+  `GET /tasks/{id}/chain-parents`, the reverse of chain-links — backed
+  by a new `crud.list_chain_parents`/`ChainParentOut`) and asks "Complete
+  it directly anyway?"; confirming sends `TaskCompleteRequest.force:
+  true`, which is the only thing `crud.complete_task`'s existing
+  chain-child check now accepts as a bypass (`if is_chain_child and not
+  force: raise ...`) — every other rule (the `times_per_day` cap,
+  ramp-up bonus, chain-spawning the task's own children) still applies
+  exactly as normal. Home's task rows also gained the same "Chained"
+  badge the Tasks admin page already had, so this is visible before
+  tapping Complete, not just after. Deliberately does **not** auto-
+  cancel any already-spawned, still-open todo for the same chain link —
+  with `times_per_day` > 1 or multiple same-day parent completions,
+  more than one could legitimately still be outstanding, and guessing
+  which one(s) to cancel risks losing a real occurrence; the person
+  confirming the dialog is making the same kind of judgment call
+  `times_per_day` already leaves to them. Verified live: the dialog
+  shows the exact expected parent name; Cancel leaves the task
+  untouched; confirming awards points and marks it "Done today"; the
+  raw API confirms a force:false request still 409s and force:true
+  succeeds. Test fixtures cleaned up afterward.
 - ✅ Alembic set up per service (independent revision histories), using
   the shared `shared/migrations.py` env logic.
 - ✅ `shared/entrypoint.sh` runs `alembic upgrade head` before `uvicorn`

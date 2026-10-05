@@ -29,4 +29,7 @@ export const icons = {
   camera: `<svg class="icon" viewBox="0 0 24 24"><path d="M4 7h3l2-3h6l2 3h3a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V8a1 1 0 0 1 1-1Z"/><circle cx="12" cy="13" r="3.5"/></svg>`,
   scale: `<svg class="icon" viewBox="0 0 24 24"><path d="M12 3v18M7 21h10M5 7l-3 7a3.5 3.5 0 0 0 6 0ZM19 7l-3 7a3.5 3.5 0 0 0 6 0ZM5 7h14M12 3l-3 4h6Z"/></svg>`,
   handRaised: `<svg class="icon" viewBox="0 0 24 24"><path d="M9 11V5a1.5 1.5 0 0 1 3 0v5M12 10V4a1.5 1.5 0 0 1 3 0v6M15 10V6a1.5 1.5 0 0 1 3 0v8a6 6 0 0 1-6 6h-1a6 6 0 0 1-5.2-3l-2.4-4.2a1.4 1.4 0 0 1 2.3-1.6L8 17"/></svg>`,
+  swap: `<svg class="icon" viewBox="0 0 24 24"><path d="m17 3 4 4-4 4"/><path d="M3 7h18"/><path d="m7 21-4-4 4-4"/><path d="M21 17H3"/></svg>`,
+  send: `<svg class="icon" viewBox="0 0 24 24"><path d="m3 11 18-8-8 18-2-8-8-2Z"/></svg>`,
+  bell: `<svg class="icon" viewBox="0 0 24 24"><path d="M6 10a6 6 0 0 1 12 0c0 3.2 1 5 2 6H4c1-1 2-2.8 2-6Z"/><path d="M9.5 19a2.5 2.5 0 0 0 5 0"/></svg>`,
 };

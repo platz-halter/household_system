@@ -163,6 +163,48 @@ Tracks physical items (cellar, pantry, etc.).
 - **Ramp-up tasks**: a task can be configured to give a bonus if the
   same user always completes it alone (bonus amount configurable per
   task).
+- **Chained tasks**: a task can have one or more "chain tasks" attached
+  — when the task is completed, each chain task spawns a one-off board
+  todo for that specific occurrence (e.g. "Set the table" → "Clear the
+  table"; "Fill the dishwasher" → "Clean non-dishwasher cutlery").
+  Deliberately tied to actual completions, not an independent schedule
+  of its own — a chain task has no weekly/monthly recurrence and is
+  never sweep-assigned on a fixed calendar; it only ever exists because
+  its parent actually happened. This is the point: a day with only one
+  or two real instances of "set the table" spawns exactly that many
+  "clear the table" todos, not a fixed number regardless of how many
+  times the parent really occurred.
+  - Per chain task, the creator chooses **same person** or **another
+    person**:
+    - *Same person*: assigned directly to whoever completed the
+      parent — never enters the balancing tool at all.
+    - *Another person*: assigned immediately via the same fairness
+      logic the balancing tool uses (currently-least-loaded eligible
+      user), explicitly excluding whoever completed the parent. If
+      nobody else is eligible, it's left open on the board rather than
+      forced onto the parent's completer.
+  - A task can have multiple chain tasks, and a chain task can itself
+    have further chain tasks (a chain, not just one level) — but not a
+    cycle back to an ancestor.
+  - A task that's a chain task (reachable only by being someone else's
+    chain link) can't also be scheduled independently or completed
+    directly — one source of instances per task, so the same
+    occurrence can't earn points twice and the scheduler can't create
+    duplicates of something only meant to exist as a chain reaction.
+- **Handing off an assigned task**: two ways, for two different
+  situations.
+  - *Takeover requests* (anyone): whoever currently holds a board todo
+    or a recurring task assignment can ask a specific other eligible
+    person to take it over — "I don't have time for this right now."
+    Consent-based: the request sends a push notification, and nothing
+    actually moves until the target accepts (or they can decline; the
+    requester can cancel it first). Only one pending request per item
+    at a time.
+  - *Admin reassign* (admin-only): a direct, no-consent handoff of an
+    open board item to someone else, for when a request-and-wait isn't
+    the right tool (an admin just sorting out who's doing what).
+  - Both exclude users on break from the picker, same as every other
+    "assign this to someone" option in the app (see Break mode below).
 - **Admin tools**:
   - A configurable week start (which weekday "this week" begins on) —
     applies everywhere points/goals are tracked by week: Home, Stats,
@@ -189,11 +231,15 @@ Tracks physical items (cellar, pantry, etc.).
     `shared/auth.py` and `auth_service.main`'s `/authentik-config`
     routes.
 - **Break mode**: a user can mark themselves on break (vacation,
-  sickness), which excludes them from the leaderboard and from new task
-  assignments until they turn it off. It only hides them from those two
-  things — it never touches points already earned: those keep counting
-  toward their own personal stats and still show up in weekly/monthly
-  PDF reports exactly as earned, break or not.
+  sickness), which excludes them from the leaderboard, from new task
+  assignments (automatic or manual — the balancer, posting/editing a
+  todo with an assignee, an admin reassign, or a takeover request
+  target all refuse to hand them anything), and cancels any pending
+  takeover request to or from them, until they turn it off. It only
+  hides them from those things — it never touches points already
+  earned: those keep counting toward their own personal stats and
+  still show up in weekly/monthly PDF reports exactly as earned, break
+  or not.
 - **Installable to homescreen** (PWA-style — manifest + icons, not
   necessarily full offline support). Both frontends have this, not just
   Household — see the matching bullet under Storage above.

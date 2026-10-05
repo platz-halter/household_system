@@ -2,7 +2,13 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from household_service.models import PointsSource, Recurrence, ReportPeriod, TodoStatus
+from household_service.models import (
+    PointsSource,
+    Recurrence,
+    ReportPeriod,
+    TakeoverStatus,
+    TodoStatus,
+)
 
 # ---- Household users -------------------------------------------------
 
@@ -118,11 +124,19 @@ class TaskOut(BaseModel):
     categories: list[CategoryOut]
     created_at: datetime
     updated_at: datetime
+    # True if this task is reachable only as someone else's chain task
+    # (see ChainLinkOut) — derived from task_chain_links, not a stored
+    # column (see TaskChainLink's own docstring for why). A chain-child
+    # task has exactly one source of instances (its parent's completion)
+    # and can't be scheduled or completed on its own — the frontend uses
+    # this to keep it out of the normal task list and the task picker
+    # used when choosing a NEW chain link's child.
+    is_chain_child: bool = False
 
     model_config = {"from_attributes": True}
 
     @classmethod
-    def from_model(cls, task) -> "TaskOut":
+    def from_model(cls, task, *, is_chain_child: bool = False) -> "TaskOut":
         return cls(
             id=task.id,
             name=task.name,
@@ -137,6 +151,59 @@ class TaskOut(BaseModel):
             categories=[CategoryOut.model_validate(c) for c in task.categories],
             created_at=task.created_at,
             updated_at=task.updated_at,
+            is_chain_child=is_chain_child,
+        )
+
+
+# ---- Chain tasks ---------------------------------------------------------
+
+
+class ChainLinkIn(BaseModel):
+    child_task_id: int
+    same_user: bool = False
+
+
+class ChainLinkOut(BaseModel):
+    id: int
+    parent_task_id: int
+    child_task_id: int
+    child_task_name: str
+    same_user: bool
+    position: int
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, link) -> "ChainLinkOut":
+        return cls(
+            id=link.id,
+            parent_task_id=link.parent_task_id,
+            child_task_id=link.child_task_id,
+            child_task_name=link.child_task.name,
+            same_user=link.same_user,
+            position=link.position,
+        )
+
+
+class ChainParentOut(BaseModel):
+    """The reverse of ChainLinkOut — which task(s) chain THIS one, for
+    the "already chained, complete it directly anyway?" confirm (see
+    TaskCompleteRequest.force)."""
+
+    id: int
+    parent_task_id: int
+    parent_task_name: str
+    same_user: bool
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, link) -> "ChainParentOut":
+        return cls(
+            id=link.id,
+            parent_task_id=link.parent_task_id,
+            parent_task_name=link.parent_task.name,
+            same_user=link.same_user,
         )
 
 
@@ -145,6 +212,10 @@ class TaskCompleteRequest(BaseModel):
     someone else; omit (or send an empty body) to log it for yourself."""
 
     household_user_id: int | None = None
+    # Explicit, confirmed override for completing a chain-child task
+    # directly (see crud.complete_task) — the frontend only ever sets
+    # this after showing the user which task(s) chain it and asking.
+    force: bool = False
 
 
 # ---- Points ----------------------------------------------------------------
@@ -201,6 +272,14 @@ class TodoCreate(BaseModel):
     assigned_to_id: int | None = None
 
 
+class TodoReassignIn(BaseModel):
+    """Admin-only: hand an open board item straight to someone else,
+    no acceptance needed (see crud.reassign_todo). Distinct from a
+    takeover request, which is consent-based."""
+
+    assigned_to_id: int
+
+
 class TodoUpdate(BaseModel):
     """PATCH semantics like TaskUpdate — a field left out is left alone.
     This means a due date, once set, can only be moved, not cleared; same
@@ -225,8 +304,39 @@ class TodoOut(BaseModel):
     completed_by: HouseholdUserBrief | None
     completed_at: datetime | None
     created_at: datetime
+    # Set only for a todo spawned by a chain task — the PARENT task's
+    # name, for the frontend to show "After: {name}" instead of the
+    # ordinary "From the board" label. None for a user-posted todo.
+    chain_parent_task_name: str | None = None
 
     model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, todo) -> "TodoOut":
+        return cls(
+            id=todo.id,
+            title=todo.title,
+            description=todo.description,
+            points=todo.points,
+            due_date=todo.due_date,
+            status=todo.status,
+            created_by=HouseholdUserBrief.model_validate(todo.created_by),
+            assigned_to=(
+                HouseholdUserBrief.model_validate(todo.assigned_to)
+                if todo.assigned_to
+                else None
+            ),
+            completed_by=(
+                HouseholdUserBrief.model_validate(todo.completed_by)
+                if todo.completed_by
+                else None
+            ),
+            completed_at=todo.completed_at,
+            created_at=todo.created_at,
+            chain_parent_task_name=(
+                todo.chain_link.parent_task.name if todo.chain_link else None
+            ),
+        )
 
 
 # ---- Task assignments / balancing tool ---------------------------------
@@ -291,6 +401,43 @@ class BalancingRunResult(BaseModel):
     unassigned_task_count: int
     unassigned_todo_count: int
     by_user: list[BalancingUserSummary]
+
+
+# ---- Takeover requests ---------------------------------------------------
+
+
+class TakeoverRequestIn(BaseModel):
+    target_id: int
+
+
+class TakeoverRequestOut(BaseModel):
+    id: int
+    requester: HouseholdUserBrief
+    target: HouseholdUserBrief
+    status: TakeoverStatus
+    todo_item_id: int | None
+    todo_title: str | None
+    task_assignment_id: int | None
+    task_name: str | None
+    created_at: datetime
+    responded_at: datetime | None
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, req) -> "TakeoverRequestOut":
+        return cls(
+            id=req.id,
+            requester=HouseholdUserBrief.model_validate(req.requester),
+            target=HouseholdUserBrief.model_validate(req.target),
+            status=req.status,
+            todo_item_id=req.todo_item_id,
+            todo_title=req.todo_item.title if req.todo_item else None,
+            task_assignment_id=req.task_assignment_id,
+            task_name=req.task_assignment.task.name if req.task_assignment else None,
+            created_at=req.created_at,
+            responded_at=req.responded_at,
+        )
 
 
 # ---- Settings ---------------------------------------------------------

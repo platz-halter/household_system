@@ -13,17 +13,20 @@ from shared.db import Base
 from sqlalchemy import (
     ARRAY,
     Boolean,
+    CheckConstraint,
     Column,
     Date,
     DateTime,
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Table,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -134,6 +137,74 @@ class Task(Base):
     categories: Mapped[list[Category]] = relationship(
         secondary=task_categories, back_populates="tasks"
     )
+    # Outgoing chain links only (this task as the parent) — a task's own
+    # "when I'm completed, also spawn..." list, shown/edited from this
+    # task's own edit screen. Whether THIS task is itself someone else's
+    # chain child is derived by querying task_chain_links for a row with
+    # child_task_id == this task's id (see crud.list_tasks) rather than
+    # a relationship here or a flag on this model — a flag could drift
+    # from the link table actually saying; a query can't.
+    chain_links: Mapped[list["TaskChainLink"]] = relationship(
+        foreign_keys="TaskChainLink.parent_task_id",
+        back_populates="parent_task",
+        cascade="all, delete-orphan",
+        order_by="TaskChainLink.position",
+    )
+
+
+class TaskChainLink(Base):
+    """Defines one "chain task": when `parent_task_id` is completed, a
+    one-off `TodoItem` instance of `child_task_id` is spawned for that
+    specific occurrence (see crud._spawn_chain_children) — deliberately
+    NOT an independent schedule of its own. A task that only ever
+    exists as somebody's chain child has no recurrence of its own that
+    matters and is excluded from the normal sweep/Home task list/direct
+    completion entirely (see crud.list_tasks' `is_chain_child` and
+    complete_task's own guard) — one source of instances per task, so
+    the same real-world occurrence can't earn points twice and the
+    scheduler can't manufacture duplicates of something only meant to
+    exist as a reaction to its parent.
+
+    `same_user=True` assigns the spawned todo directly to whoever
+    completed the parent, bypassing the balancing tool entirely.
+    `same_user=False` assigns it through the same fairness logic the
+    balancer's sweep uses, run once immediately at spawn time (not left
+    for the next daily sweep — a once-a-day cadence would leave a
+    same-day chain todo sitting unassigned for hours), explicitly
+    excluding whoever completed the parent (see TodoItem.exclude_user_id).
+
+    Chains can run more than one level deep (a child can itself be a
+    parent of further links) — `crud.create_chain_link` rejects a link
+    that would create a cycle back to an ancestor, since an endless
+    chore loop isn't something this is meant to allow."""
+
+    __tablename__ = "task_chain_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "parent_task_id", "child_task_id", name="uq_chain_link_parent_child"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    parent_task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE")
+    )
+    child_task_id: Mapped[int] = mapped_column(
+        ForeignKey("tasks.id", ondelete="CASCADE")
+    )
+    same_user: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Display/evaluation order among a task's own chain links — purely
+    # cosmetic (which order they're listed/spawned in), not a dependency
+    # order between different parents' chains.
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    parent_task: Mapped[Task] = relationship(
+        foreign_keys=[parent_task_id], back_populates="chain_links"
+    )
+    child_task: Mapped[Task] = relationship(foreign_keys=[child_task_id])
 
 
 class TaskAssignment(Base):
@@ -177,9 +248,23 @@ class TaskAssignment(Base):
 
 class TodoItem(Base):
     """A one-off task request posted to the todo board, separate from the
-    recurring `Task` schedule."""
+    recurring `Task` schedule — also how a chain task's spawned instance
+    is represented (see TaskChainLink), rather than inventing a second
+    kind of one-off item; reuses assigned_to/due_date/points/completion
+    and everything the board/Home/push already do with a TodoItem."""
 
     __tablename__ = "todo_items"
+    __table_args__ = (
+        # Makes spawning idempotent: the same completion (spawned_by_
+        # entry_id) can never spawn the same chain link's child twice,
+        # even if something retries. Both columns are null for an
+        # ordinary user-posted todo — Postgres treats NULL as distinct
+        # from NULL in a unique constraint, so this never blocks two
+        # ordinary todos from coexisting.
+        UniqueConstraint(
+            "chain_link_id", "spawned_by_entry_id", name="uq_todo_chain_spawn"
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
@@ -208,12 +293,117 @@ class TodoItem(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # Null for an ordinary user-posted todo. chain_link_id is which link
+    # spawned this instance (ON DELETE SET NULL — if the link's later
+    # removed, the already-spawned todo stays, it just loses the "why"
+    # pointer). spawned_by_entry_id is the specific PointsEntry whose
+    # completion triggered the spawn — works whether the parent was a
+    # Task completion or another chain todo's completion (chains can run
+    # more than one level deep) — paired with chain_link_id in the
+    # unique constraint above for idempotent spawning.
+    chain_link_id: Mapped[int | None] = mapped_column(
+        ForeignKey("task_chain_links.id", ondelete="SET NULL"), nullable=True
+    )
+    spawned_by_entry_id: Mapped[int | None] = mapped_column(
+        ForeignKey("points_entries.id", ondelete="SET NULL"), nullable=True
+    )
+    # Only set for a "different person" chain spawn — whoever completed
+    # the parent, who must NOT receive this todo. Enforced both at spawn
+    # time (crud._spawn_chain_children) and by the daily sweep
+    # (balancing.CandidateTodo.excluded_user_id), so a sweep run on a day
+    # this is still unclaimed can't hand it straight back to them.
+    exclude_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("household_users.id", ondelete="SET NULL"), nullable=True
+    )
+
     created_by: Mapped[HouseholdUser] = relationship(foreign_keys=[created_by_id])
     assigned_to: Mapped[HouseholdUser | None] = relationship(
         foreign_keys=[assigned_to_id]
     )
     completed_by: Mapped[HouseholdUser | None] = relationship(
         foreign_keys=[completed_by_id]
+    )
+    chain_link: Mapped[TaskChainLink | None] = relationship(
+        foreign_keys=[chain_link_id]
+    )
+
+
+class TakeoverStatus(str, enum.Enum):
+    pending = "pending"
+    accepted = "accepted"
+    declined = "declined"
+    cancelled = "cancelled"
+
+
+class TakeoverRequest(Base):
+    """ "Can you take this over?" — whoever currently holds a board todo or
+    a recurring task assignment can ask a specific other person to take
+    it off their hands, for whatever reason ("don't have time right
+    now"). Deliberately consent-based, not an instant handoff: the
+    target has to accept before anything actually moves (see
+    crud.accept_takeover_request) — asking isn't the same as reassigning
+    (that's the admin-only crud.reassign_todo instead).
+
+    Exactly one of `todo_item_id`/`task_assignment_id` is set (the
+    CheckConstraint below) — a takeover request is for one specific
+    held item, whichever kind it is. Only one PENDING request can exist
+    per item at a time (the two partial unique indexes below) — asking
+    two people at once would let both accept and race each other.
+
+    `accept_takeover_request` re-validates the requester still holds
+    the item with the same kind of conditional UPDATE `claim_todo` uses
+    — the holder can change out from under a pending request (an admin
+    reassign, the balancer, the requester going on break) between the
+    ask and the answer."""
+
+    __tablename__ = "takeover_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "(todo_item_id IS NOT NULL) != (task_assignment_id IS NOT NULL)",
+            name="ck_takeover_exactly_one_item",
+        ),
+        Index(
+            "uq_takeover_pending_todo",
+            "todo_item_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+        Index(
+            "uq_takeover_pending_assignment",
+            "task_assignment_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    requester_id: Mapped[int] = mapped_column(
+        ForeignKey("household_users.id", ondelete="CASCADE")
+    )
+    target_id: Mapped[int] = mapped_column(
+        ForeignKey("household_users.id", ondelete="CASCADE")
+    )
+    todo_item_id: Mapped[int | None] = mapped_column(
+        ForeignKey("todo_items.id", ondelete="CASCADE"), nullable=True
+    )
+    task_assignment_id: Mapped[int | None] = mapped_column(
+        ForeignKey("task_assignments.id", ondelete="CASCADE"), nullable=True
+    )
+    status: Mapped[TakeoverStatus] = mapped_column(
+        Enum(TakeoverStatus, name="takeover_status"), default=TakeoverStatus.pending
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    responded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    requester: Mapped[HouseholdUser] = relationship(foreign_keys=[requester_id])
+    target: Mapped[HouseholdUser] = relationship(foreign_keys=[target_id])
+    todo_item: Mapped[TodoItem | None] = relationship(foreign_keys=[todo_item_id])
+    task_assignment: Mapped[TaskAssignment | None] = relationship(
+        foreign_keys=[task_assignment_id]
     )
 
 
@@ -244,7 +434,11 @@ class PointsEntry(Base):
 
     household_user: Mapped[HouseholdUser] = relationship()
     task: Mapped[Task | None] = relationship()
-    todo_item: Mapped[TodoItem | None] = relationship()
+    # foreign_keys explicit: TodoItem now has a SECOND FK into
+    # points_entries (spawned_by_entry_id, for chain-spawned todos),
+    # which otherwise makes this join ambiguous — two separate FK
+    # constraints directly between the same pair of tables.
+    todo_item: Mapped[TodoItem | None] = relationship(foreign_keys=[todo_item_id])
 
 
 class HouseholdSettings(Base):

@@ -4,6 +4,7 @@ import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
+import { openTaskPickerModal } from "./taskPicker.js";
 import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -14,6 +15,7 @@ function canWrite() {
 }
 
 let categoriesCache = [];
+let tasksCache = [];
 
 export async function renderTasks(container) {
   const writable = canWrite();
@@ -88,6 +90,7 @@ async function loadTasks(container, writable) {
     return;
   }
 
+  tasksCache = tasks;
   root.innerHTML = "";
   tasks.forEach((task) => root.appendChild(taskRow(task, container, writable)));
 }
@@ -108,7 +111,7 @@ function taskRow(task, container, writable) {
 
   row.innerHTML = `
     <div class="list-row-body">
-      <div class="list-row-title">${escapeHtml(task.name)} ${!task.active ? `<span class="badge badge-neutral">Inactive</span>` : ""}</div>
+      <div class="list-row-title">${escapeHtml(task.name)} ${!task.active ? `<span class="badge badge-neutral">Inactive</span>` : ""} ${task.is_chain_child ? `<span class="badge badge-neutral">Chained</span>` : ""}</div>
       <div class="list-row-meta">
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
         <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${task.times_per_day}×/day` : ""}</span>
@@ -211,6 +214,108 @@ function openCategoryModal(container, writable, category = null) {
   }
 }
 
+async function initChainLinksSection(body, task, writable) {
+  const listEl = body.querySelector("#chain-link-list");
+  const childBtn = body.querySelector("#chain-child-btn");
+  const sameUserEl = body.querySelector("#chain-same-user-select");
+  let eligibleChildren = [];
+
+  // Picking a task in the popup immediately adds the link — there's no
+  // separate "confirm" step. There used to be one (pick, then press a
+  // dedicated "Add" button), but that read as "picking already saved
+  // it" — a user would pick a task, then press the modal's main Save
+  // button (which only persists this TASK's own fields) assuming the
+  // chain link had already been attached. It hadn't, so the task stayed
+  // unchained with no error shown. Collapsing pick-and-add into one
+  // action removes that failure mode entirely rather than just
+  // explaining it better.
+  async function addChainLink(childTask) {
+    if (!childTask) return;
+    try {
+      await api.post(`${HB}/tasks/${task.id}/chain-links`, {
+        child_task_id: childTask.id,
+        same_user: sameUserEl.value === "true",
+      });
+      showToast("Chain task added", "success");
+      await refresh();
+    } catch {
+      /* api.js already showed a toast */
+    }
+  }
+
+  async function refresh() {
+    let links;
+    try {
+      links = await api.get(`${HB}/tasks/${task.id}/chain-links`);
+    } catch {
+      listEl.innerHTML = `<div class="empty-state">Couldn't load chain tasks</div>`;
+      return;
+    }
+
+    listEl.innerHTML = links.length
+      ? links
+          .map(
+            (link) => `
+        <div class="list-row" data-link-id="${link.id}">
+          <div class="list-row-body">
+            <div class="list-row-title">${escapeHtml(link.child_task_name)}</div>
+            <div class="list-row-meta"><span>${link.same_user ? "Same person" : "Different person"}</span></div>
+          </div>
+          ${writable ? `<button class="btn btn-icon btn-ghost chain-remove-btn" aria-label="Remove">${icons.trash}</button>` : ""}
+        </div>`
+          )
+          .join("")
+      : `<span class="muted" style="font-size: var(--font-size-sm);">No chained tasks yet</span>`;
+
+    if (writable) {
+      listEl.querySelectorAll(".chain-remove-btn").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const row = btn.closest("[data-link-id]");
+          const linkId = row.dataset.linkId;
+          try {
+            await api.del(`${HB}/tasks/${task.id}/chain-links/${linkId}`);
+            showToast("Chain task removed", "success");
+            await refresh();
+          } catch {
+            /* api.js already showed a toast */
+          }
+        });
+      });
+    }
+
+    // Excludes this task itself, any task already chained to it, and any
+    // task that's already someone else's chain child — stacking a second
+    // parent onto an existing chain child is confusing and isn't a case
+    // the "After: {parent}" todo label can represent anyway.
+    const linkedChildIds = new Set(links.map((l) => l.child_task_id));
+    eligibleChildren = tasksCache.filter(
+      (t) => t.id !== task.id && !linkedChildIds.has(t.id) && !t.is_chain_child
+    );
+    childBtn.disabled = !writable || eligibleChildren.length === 0;
+    childBtn.innerHTML =
+      eligibleChildren.length === 0
+        ? `<span>No eligible tasks</span>`
+        : `${icons.plus}<span>Add a chain task…</span>`;
+  }
+
+  if (writable) {
+    childBtn.addEventListener("click", () => {
+      openTaskPickerModal({
+        tasks: eligibleChildren,
+        categories: categoriesCache,
+        title: "Choose a chain task",
+        emptyMessage: "No eligible tasks match",
+        onSelect: addChainLink,
+      });
+    });
+  } else {
+    childBtn.disabled = true;
+    sameUserEl.disabled = true;
+  }
+
+  await refresh();
+}
+
 function openTaskModal(container, writable, task = null) {
   const selectedCats = new Set((task?.categories || []).map((c) => c.id));
   const selectedWeekdays = new Set(task?.weekdays || []);
@@ -282,6 +387,30 @@ function openTaskModal(container, writable, task = null) {
       <div class="field">
         <label class="row"><input type="checkbox" id="f-active" ${task?.active !== false ? "checked" : ""} /> <span>Active</span></label>
       </div>
+
+      ${
+        task
+          ? `<div class="field">
+        <label>Chain tasks</label>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
+          When "${escapeHtml(task.name)}" is completed, each chained task below is spawned onto
+          the board as a one-off. "Same person" assigns it directly to whoever just completed this
+          one; "different person" hands it to whoever the balancer says is fairest, never the
+          completer. Picking a task below adds it right away — there's no separate save step.
+        </p>
+        <div class="stack" id="chain-link-list" style="margin-top: var(--space-2);"></div>
+        <div class="stack" style="margin-top: var(--space-2); gap: var(--space-2);">
+          <select class="select" id="chain-same-user-select">
+            <option value="false">Different person</option>
+            <option value="true">Same person</option>
+          </select>
+          <button type="button" class="btn btn-ghost btn-block" id="chain-child-btn" style="justify-content: center;">
+            ${icons.plus}<span>Add a chain task…</span>
+          </button>
+        </div>
+      </div>`
+          : ""
+      }
     </div>
     <div class="modal-footer">
       ${task ? `<button class="btn btn-danger" id="f-delete">${icons.trash}</button>` : ""}
@@ -317,6 +446,10 @@ function openTaskModal(container, writable, task = null) {
   rampCheckbox.addEventListener("change", () => {
     rampPointsField.style.display = rampCheckbox.checked ? "" : "none";
   });
+
+  if (task) {
+    initChainLinksSection(body, task, writable);
+  }
 
   body.querySelector("#f-save").addEventListener("click", async () => {
     const name = body.querySelector("#f-name").value.trim();

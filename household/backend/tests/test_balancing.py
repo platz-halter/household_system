@@ -408,3 +408,51 @@ def test_deterministic_across_repeated_calls():
     )
 
     assert moves1 == moves2
+
+
+# ---- CandidateTodo.excluded_user_id (chain tasks) ------------------------
+# Hard-excludes one specific user from one specific item — used for a
+# "different person" chain task, where the excluded user is whoever
+# completed the parent occurrence. See household_service.crud
+# ._spawn_chain_children and the daily sweep's own candidate_todos
+# construction in run_balancing (both pass this through).
+
+
+def test_excluded_user_never_receives_that_item():
+    # Only two eligible users, and the excluded one is the only one with
+    # room under the cap removed — without the exclusion they'd be the
+    # obvious (only) pick; with it, the item must go to the other one.
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=100),
+    ]
+    todos = [CandidateTodo(todo_id=1, points=5, excluded_user_id=1)]
+
+    result = balance(users=users, tasks=[], todos=todos, max_new_items_per_user=5)
+
+    assert result.todo_assignments[1] == 2
+
+
+def test_excluded_user_can_still_receive_other_items():
+    # Exclusion is per-item, not a removal from `users` entirely.
+    users = [EligibleUser(user_id=1, points_this_week=0)]
+    todos = [
+        CandidateTodo(todo_id=1, points=5, excluded_user_id=1),
+        CandidateTodo(todo_id=2, points=5),
+    ]
+
+    result = balance(users=users, tasks=[], todos=todos, max_new_items_per_user=5)
+
+    assert 1 not in result.todo_assignments
+    assert result.unassigned_todo_ids == [1]
+    assert result.todo_assignments[2] == 1
+
+
+def test_excluded_user_leaves_item_unassigned_if_nobody_else_eligible():
+    users = [EligibleUser(user_id=1, points_this_week=0)]
+    todos = [CandidateTodo(todo_id=1, points=5, excluded_user_id=1)]
+
+    result = balance(users=users, tasks=[], todos=todos, max_new_items_per_user=5)
+
+    assert result.todo_assignments == {}
+    assert result.unassigned_todo_ids == [1]

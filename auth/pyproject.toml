@@ -1,6 +1,6 @@
 [project]
 name = "auth"
-version = "1.0.4"
+version = "1.1.0"
 description = "Local fallback auth service — issues JWTs for local users when Authentik isn't reachable/relevant (dev, fallback)"
 requires-python = ">=3.12"
 dependencies = [

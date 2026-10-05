@@ -58,6 +58,12 @@ class CandidateTask:
 class CandidateTodo:
     todo_id: int
     points: int
+    # Set for a todo spawned by a "different person" chain task — the
+    # user who completed the parent, who must never receive this todo.
+    # Hard-filtered out of the candidate pool for this item specifically
+    # (not removed from `users` entirely — they can still receive OTHER
+    # items in the same run).
+    excluded_user_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -102,6 +108,7 @@ class _Item:
     ramp_up_enabled: bool = False
     last_assignee_id: int | None = None
     recent_assignee_ids: frozenset[int] = field(default_factory=frozenset)
+    excluded_user_id: int | None = None
 
 
 def balance(
@@ -133,7 +140,15 @@ def balance(
             recent_assignee_ids=t.recent_assignee_ids,
         )
         for t in tasks
-    ] + [_Item(kind=ItemKind.todo, item_id=t.todo_id, points=t.points) for t in todos]
+    ] + [
+        _Item(
+            kind=ItemKind.todo,
+            item_id=t.todo_id,
+            points=t.points,
+            excluded_user_id=t.excluded_user_id,
+        )
+        for t in todos
+    ]
     # Heaviest first; ties broken by (kind, id) so a run is reproducible.
     items.sort(key=lambda i: (-i.points, i.kind.value, i.item_id))
 
@@ -143,7 +158,11 @@ def balance(
     unassigned_todo_ids: list[int] = []
 
     for item in items:
-        candidates = [uid for uid in user_ids if count[uid] < max_new_items_per_user]
+        candidates = [
+            uid
+            for uid in user_ids
+            if count[uid] < max_new_items_per_user and uid != item.excluded_user_id
+        ]
         if not candidates:
             (
                 unassigned_task_ids

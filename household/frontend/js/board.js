@@ -4,6 +4,8 @@ import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
+import { openTaskPickerModal } from "./taskPicker.js";
+import { takeoverControl } from "./takeover.js";
 import { escapeHtml, escapeAttr, dueBadge, initials, showSkeletonAfterDelay } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -19,10 +21,29 @@ const state = { status: "open" };
 let usersCache = null;
 let tasksCache = null;
 let categoriesCache = null;
+let meCache = null;
+// Pending takeover requests this user has sent — swaps a row's "ask to
+// take over" button for an "Asked {target} [cancel]" state (see
+// takeover.js). Refetched alongside every todo list refresh so it never
+// goes stale after an ask/cancel/accept.
+let outgoingRequestsCache = [];
 
 function canWrite() {
   const info = getCurrentUserInfo();
   return info && (info.role === "admin" || info.role === "user");
+}
+
+function isAdmin() {
+  const info = getCurrentUserInfo();
+  return info && info.role === "admin";
+}
+
+// Users on break aren't expected to be doing anything right now — hide
+// them from every "assign this to someone" picker (request-from,
+// reassign). Enforced server-side too (see crud._check_assignable); this
+// is just so the option isn't offered in the first place.
+function assignableUsers(users) {
+  return users.filter((u) => !u.on_break);
 }
 
 export async function renderBoard(container) {
@@ -54,12 +75,16 @@ export async function renderBoard(container) {
   await refreshTodos(container, writable);
 }
 
-async function loadUsers() {
-  if (!usersCache) {
+// `force` refetches even if cached — used right before showing an
+// assign/reassign picker, since on_break can change between page load
+// and the moment someone opens that picker, and a stale "on break" flag
+// there would wrongly show (or hide) someone.
+async function loadUsers(force = false) {
+  if (!usersCache || force) {
     try {
       usersCache = await api.get(`${HB}/users`);
     } catch {
-      usersCache = [];
+      usersCache = usersCache || [];
     }
   }
   return usersCache;
@@ -99,7 +124,19 @@ async function refreshTodos(container, writable) {
   let todos;
   try {
     const qs = state.status ? `?status=${encodeURIComponent(state.status)}` : "";
-    todos = await api.get(`${HB}/todos${qs}`);
+    const fetches = [api.get(`${HB}/todos${qs}`)];
+    // Only a writable user can hold or ask about anything, so skip these
+    // two fetches entirely for a read-only viewer.
+    if (writable) {
+      if (!meCache) fetches.push(api.get(`${HB}/me`));
+      fetches.push(api.get(`${HB}/takeover-requests?direction=outgoing`));
+    }
+    const results = await Promise.all(fetches);
+    todos = results[0];
+    if (writable) {
+      if (!meCache) meCache = results[1];
+      outgoingRequestsCache = results[results.length - 1];
+    }
   } catch {
     cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load the todo board</div>`;
@@ -148,6 +185,11 @@ function todoRow(todo, container, writable) {
         : badge
           ? `<span class="badge badge-${badge.tone}">${escapeHtml(badge.label)}</span>`
           : "";
+  const chainBadge = todo.chain_parent_task_name
+    ? `<span class="badge badge-neutral">After: ${escapeHtml(todo.chain_parent_task_name)}</span>`
+    : "";
+
+  const iHoldIt = writable && meCache && todo.assigned_to && todo.assigned_to.id === meCache.id;
 
   row.innerHTML = `
     <div class="list-row-body">
@@ -156,6 +198,7 @@ function todoRow(todo, container, writable) {
       <div class="list-row-meta">
         ${assignee}
         ${statusBadge}
+        ${chainBadge}
         <span>by ${escapeHtml(todo.created_by.display_name)}</span>
       </div>
     </div>
@@ -163,9 +206,15 @@ function todoRow(todo, container, writable) {
     ${
       writable && todo.status === "open"
         ? `<div class="list-row-actions">
+             ${iHoldIt ? `<span class="takeover-slot"></span>` : ""}
              ${
                !todo.assigned_to
                  ? `<button class="btn btn-icon" data-action="claim" aria-label="Claim todo" title="Claim — assign this to me">${icons.handRaised}</button>`
+                 : ""
+             }
+             ${
+               isAdmin()
+                 ? `<button class="btn btn-icon" data-action="reassign" aria-label="Reassign now" title="Reassign now — moves it instantly, no approval needed (for asking first, see the request icon on your own items)">${icons.swap}</button>`
                  : ""
              }
              <button class="btn btn-icon btn-danger" data-action="cancel" aria-label="Cancel todo">${icons.close}</button>
@@ -174,6 +223,18 @@ function todoRow(todo, container, writable) {
         : ""
     }
   `;
+
+  if (iHoldIt) {
+    row.querySelector(".takeover-slot").replaceWith(
+      takeoverControl({
+        requests: outgoingRequestsCache,
+        kind: "todo",
+        id: todo.id,
+        label: todo.title,
+        onChange: () => refreshTodos(container, writable),
+      })
+    );
+  }
 
   if (writable && todo.status === "open" && !todo.assigned_to) {
     row.querySelector('[data-action="claim"]').addEventListener("click", async () => {
@@ -184,6 +245,12 @@ function todoRow(todo, container, writable) {
       } catch {
         /* api.js already showed a toast (e.g. 409 if someone else just claimed it) */
       }
+    });
+  }
+
+  if (writable && todo.status === "open" && isAdmin()) {
+    row.querySelector('[data-action="reassign"]').addEventListener("click", () => {
+      openReassignModal(container, todo, writable);
     });
   }
 
@@ -218,8 +285,61 @@ function todoRow(todo, container, writable) {
   return row;
 }
 
+async function openReassignModal(container, todo, writable) {
+  const users = assignableUsers(await loadUsers(true));
+
+  const overlay = document.createElement("div");
+  overlay.className = "modal-overlay";
+  overlay.innerHTML = `
+    <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal-header">
+        <h2>Reassign</h2>
+        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="Close">${icons.close}</button>
+      </div>
+      <div class="stack">
+        <div class="field">
+          <label for="ra-assignee">"${escapeHtml(todo.title)}" goes to</label>
+          <select class="select" id="ra-assignee" ${users.length === 0 ? "disabled" : ""}>
+            ${
+              users.length === 0
+                ? `<option value="">No eligible users (everyone's on break)</option>`
+                : users
+                    .map(
+                      (u) =>
+                        `<option value="${u.id}"${todo.assigned_to && u.id === todo.assigned_to.id ? " selected" : ""}>${escapeAttr(u.display_name)}</option>`
+                    )
+                    .join("")
+            }
+          </select>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-primary grow" id="ra-save" ${users.length === 0 ? "disabled" : ""}>Reassign</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector("#modal-close").addEventListener("click", close);
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+
+  overlay.querySelector("#ra-save").addEventListener("click", async () => {
+    const assignedToId = Number(overlay.querySelector("#ra-assignee").value);
+    try {
+      await api.post(`${HB}/todos/${todo.id}/reassign`, { assigned_to_id: assignedToId });
+      showToast("Reassigned", "success");
+      close();
+      refreshTodos(container, writable);
+    } catch {
+      /* api.js already showed a toast */
+    }
+  });
+}
+
 async function openTodoModal(container) {
-  const [users, tasks, categories] = await Promise.all([loadUsers(), loadTasks(), loadCategories()]);
+  const [users, tasks, categories] = await Promise.all([loadUsers(true), loadTasks(), loadCategories()]);
 
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -265,7 +385,7 @@ async function openTodoModal(container) {
           <label for="t-assignee">Request from</label>
           <select class="select" id="t-assignee">
             <option value="">Anyone</option>
-            ${users.map((u) => `<option value="${u.id}">${escapeAttr(u.display_name)}</option>`).join("")}
+            ${assignableUsers(users).map((u) => `<option value="${u.id}">${escapeAttr(u.display_name)}</option>`).join("")}
           </select>
         </div>
       </div>
@@ -294,6 +414,7 @@ async function openTodoModal(container) {
     openTaskPickerModal({
       tasks,
       categories,
+      customOption: { label: "Custom (one-off)" },
       onSelect: (task) => {
         overlay.querySelector("#t-task-label").textContent = task ? task.name : "Custom (one-off)";
         overlay.querySelector("#t-title").value = task ? task.name : "";
@@ -333,112 +454,3 @@ async function openTodoModal(container) {
   });
 }
 
-// A full-screen popup for picking a task, stacked on top of whatever
-// modal opened it (same nested-overlay pattern confirmDialog.js already
-// uses) — search + category chips keep it usable with a list of any
-// size, unlike a native <select> on mobile.
-function openTaskPickerModal({ tasks, categories, onSelect }) {
-  const overlay = document.createElement("div");
-  overlay.className = "modal-overlay";
-  overlay.innerHTML = `
-    <div class="modal" role="dialog" aria-modal="true">
-      <div class="modal-header">
-        <h2>Choose a task</h2>
-        <button class="btn btn-icon btn-ghost" id="tp-close" aria-label="Close">${icons.close}</button>
-      </div>
-      <div class="search-bar" style="margin-bottom: var(--space-3);">
-        ${icons.search}
-        <input type="search" id="tp-search" placeholder="Search tasks…" />
-      </div>
-      <div class="chip-row" id="tp-categories" style="margin-bottom: var(--space-3);"></div>
-      <div id="tp-list" class="stack" style="max-height: 55vh; overflow-y: auto;"></div>
-    </div>
-  `;
-  document.body.appendChild(overlay);
-
-  const close = () => overlay.remove();
-  overlay.querySelector("#tp-close").addEventListener("click", close);
-  overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
-  });
-
-  const pickerState = { q: "", categoryId: "" };
-
-  const catRoot = overlay.querySelector("#tp-categories");
-  const chips = [
-    { id: "", label: "All" },
-    ...categories.map((c) => ({ id: String(c.id), label: c.icon ? `${c.icon} ${c.name}` : c.name })),
-  ];
-  catRoot.innerHTML = chips
-    .map(
-      (c) =>
-        `<span class="chip${pickerState.categoryId === c.id ? " chip-active" : ""}" data-cat="${escapeAttr(c.id)}">${escapeHtml(c.label)}</span>`
-    )
-    .join("");
-  catRoot.querySelectorAll(".chip").forEach((chip) => {
-    chip.addEventListener("click", () => {
-      pickerState.categoryId = chip.dataset.cat;
-      catRoot.querySelectorAll(".chip").forEach((c) => c.classList.toggle("chip-active", c === chip));
-      renderList();
-    });
-  });
-
-  let searchDebounce = null;
-  overlay.querySelector("#tp-search").addEventListener("input", (e) => {
-    clearTimeout(searchDebounce);
-    searchDebounce = setTimeout(() => {
-      pickerState.q = e.target.value.trim().toLowerCase();
-      renderList();
-    }, 200);
-  });
-
-  function renderList() {
-    const listRoot = overlay.querySelector("#tp-list");
-    let filtered = tasks;
-    if (pickerState.q) filtered = filtered.filter((t) => t.name.toLowerCase().includes(pickerState.q));
-    if (pickerState.categoryId) {
-      filtered = filtered.filter((t) => t.categories.some((c) => String(c.id) === pickerState.categoryId));
-    }
-
-    listRoot.innerHTML = "";
-
-    const customRow = document.createElement("button");
-    customRow.type = "button";
-    customRow.className = "list-row";
-    customRow.innerHTML = `<div class="list-row-body"><div class="list-row-title">Custom (one-off)</div></div>`;
-    customRow.addEventListener("click", () => {
-      onSelect(null);
-      close();
-    });
-    listRoot.appendChild(customRow);
-
-    if (filtered.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "empty-state";
-      empty.textContent = "No tasks match";
-      listRoot.appendChild(empty);
-      return;
-    }
-
-    filtered.forEach((t) => {
-      const row = document.createElement("button");
-      row.type = "button";
-      row.className = "list-row";
-      const catLabel = t.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
-      row.innerHTML = `
-        <div class="list-row-body">
-          <div class="list-row-title">${escapeHtml(t.name)}</div>
-          ${catLabel ? `<div class="list-row-meta"><span>${escapeHtml(catLabel)}</span></div>` : ""}
-        </div>
-        <div class="list-row-points"><span>${t.points}</span><span class="muted">pts</span></div>
-      `;
-      row.addEventListener("click", () => {
-        onSelect(t);
-        close();
-      });
-      listRoot.appendChild(row);
-    });
-  }
-
-  renderList();
-}

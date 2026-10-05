@@ -3,6 +3,7 @@ import { handleAuthentikCallback, warmGroupRoleMap } from "./auth.js";
 import { startRouter, navigate } from "./router.js";
 import { showToast } from "./toast.js";
 import { registerServiceWorker } from "./push.js";
+import { initNotificationInbox } from "./notifications.js";
 
 // index.html's inline head script already applies the theme before first
 // paint to avoid a flash; this just keeps the two in sync in case the
@@ -45,6 +46,7 @@ async function boot() {
   // which needs at least one more navigation to get to).
   warmGroupRoleMap();
   registerServiceWorker();
+  initNotificationInbox();
   startRouter();
 }
 

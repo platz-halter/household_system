@@ -2,6 +2,7 @@ import { login, loginWithAuthentik } from "./auth.js";
 import { showToast } from "./toast.js";
 import { icons } from "./icons.js";
 import { navigate } from "./router.js";
+import { refreshNotificationBadge } from "./notifications.js";
 
 export function renderLogin(container) {
   container.innerHTML = `
@@ -58,6 +59,11 @@ export function renderLogin(container) {
     try {
       await login(username, password);
       navigate("/home");
+      // No full page reload happens here (unlike the Authentik redirect
+      // flow), so the bell's own canWrite() check never gets re-run
+      // until its next poll — nudge it now instead of waiting up to
+      // POLL_INTERVAL_MS for it to notice this session is logged in.
+      refreshNotificationBadge();
     } catch (err) {
       showToast(err.message || "Login failed", "danger");
       submitBtn.disabled = false;

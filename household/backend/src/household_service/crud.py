@@ -3,7 +3,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,8 +19,11 @@ from household_service.models import (
     Recurrence,
     Report,
     ReportPeriod,
+    TakeoverRequest,
+    TakeoverStatus,
     Task,
     TaskAssignment,
+    TaskChainLink,
     TodoItem,
     TodoStatus,
 )
@@ -86,7 +89,11 @@ async def _release_user_assignments(db: AsyncSession, user: HouseholdUser) -> No
     back up instead of it staying stuck with someone on break. Only
     touches assignments with real work still outstanding — see
     _remaining_points (partial progress reduces, but doesn't necessarily
-    zero out, what's left)."""
+    zero out, what's left). Also cancels any pending takeover request
+    this now-affects: one this user sent as requester (their deleted/
+    unassigned item's assignment is gone, cascading automatically for
+    the TaskAssignment case — see the model's FK), and any where this
+    user was the TARGET (can't accept a takeover while on break)."""
     today = datetime.now(UTC).date()
     result = await db.execute(
         select(TaskAssignment)
@@ -105,8 +112,29 @@ async def _release_user_assignments(db: AsyncSession, user: HouseholdUser) -> No
             TodoItem.assigned_to_id == user.id, TodoItem.status == TodoStatus.open
         )
     )
+    released_todo_ids = []
     for todo in todos_result.scalars().all():
         todo.assigned_to_id = None
+        released_todo_ids.append(todo.id)
+
+    now = datetime.now(UTC)
+    await db.execute(
+        update(TakeoverRequest)
+        .where(
+            TakeoverRequest.target_id == user.id,
+            TakeoverRequest.status == TakeoverStatus.pending,
+        )
+        .values(status=TakeoverStatus.cancelled, responded_at=now)
+    )
+    if released_todo_ids:
+        await db.execute(
+            update(TakeoverRequest)
+            .where(
+                TakeoverRequest.todo_item_id.in_(released_todo_ids),
+                TakeoverRequest.status == TakeoverStatus.pending,
+            )
+            .values(status=TakeoverStatus.cancelled, responded_at=now)
+        )
 
 
 async def set_user_image(
@@ -254,6 +282,147 @@ async def delete_task(db: AsyncSession, task: Task) -> None:
     await db.commit()
 
 
+# ---- Chain tasks ----------------------------------------------------------
+
+
+async def chain_child_task_ids(db: AsyncSession) -> set[int]:
+    """Every task id that's a chain child of something — i.e. `TaskOut
+    .is_chain_child` for the whole task list in one query, and what the
+    sweep/Home/direct-completion all exclude on. See TaskChainLink's own
+    docstring for why this is derived from the link table on every call
+    rather than cached on Task itself."""
+    result = await db.execute(select(TaskChainLink.child_task_id).distinct())
+    return {row[0] for row in result.all()}
+
+
+async def is_chain_child(db: AsyncSession, task_id: int) -> bool:
+    result = await db.execute(
+        select(TaskChainLink.id).where(TaskChainLink.child_task_id == task_id).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def list_chain_links(
+    db: AsyncSession, parent_task_id: int
+) -> list[TaskChainLink]:
+    result = await db.execute(
+        select(TaskChainLink)
+        .where(TaskChainLink.parent_task_id == parent_task_id)
+        .options(selectinload(TaskChainLink.child_task))
+        .order_by(TaskChainLink.position)
+    )
+    return list(result.scalars().all())
+
+
+async def get_chain_link(db: AsyncSession, link_id: int) -> TaskChainLink | None:
+    result = await db.execute(
+        select(TaskChainLink)
+        .where(TaskChainLink.id == link_id)
+        .options(selectinload(TaskChainLink.child_task))
+    )
+    return result.scalar_one_or_none()
+
+
+async def list_chain_parents(
+    db: AsyncSession, child_task_id: int
+) -> list[TaskChainLink]:
+    """The reverse of list_chain_links: every link where `child_task_id`
+    is the CHILD — i.e. which task(s) chain it, for the "already
+    chained, complete it directly anyway?" confirm (see complete_task's
+    `force` and TaskCompleteRequest). A task is usually only
+    someone's chain child once, but nothing stops it being chained from
+    more than one parent, so this is a list, not a single link."""
+    result = await db.execute(
+        select(TaskChainLink)
+        .where(TaskChainLink.child_task_id == child_task_id)
+        .options(selectinload(TaskChainLink.parent_task))
+        .order_by(TaskChainLink.position)
+    )
+    return list(result.scalars().all())
+
+
+async def _reachable_task_ids(db: AsyncSession, start_task_id: int) -> set[int]:
+    """Every task reachable from `start_task_id` by following existing
+    chain links downward (start's children, their children, ...) —
+    everything a cycle check needs to know "is already a descendant of
+    this task." Walks the whole link table in the worst case, which is
+    fine at this project's scale (a household's task list, not a graph
+    database) — correctness over a cleverer single query."""
+    seen: set[int] = set()
+    frontier = [start_task_id]
+    while frontier:
+        current = frontier.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        result = await db.execute(
+            select(TaskChainLink.child_task_id).where(
+                TaskChainLink.parent_task_id == current
+            )
+        )
+        frontier.extend(row[0] for row in result.all())
+    seen.discard(start_task_id)
+    return seen
+
+
+async def create_chain_link(
+    db: AsyncSession, *, parent_task_id: int, child_task_id: int, same_user: bool
+) -> TaskChainLink:
+    if parent_task_id == child_task_id:
+        raise ValueError("A task can't be chained to itself")
+    if await get_task(db, parent_task_id) is None:
+        raise ValueError(f"Unknown task id: {parent_task_id}")
+    if await get_task(db, child_task_id) is None:
+        raise ValueError(f"Unknown task id: {child_task_id}")
+
+    existing = await db.scalar(
+        select(TaskChainLink.id).where(
+            TaskChainLink.parent_task_id == parent_task_id,
+            TaskChainLink.child_task_id == child_task_id,
+        )
+    )
+    if existing is not None:
+        raise ValueError("This chain link already exists")
+
+    # Adding parent->child only closes a cycle if parent is already
+    # reachable FROM child (child -> ... -> parent already exists) —
+    # that would make parent a descendant of its own new child.
+    if parent_task_id in await _reachable_task_ids(db, child_task_id):
+        raise ValueError("This would create a cycle of chained tasks")
+
+    max_position = await db.scalar(
+        select(func.max(TaskChainLink.position)).where(
+            TaskChainLink.parent_task_id == parent_task_id
+        )
+    )
+    link = TaskChainLink(
+        parent_task_id=parent_task_id,
+        child_task_id=child_task_id,
+        same_user=same_user,
+        position=(max_position or 0) + 1,
+    )
+    db.add(link)
+
+    # A task that becomes a chain child has exactly one legitimate
+    # source of instances from now on — drop any TaskAssignment it's
+    # currently holding, so the sweep's existing (now orphaned-in-intent)
+    # assignment can't coexist with chain-spawned todos for the same
+    # task. Its own points history is untouched; this only clears a
+    # forward-looking recurring assignment.
+    await db.execute(
+        delete(TaskAssignment).where(TaskAssignment.task_id == child_task_id)
+    )
+
+    await db.commit()
+    await db.refresh(link, attribute_names=["child_task", "parent_task"])
+    return link
+
+
+async def delete_chain_link(db: AsyncSession, link: TaskChainLink) -> None:
+    await db.delete(link)
+    await db.commit()
+
+
 async def _completions_today_count(db: AsyncSession, task_id: int) -> int:
     today = datetime.now(UTC).date()
     since = datetime.combine(today, time.min, tzinfo=UTC)
@@ -290,14 +459,32 @@ async def task_completions_today(db: AsyncSession) -> dict[int, int]:
 
 
 async def complete_task(
-    db: AsyncSession, task: Task, user: HouseholdUser
+    db: AsyncSession, task: Task, user: HouseholdUser, *, force: bool = False
 ) -> PointsEntry:
     """Logs one completion of `task` by `user` and awards points, including
     the configured ramp-up bonus if this user is (so far) the only one who
     has ever completed this task. Rejects a completion past the task's own
     `times_per_day` for today (by anyone, not just this user) — without
     this, a 1x/day task never actually went away, and repeated taps just
-    kept awarding points indefinitely."""
+    kept awarding points indefinitely.
+
+    Also rejects a task that only exists as someone else's chain child
+    (see TaskChainLink) — it has no legitimate direct occurrence of its
+    own; it's normally completed via the todo it's spawned as instead.
+    `force=True` overrides this one check (and only this one) — the
+    frontend confirms this explicitly first, naming which task(s) chain
+    it (see crud.list_chain_parents / GET /tasks/{id}/chain-parents),
+    so this is an informed override, not a silent bypass. It doesn't
+    touch any already-spawned, still-open todo for the same chain link
+    — completing both would double-count that occurrence, but that's
+    the same kind of judgment call `times_per_day` already leaves to
+    the person tapping complete, not something this function can
+    second-guess."""
+    if await is_chain_child(db, task.id) and not force:
+        raise ValueError(
+            f'"{task.name}" is a chained task — complete it from the todo '
+            "it's spawned as, not directly"
+        )
     done_today = await _completions_today_count(db, task.id)
     if done_today >= task.times_per_day:
         raise ValueError(
@@ -322,10 +509,16 @@ async def complete_task(
         task_id=task.id,
     )
     db.add(entry)
+    await db.flush()
+    to_notify = await _spawn_chain_children(
+        db, parent_task_id=task.id, entry=entry, completer=user
+    )
     await db.commit()
     await db.refresh(
         entry, attribute_names=["household_user", "task", "todo_item", "earned_at"]
     )
+    for child in to_notify:
+        await notify_todo_assigned(db, child, user)
     return entry
 
 
@@ -343,6 +536,7 @@ def _todo_query():
         selectinload(TodoItem.created_by),
         selectinload(TodoItem.assigned_to),
         selectinload(TodoItem.completed_by),
+        selectinload(TodoItem.chain_link).selectinload(TaskChainLink.parent_task),
     )
 
 
@@ -368,14 +562,40 @@ async def list_todos(
     return list(result.scalars().all())
 
 
+async def _check_assignable(db: AsyncSession, target_id: int) -> HouseholdUser:
+    """Shared guard for anything that hands work to a specific person —
+    creating/editing a todo with an assignee, an admin reassign, or a
+    takeover request. Raises ValueError (routes turn these into 400s)
+    rather than silently assigning to someone who's on break and not
+    expected to be doing anything right now (see PROJECT_SPEC.md)."""
+    target = await get_household_user(db, target_id)
+    if target is None:
+        raise ValueError(f"Unknown household user id: {target_id}")
+    if target.on_break:
+        raise ValueError(f"{target.display_name} is on break")
+    return target
+
+
+async def _cancel_pending_takeover_for_todo(db: AsyncSession, todo_id: int) -> None:
+    """A pending takeover request only makes sense while its requester
+    still holds the item — called wherever that stops being true
+    (reassigned, completed, cancelled) other than by the requester
+    going on break, which cleans up via _release_user_assignments."""
+    await db.execute(
+        update(TakeoverRequest)
+        .where(
+            TakeoverRequest.todo_item_id == todo_id,
+            TakeoverRequest.status == TakeoverStatus.pending,
+        )
+        .values(status=TakeoverStatus.cancelled, responded_at=datetime.now(UTC))
+    )
+
+
 async def create_todo(
     db: AsyncSession, data: TodoCreate, creator: HouseholdUser
 ) -> TodoItem:
-    if (
-        data.assigned_to_id is not None
-        and await get_household_user(db, data.assigned_to_id) is None
-    ):
-        raise ValueError(f"Unknown household user id: {data.assigned_to_id}")
+    if data.assigned_to_id is not None:
+        await _check_assignable(db, data.assigned_to_id)
     todo = TodoItem(
         title=data.title,
         description=data.description,
@@ -403,8 +623,7 @@ async def update_todo(db: AsyncSession, todo: TodoItem, data: TodoUpdate) -> Tod
     if data.due_in_days is not None:
         todo.due_date = _todo_due_date(data.due_in_days)
     if data.assigned_to_id is not None:
-        if await get_household_user(db, data.assigned_to_id) is None:
-            raise ValueError(f"Unknown household user id: {data.assigned_to_id}")
+        await _check_assignable(db, data.assigned_to_id)
         todo.assigned_to_id = data.assigned_to_id
     await db.commit()
     await db.refresh(
@@ -413,9 +632,37 @@ async def update_todo(db: AsyncSession, todo: TodoItem, data: TodoUpdate) -> Tod
     return todo
 
 
+async def reassign_todo(
+    db: AsyncSession, todo: TodoItem, new_assignee_id: int
+) -> TodoItem:
+    """Admin-only direct handoff of an open board item — unlike a
+    takeover request, no acceptance needed (see TodoReassignIn). Still
+    respects `exclude_user_id` (see TodoItem's own docstring): a chain
+    todo's "not the completer" exclusion is a fairness rule the admin
+    override shouldn't quietly undo. Cancels any pending takeover
+    request on this item, since its "requester currently holds this"
+    assumption is now stale."""
+    if todo.status != TodoStatus.open:
+        raise ValueError(f"Can't reassign a todo that's already {todo.status.value}")
+    target = await _check_assignable(db, new_assignee_id)
+    if todo.exclude_user_id is not None and target.id == todo.exclude_user_id:
+        raise ValueError(f"{target.display_name} can't be assigned this item")
+    todo.assigned_to_id = target.id
+    await _cancel_pending_takeover_for_todo(db, todo.id)
+    await db.commit()
+    await db.refresh(todo, attribute_names=["assigned_to"])
+    return todo
+
+
 async def complete_todo(
     db: AsyncSession, todo: TodoItem, user: HouseholdUser
 ) -> TodoItem:
+    """Completes `todo` and awards its points. If `todo` is itself a
+    chain-spawned instance (todo.chain_link_id set), also spawns the
+    NEXT level of the chain — the task it represents is
+    `chain_link.child_task_id`, not a Task row this TodoItem points to
+    directly, so that's what's used as the new parent (multi-level
+    chains, see TaskChainLink)."""
     todo.status = TodoStatus.completed
     todo.completed_by_id = user.id
     todo.completed_at = datetime.now(UTC)
@@ -426,13 +673,25 @@ async def complete_todo(
         todo_item_id=todo.id,
     )
     db.add(entry)
+    await db.flush()
+    await _cancel_pending_takeover_for_todo(db, todo.id)
+    to_notify: list[TodoItem] = []
+    if todo.chain_link_id is not None:
+        link = await db.get(TaskChainLink, todo.chain_link_id)
+        if link is not None:
+            to_notify = await _spawn_chain_children(
+                db, parent_task_id=link.child_task_id, entry=entry, completer=user
+            )
     await db.commit()
     await db.refresh(todo, attribute_names=["completed_by", "completed_at", "status"])
+    for child in to_notify:
+        await notify_todo_assigned(db, child, user)
     return todo
 
 
 async def cancel_todo(db: AsyncSession, todo: TodoItem) -> TodoItem:
     todo.status = TodoStatus.cancelled
+    await _cancel_pending_takeover_for_todo(db, todo.id)
     await db.commit()
     await db.refresh(todo, attribute_names=["status"])
     return todo
@@ -450,13 +709,20 @@ async def claim_todo(
     (not a read-then-write) so two people tapping "claim" on the same
     item at the same moment can't both win it — whichever request's
     UPDATE actually matches a row (rowcount 1) gets it; the other sees
-    rowcount 0 and the caller turns that into a 409."""
+    rowcount 0 and the caller turns that into a 409. Also blocks
+    whoever a "different person" chain spawn explicitly excluded (see
+    TodoItem.exclude_user_id) from just claiming their way around that
+    exclusion themselves."""
     result = await db.execute(
         update(TodoItem)
         .where(
             TodoItem.id == todo_id,
             TodoItem.status == TodoStatus.open,
             TodoItem.assigned_to_id.is_(None),
+            or_(
+                TodoItem.exclude_user_id.is_(None),
+                TodoItem.exclude_user_id != user.id,
+            ),
         )
         .values(assigned_to_id=user.id)
     )
@@ -580,49 +846,28 @@ async def list_current_assignments(
     return list(result.scalars().all())
 
 
-async def run_balancing(
-    db: AsyncSession, *, as_of: date | None = None
-) -> BalancingRunOutcome:
-    """The auto-balancing tool (PROJECT_SPEC.md), in two passes:
-
-    1. Sweep — hand out anything not yet assigned this period: every
-       active weekly/monthly task without an assignment yet, and every
-       open board todo nobody's claimed (sitting unclaimed longer than
-       CLAIM_WINDOW, so a person gets first crack at it).
-    2. Rebalance — recompute everyone's load after the sweep, then pull
-       an unfinished, non-ramp-up task from whoever's most ahead to
-       whoever's still meaningfully behind (balancing.rebalance). Running
-       the sweep first means a freshly-freed item gets a chance to
-       absorb the imbalance on its own before anything existing assigned
-       work is disrupted.
-
-    Always stamps `last_balance_run` to today — mirrors
-    send_weekly_nudge's own stamping, so a manual Admin-panel run and the
-    automatic daily schedule (scheduler.py) can't double-run the same
-    day. Unlike the old weekly/monthly-only cadence, this now runs daily
-    on purpose: pass 2 needs to re-check for imbalances more often than
-    once a period to actually catch someone falling behind mid-week, not
-    just at its start."""
-    as_of = as_of or datetime.now(UTC).date()
-    settings = await get_settings_row(db)
-    week_start, week_end = _resolve_period(
-        ReportPeriod.week, as_of, settings.week_start_weekday
-    )
-    month_start, month_end = _resolve_period(ReportPeriod.month, as_of)
-
-    all_users = await list_household_users(db)
-    eligible = [u for u in all_users if not u.on_break]
+async def _gather_balancer_load(
+    db: AsyncSession,
+    eligible: list[HouseholdUser],
+    as_of: date,
+    week_start: date,
+) -> tuple[
+    dict[int, int],
+    dict[int, int],
+    dict[int, int],
+    list[TaskAssignment],
+    dict[int, int],
+]:
+    """Seeds load_points/load_count/points_this_week for every eligible
+    user from whatever they're already carrying into `as_of` — the same
+    "what does today's picture look like" snapshot run_balancing's sweep
+    starts from, pulled out here so a single immediate chain-todo
+    assignment (_assign_chain_todo_now) can use the identical fairness
+    picture without waiting for the next scheduled run. Also hands back
+    current_assignments/remaining_by_assignment, since run_balancing's
+    own sweep and rebalance passes need those same two values again."""
     eligible_by_id = {u.id: u for u in eligible}
 
-    settings.last_balance_run = as_of
-
-    # No early-return for "nobody eligible" — fall through to the normal
-    # path so candidates still get counted (balancing.balance() returns
-    # everything as unassigned when `users` is empty), which is what
-    # makes unassigned_task_count/unassigned_todo_count mean something
-    # real in that case instead of silently reading 0/0.
-
-    # ---- seed everyone's starting load for this run --------------------
     # Matched by OVERLAP with today (not an exact period_start match) —
     # an exact match would double-assign the same task if the admin ever
     # changes week_start_weekday mid-period, since that shifts what
@@ -634,7 +879,6 @@ async def run_balancing(
         .where(TaskAssignment.period_start <= as_of, TaskAssignment.period_end >= as_of)
     )
     current_assignments = list(current_assignments_result.scalars().all())
-    assignment_by_id = {a.id: a for a in current_assignments}
     remaining_by_assignment = {
         a.id: await _remaining_points(db, a.task, a.period_start, a.period_end)
         for a in current_assignments
@@ -666,6 +910,188 @@ async def run_balancing(
     points_this_week = {
         u.id: await points_for_user_since(db, u.id, week_since) for u in eligible
     }
+    return (
+        load_points,
+        load_count,
+        points_this_week,
+        current_assignments,
+        remaining_by_assignment,
+    )
+
+
+def _is_eligible_for_tasks(user: HouseholdUser) -> bool:
+    """Whether `user` should ever be handed new work by the balancer's
+    sweep/rebalance or chain-task auto-assignment — not on break, and
+    not a viewer. Viewers can never complete anything themselves
+    (`complete_task`/`complete_todo` are `can_write`-gated), so handing
+    one something just leaves it permanently stuck; `role` is only a
+    cached hint (see HouseholdUser's own docstring), but good enough
+    here, same as `crud.leaderboard()`'s viewer exclusion and
+    `_validate_takeover_target`'s."""
+    return not user.on_break and user.role != "viewer"
+
+
+async def _assign_chain_todo_now(
+    db: AsyncSession, todo: TodoItem, *, exclude_user_id: int
+) -> None:
+    """Immediately assigns a freshly-spawned "different person" chain
+    child to whoever's currently least loaded, using the exact same
+    fairness picture run_balancing's sweep uses — just invoked for this
+    one todo right now instead of waiting for the next scheduled run (a
+    once-a-day cadence would otherwise leave a same-day chain todo
+    unassigned for hours). Never assigns to `exclude_user_id` (whoever
+    completed the parent). Left open/unassigned if nobody else is
+    eligible — exactly like an ordinary sweep leftover, and still
+    excluded from self-claiming (see claim_todo)."""
+    as_of = datetime.now(UTC).date()
+    all_users = await list_household_users(db)
+    eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
+    if not eligible:
+        return
+
+    settings = await get_settings_row(db)
+    week_start, _week_end = _resolve_period(
+        ReportPeriod.week, as_of, settings.week_start_weekday
+    )
+    (
+        load_points,
+        load_count,
+        points_this_week,
+        _current,
+        _remaining,
+    ) = await _gather_balancer_load(db, eligible, as_of, week_start)
+
+    balancing_users = [
+        balancing.EligibleUser(
+            user_id=u.id,
+            points_this_week=points_this_week[u.id],
+            already_assigned_points=load_points[u.id],
+            already_assigned_count=load_count[u.id],
+        )
+        for u in eligible
+    ]
+    # Must exceed everyone's current count — this call is only ever
+    # handing out ONE item, but balance()'s cap filter is
+    # `count[uid] < max_new_items_per_user`, so anyone already sitting
+    # at whatever cap we pick would be wrongly skipped even though
+    # they're the fairest (or only) choice for this single item.
+    max_new_items_per_user = max(load_count.values(), default=0) + 1
+    result = balancing.balance(
+        users=balancing_users,
+        tasks=[],
+        todos=[
+            balancing.CandidateTodo(
+                todo_id=todo.id, points=todo.points, excluded_user_id=exclude_user_id
+            )
+        ],
+        max_new_items_per_user=max_new_items_per_user,
+    )
+    picked = result.todo_assignments.get(todo.id)
+    if picked is not None:
+        todo.assigned_to_id = picked
+
+
+async def _spawn_chain_children(
+    db: AsyncSession,
+    *,
+    parent_task_id: int,
+    entry: PointsEntry,
+    completer: HouseholdUser,
+) -> list[TodoItem]:
+    """Spawns one TodoItem per chain link hanging off `parent_task_id`,
+    for the occurrence just logged as `entry`. Must run in the same
+    transaction as `entry`'s own flush (the caller flushes first so
+    entry.id exists, then commits once after this returns) — a crash
+    between the two can never leave points awarded with no matching
+    children, or vice versa. Idempotent via uq_todo_chain_spawn
+    (chain_link_id, spawned_by_entry_id) if this is ever retried for the
+    same entry.
+
+    Returns the different-person children that got assigned, for the
+    caller to push-notify AFTER its own final commit —
+    push.send_to_subscriptions commits internally (it prunes dead
+    subscriptions as it goes), so notifying from inside this function,
+    before the caller's commit, would split one logical transaction
+    (points entry + all spawned children) into several."""
+    to_notify: list[TodoItem] = []
+    links = await list_chain_links(db, parent_task_id)
+    for link in links:
+        child = TodoItem(
+            title=link.child_task.name,
+            description=link.child_task.description,
+            points=link.child_task.points,
+            due_date=datetime.now(UTC).date(),
+            created_by_id=completer.id,
+            chain_link_id=link.id,
+            spawned_by_entry_id=entry.id,
+        )
+        if link.same_user:
+            # Direct assignment, bypassing the balancer entirely — this
+            # is "the same person does both," not a fairness decision.
+            child.assigned_to_id = completer.id
+            db.add(child)
+            await db.flush()
+        else:
+            child.exclude_user_id = completer.id
+            db.add(child)
+            await db.flush()
+            await _assign_chain_todo_now(db, child, exclude_user_id=completer.id)
+            if child.assigned_to_id is not None:
+                to_notify.append(child)
+    return to_notify
+
+
+async def run_balancing(
+    db: AsyncSession, *, as_of: date | None = None
+) -> BalancingRunOutcome:
+    """The auto-balancing tool (PROJECT_SPEC.md), in two passes:
+
+    1. Sweep — hand out anything not yet assigned this period: every
+       active weekly/monthly task without an assignment yet, and every
+       open board todo nobody's claimed (sitting unclaimed longer than
+       CLAIM_WINDOW, so a person gets first crack at it).
+    2. Rebalance — recompute everyone's load after the sweep, then pull
+       an unfinished, non-ramp-up task from whoever's most ahead to
+       whoever's still meaningfully behind (balancing.rebalance). Running
+       the sweep first means a freshly-freed item gets a chance to
+       absorb the imbalance on its own before anything existing assigned
+       work is disrupted.
+
+    Always stamps `last_balance_run` to today — mirrors
+    send_weekly_nudge's own stamping, so a manual Admin-panel run and the
+    automatic daily schedule (scheduler.py) can't double-run the same
+    day. Unlike the old weekly/monthly-only cadence, this now runs daily
+    on purpose: pass 2 needs to re-check for imbalances more often than
+    once a period to actually catch someone falling behind mid-week, not
+    just at its start."""
+    as_of = as_of or datetime.now(UTC).date()
+    settings = await get_settings_row(db)
+    week_start, week_end = _resolve_period(
+        ReportPeriod.week, as_of, settings.week_start_weekday
+    )
+    month_start, month_end = _resolve_period(ReportPeriod.month, as_of)
+
+    all_users = await list_household_users(db)
+    eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
+    eligible_by_id = {u.id: u for u in eligible}
+
+    settings.last_balance_run = as_of
+
+    # No early-return for "nobody eligible" — fall through to the normal
+    # path so candidates still get counted (balancing.balance() returns
+    # everything as unassigned when `users` is empty), which is what
+    # makes unassigned_task_count/unassigned_todo_count mean something
+    # real in that case instead of silently reading 0/0.
+
+    # ---- seed everyone's starting load for this run --------------------
+    (
+        load_points,
+        load_count,
+        points_this_week,
+        current_assignments,
+        remaining_by_assignment,
+    ) = await _gather_balancer_load(db, eligible, as_of, week_start)
+    assignment_by_id = {a.id: a for a in current_assignments}
 
     def _balancing_users() -> list[balancing.EligibleUser]:
         # Re-read load_points/load_count each call — both passes below
@@ -688,7 +1114,12 @@ async def run_balancing(
         select(Task).where(Task.active.is_(True), Task.recurrence != Recurrence.daily)
     )
     already_assigned_task_ids = {a.task_id for a in current_assignments}
+    excluded_chain_child_ids = await chain_child_task_ids(db)
     for task in tasks_result.scalars().all():
+        if task.id in excluded_chain_child_ids:
+            # Has exactly one source of instances — whatever chain
+            # spawns it — so the sweep must never also hand it out.
+            continue
         task_by_id[task.id] = task
         p_start, p_end = _task_period(
             task, week_start, week_end, month_start, month_end
@@ -728,7 +1159,9 @@ async def run_balancing(
     )
     unclaimed_todos = {t.id: t for t in unclaimed_result.scalars().all()}
     candidate_todos = [
-        balancing.CandidateTodo(todo_id=t.id, points=t.points)
+        balancing.CandidateTodo(
+            todo_id=t.id, points=t.points, excluded_user_id=t.exclude_user_id
+        )
         for t in unclaimed_todos.values()
     ]
 
@@ -809,6 +1242,22 @@ async def run_balancing(
         load_points[from_uid] -= pts
         load_points[to_uid] += pts
         load_count[to_uid] += 1
+
+    if reassignments:
+        # The rebalance pass just moved these away from whoever held
+        # them — any pending takeover request asking someone ELSE to
+        # take one over is now asking about an assignment that holder
+        # doesn't have anymore.
+        await db.execute(
+            update(TakeoverRequest)
+            .where(
+                TakeoverRequest.task_assignment_id.in_(
+                    [row.id for row, *_ in reassignments]
+                ),
+                TakeoverRequest.status == TakeoverStatus.pending,
+            )
+            .values(status=TakeoverStatus.cancelled, responded_at=now)
+        )
 
     await db.commit()
     for row in new_task_assignments:
@@ -904,6 +1353,236 @@ async def run_scheduled_balancing_if_due(
     if settings.last_balance_run == today:
         return None
     return await run_balancing(db, as_of=today)
+
+
+# ---- Takeover requests ---------------------------------------------------
+
+
+async def get_task_assignment(
+    db: AsyncSession, assignment_id: int
+) -> TaskAssignment | None:
+    result = await db.execute(
+        select(TaskAssignment)
+        .options(
+            selectinload(TaskAssignment.task),
+            selectinload(TaskAssignment.household_user),
+        )
+        .where(TaskAssignment.id == assignment_id)
+    )
+    return result.scalar_one_or_none()
+
+
+def _takeover_query():
+    return select(TakeoverRequest).options(
+        selectinload(TakeoverRequest.requester),
+        selectinload(TakeoverRequest.target),
+        selectinload(TakeoverRequest.todo_item),
+        selectinload(TakeoverRequest.task_assignment).selectinload(TaskAssignment.task),
+    )
+
+
+async def get_takeover_request(
+    db: AsyncSession, request_id: int
+) -> TakeoverRequest | None:
+    result = await db.execute(_takeover_query().where(TakeoverRequest.id == request_id))
+    return result.scalar_one_or_none()
+
+
+async def list_takeover_requests(
+    db: AsyncSession, user_id: int, *, direction: str
+) -> list[TakeoverRequest]:
+    """`direction` is "incoming" (requests asking this user to take
+    something over) or "outgoing" (requests this user sent). Only the
+    still-actionable ones (pending) — once resolved, a request isn't
+    surfaced anywhere, same as this app keeps no general notifications
+    inbox."""
+    column = (
+        TakeoverRequest.target_id
+        if direction == "incoming"
+        else TakeoverRequest.requester_id
+    )
+    result = await db.execute(
+        _takeover_query()
+        .where(column == user_id, TakeoverRequest.status == TakeoverStatus.pending)
+        .order_by(TakeoverRequest.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def _validate_takeover_target(
+    db: AsyncSession,
+    requester: HouseholdUser,
+    target_id: int,
+    *,
+    exclude_user_id: int | None = None,
+) -> HouseholdUser:
+    if target_id == requester.id:
+        raise ValueError("Can't ask yourself to take over")
+    target = await _check_assignable(db, target_id)
+    # `role` is only a cached hint (see HouseholdUser's own docstring),
+    # but good enough here: a viewer can't call accept (can_write-gated)
+    # anyway, so without this the request would just dead-end pending
+    # forever instead of failing clearly at creation time.
+    if target.role == "viewer":
+        raise ValueError(f"{target.display_name} is a viewer and can't take over tasks")
+    if exclude_user_id is not None and target.id == exclude_user_id:
+        raise ValueError(f"{target.display_name} can't take over this item")
+    return target
+
+
+async def create_takeover_request_for_todo(
+    db: AsyncSession, todo: TodoItem, requester: HouseholdUser, target_id: int
+) -> TakeoverRequest:
+    if todo.assigned_to_id != requester.id:
+        raise ValueError("You don't currently hold this item")
+    if todo.status != TodoStatus.open:
+        raise ValueError(f"Can't hand over a todo that's already {todo.status.value}")
+    target = await _validate_takeover_target(
+        db, requester, target_id, exclude_user_id=todo.exclude_user_id
+    )
+    existing = await db.scalar(
+        select(TakeoverRequest.id).where(
+            TakeoverRequest.todo_item_id == todo.id,
+            TakeoverRequest.status == TakeoverStatus.pending,
+        )
+    )
+    if existing is not None:
+        raise ValueError("A takeover request is already pending for this item")
+    req = TakeoverRequest(
+        requester_id=requester.id, target_id=target.id, todo_item_id=todo.id
+    )
+    db.add(req)
+    await db.commit()
+    return await get_takeover_request(db, req.id)
+
+
+async def create_takeover_request_for_assignment(
+    db: AsyncSession,
+    assignment: TaskAssignment,
+    requester: HouseholdUser,
+    target_id: int,
+) -> TakeoverRequest:
+    if assignment.household_user_id != requester.id:
+        raise ValueError("You don't currently hold this assignment")
+    target = await _validate_takeover_target(db, requester, target_id)
+    existing = await db.scalar(
+        select(TakeoverRequest.id).where(
+            TakeoverRequest.task_assignment_id == assignment.id,
+            TakeoverRequest.status == TakeoverStatus.pending,
+        )
+    )
+    if existing is not None:
+        raise ValueError("A takeover request is already pending for this assignment")
+    req = TakeoverRequest(
+        requester_id=requester.id, target_id=target.id, task_assignment_id=assignment.id
+    )
+    db.add(req)
+    await db.commit()
+    return await get_takeover_request(db, req.id)
+
+
+async def accept_takeover_request(
+    db: AsyncSession, req: TakeoverRequest
+) -> TakeoverRequest:
+    """Hands the item to the target. Re-validates the requester still
+    holds it with a conditional UPDATE — same reasoning as claim_todo's:
+    the holder can change out from under a pending request (an admin
+    reassign, the balancer's rebalance pass, or the requester going on
+    break — though the latter two already cancel the request outright,
+    see run_balancing/_release_user_assignments) between the ask and
+    the answer. Raises ValueError if that race is lost; the request is
+    marked cancelled rather than left dangling in `pending`."""
+    now = datetime.now(UTC)
+    if req.todo_item_id is not None:
+        result = await db.execute(
+            update(TodoItem)
+            .where(
+                TodoItem.id == req.todo_item_id,
+                TodoItem.assigned_to_id == req.requester_id,
+                TodoItem.status == TodoStatus.open,
+            )
+            .values(assigned_to_id=req.target_id)
+        )
+    else:
+        result = await db.execute(
+            update(TaskAssignment)
+            .where(
+                TaskAssignment.id == req.task_assignment_id,
+                TaskAssignment.household_user_id == req.requester_id,
+            )
+            .values(household_user_id=req.target_id, reassigned_at=now)
+        )
+    if result.rowcount == 0:
+        req.status = TakeoverStatus.cancelled
+        req.responded_at = now
+        await db.commit()
+        raise ValueError("This item changed hands before the request could be accepted")
+    req.status = TakeoverStatus.accepted
+    req.responded_at = now
+    await db.commit()
+    return await get_takeover_request(db, req.id)
+
+
+async def decline_takeover_request(
+    db: AsyncSession, req: TakeoverRequest
+) -> TakeoverRequest:
+    req.status = TakeoverStatus.declined
+    req.responded_at = datetime.now(UTC)
+    await db.commit()
+    return await get_takeover_request(db, req.id)
+
+
+async def cancel_takeover_request(
+    db: AsyncSession, req: TakeoverRequest
+) -> TakeoverRequest:
+    req.status = TakeoverStatus.cancelled
+    req.responded_at = datetime.now(UTC)
+    await db.commit()
+    return await get_takeover_request(db, req.id)
+
+
+def _takeover_item_label(req: TakeoverRequest) -> str:
+    return req.todo_item.title if req.todo_item else req.task_assignment.task.name
+
+
+async def notify_takeover_requested(db: AsyncSession, req: TakeoverRequest) -> None:
+    """Fire-and-forget push to the target when someone asks them to
+    take something over. Called by the route AFTER create_takeover_
+    request_for_* already committed — push.send_to_subscriptions commits
+    internally, so calling it mid-transaction would split one logical
+    write into several (see _spawn_chain_children's own note)."""
+    subs = await get_subscriptions_for_user(db, req.target_id)
+    if not subs:
+        return
+    await push.send_to_subscriptions(
+        db,
+        subs,
+        {
+            "title": "Takeover request",
+            "body": f"{req.requester.display_name} asked you to take over: "
+            f"{_takeover_item_label(req)}",
+            "url": "/home",
+        },
+    )
+
+
+async def notify_takeover_responded(db: AsyncSession, req: TakeoverRequest) -> None:
+    """Fire-and-forget push to the requester once the target answers.
+    Same after-commit timing as notify_takeover_requested."""
+    subs = await get_subscriptions_for_user(db, req.requester_id)
+    if not subs:
+        return
+    verb = "accepted" if req.status == TakeoverStatus.accepted else "declined"
+    await push.send_to_subscriptions(
+        db,
+        subs,
+        {
+            "title": f"Takeover request {verb}",
+            "body": f"{req.target.display_name} {verb} your request for: "
+            f"{_takeover_item_label(req)}",
+            "url": "/home",
+        },
+    )
 
 
 # ---- Points -------------------------------------------------------------

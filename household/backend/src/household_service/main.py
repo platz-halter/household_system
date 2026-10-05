@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from household_service import crud, scheduler
 from household_service import reports as reports_pdf
-from household_service.models import ReportPeriod, TodoStatus
+from household_service.models import ReportPeriod, TakeoverStatus, TodoStatus
 from household_service.schemas import (
     ActivityDay,
     BalancingRunResult,
@@ -22,6 +22,9 @@ from household_service.schemas import (
     CategoryIn,
     CategoryOut,
     CategoryUpdate,
+    ChainLinkIn,
+    ChainLinkOut,
+    ChainParentOut,
     HouseholdSettingsOut,
     HouseholdSettingsUpdate,
     HouseholdUserBrief,
@@ -36,6 +39,8 @@ from household_service.schemas import (
     ReportCreate,
     ReportMarkPaidIn,
     ReportOut,
+    TakeoverRequestIn,
+    TakeoverRequestOut,
     TaskAssignmentOut,
     TaskCompleteRequest,
     TaskCreate,
@@ -44,6 +49,7 @@ from household_service.schemas import (
     TestPushResult,
     TodoCreate,
     TodoOut,
+    TodoReassignIn,
     TodoUpdate,
     VapidPublicKeyOut,
 )
@@ -268,7 +274,10 @@ async def list_tasks(
     _user: CurrentUser = Depends(can_read),
 ):
     tasks = await crud.list_tasks(db, active=active, category_id=category_id)
-    return [TaskOut.from_model(t) for t in tasks]
+    chain_child_ids = await crud.chain_child_task_ids(db)
+    return [
+        TaskOut.from_model(t, is_chain_child=t.id in chain_child_ids) for t in tasks
+    ]
 
 
 @app.post("/tasks", response_model=TaskOut, status_code=status.HTTP_201_CREATED)
@@ -283,7 +292,9 @@ async def create_task(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
-    return TaskOut.from_model(task)
+    return TaskOut.from_model(
+        task, is_chain_child=await crud.is_chain_child(db, task.id)
+    )
 
 
 # Must stay declared before /tasks/{task_id} below, same reason as
@@ -308,7 +319,9 @@ async def get_task(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
         )
-    return TaskOut.from_model(task)
+    return TaskOut.from_model(
+        task, is_chain_child=await crud.is_chain_child(db, task.id)
+    )
 
 
 @app.patch("/tasks/{task_id}", response_model=TaskOut)
@@ -329,7 +342,94 @@ async def patch_task(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
-    return TaskOut.from_model(task)
+    return TaskOut.from_model(
+        task, is_chain_child=await crud.is_chain_child(db, task.id)
+    )
+
+
+# ---- Chain tasks --------------------------------------------------------
+
+
+@app.get("/tasks/{task_id}/chain-links", response_model=list[ChainLinkOut])
+async def list_chain_links(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    task = await crud.get_task(db, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+    links = await crud.list_chain_links(db, task_id)
+    return [ChainLinkOut.from_model(link) for link in links]
+
+
+@app.get("/tasks/{task_id}/chain-parents", response_model=list[ChainParentOut])
+async def list_chain_parents(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    """Which task(s) chain this one — the reverse of chain-links above.
+    Used by the frontend to name them in the "already chained, complete
+    it directly anyway?" confirm before completing a chain-child task
+    with force=True (see TaskCompleteRequest)."""
+    task = await crud.get_task(db, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+    links = await crud.list_chain_parents(db, task_id)
+    return [ChainParentOut.from_model(link) for link in links]
+
+
+@app.post(
+    "/tasks/{task_id}/chain-links",
+    response_model=ChainLinkOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_chain_link(
+    task_id: int,
+    data: ChainLinkIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    task = await crud.get_task(db, task_id)
+    if task is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+    try:
+        link = await crud.create_chain_link(
+            db,
+            parent_task_id=task_id,
+            child_task_id=data.child_task_id,
+            same_user=data.same_user,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return ChainLinkOut.from_model(link)
+
+
+@app.delete(
+    "/tasks/{task_id}/chain-links/{link_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_chain_link(
+    task_id: int,
+    link_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    link = await crud.get_chain_link(db, link_id)
+    if link is None or link.parent_task_id != task_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Chain link not found"
+        )
+    await crud.delete_chain_link(db, link)
 
 
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -379,7 +479,9 @@ async def complete_task(
         target = await _self(db, user)
 
     try:
-        entry = await crud.complete_task(db, task, target)
+        entry = await crud.complete_task(
+            db, task, target, force=body.force if body else False
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
@@ -398,7 +500,7 @@ async def list_todos(
     _user: CurrentUser = Depends(can_read),
 ):
     todos = await crud.list_todos(db, status=todo_status, assigned_to_id=assigned_to_id)
-    return [TodoOut.model_validate(t) for t in todos]
+    return [TodoOut.from_model(t) for t in todos]
 
 
 @app.post("/todos", response_model=TodoOut, status_code=status.HTTP_201_CREATED)
@@ -415,7 +517,7 @@ async def create_todo(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
     await crud.notify_todo_assigned(db, todo, creator)
-    return TodoOut.model_validate(todo)
+    return TodoOut.from_model(todo)
 
 
 @app.patch("/todos/{todo_id}", response_model=TodoOut)
@@ -436,7 +538,7 @@ async def patch_todo(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
-    return TodoOut.model_validate(todo)
+    return TodoOut.from_model(todo)
 
 
 @app.post("/todos/{todo_id}/complete", response_model=TodoOut)
@@ -456,7 +558,7 @@ async def complete_todo(
             detail=f"Todo is already {todo.status.value}",
         )
     completer = await _self(db, user)
-    return TodoOut.model_validate(await crud.complete_todo(db, todo, completer))
+    return TodoOut.from_model(await crud.complete_todo(db, todo, completer))
 
 
 @app.post("/todos/{todo_id}/cancel", response_model=TodoOut)
@@ -475,7 +577,7 @@ async def cancel_todo(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Todo is already {todo.status.value}",
         )
-    return TodoOut.model_validate(await crud.cancel_todo(db, todo))
+    return TodoOut.from_model(await crud.cancel_todo(db, todo))
 
 
 @app.delete("/todos/{todo_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -509,7 +611,167 @@ async def claim_todo(
             status_code=status.HTTP_409_CONFLICT,
             detail="This item has already been claimed or assigned",
         )
-    return TodoOut.model_validate(todo)
+    return TodoOut.from_model(todo)
+
+
+@app.post("/todos/{todo_id}/reassign", response_model=TodoOut)
+async def reassign_todo(
+    todo_id: int,
+    data: TodoReassignIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    """Admin-only direct handoff — see crud.reassign_todo. Distinct from
+    a takeover request below, which needs the target's consent."""
+    todo = await crud.get_todo(db, todo_id)
+    if todo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found"
+        )
+    try:
+        todo = await crud.reassign_todo(db, todo, data.assigned_to_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return TodoOut.from_model(todo)
+
+
+# ---- Takeover requests -----------------------------------------------------
+
+
+@app.post(
+    "/todos/{todo_id}/takeover-requests",
+    response_model=TakeoverRequestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_todo_takeover_request(
+    todo_id: int,
+    data: TakeoverRequestIn,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    todo = await crud.get_todo(db, todo_id)
+    if todo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found"
+        )
+    requester = await _self(db, user)
+    try:
+        req = await crud.create_takeover_request_for_todo(
+            db, todo, requester, data.target_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    await crud.notify_takeover_requested(db, req)
+    return TakeoverRequestOut.from_model(req)
+
+
+@app.post(
+    "/assignments/{assignment_id}/takeover-requests",
+    response_model=TakeoverRequestOut,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_assignment_takeover_request(
+    assignment_id: int,
+    data: TakeoverRequestIn,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    assignment = await crud.get_task_assignment(db, assignment_id)
+    if assignment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Assignment not found"
+        )
+    requester = await _self(db, user)
+    try:
+        req = await crud.create_takeover_request_for_assignment(
+            db, assignment, requester, data.target_id
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    await crud.notify_takeover_requested(db, req)
+    return TakeoverRequestOut.from_model(req)
+
+
+@app.get("/takeover-requests", response_model=list[TakeoverRequestOut])
+async def list_takeover_requests(
+    direction: Literal["incoming", "outgoing"],
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_read),
+):
+    me = await _self(db, user)
+    requests = await crud.list_takeover_requests(db, me.id, direction=direction)
+    return [TakeoverRequestOut.from_model(r) for r in requests]
+
+
+async def _get_own_takeover_request(
+    db: AsyncSession, request_id: int, user: CurrentUser, *, as_target: bool
+):
+    req = await crud.get_takeover_request(db, request_id)
+    if req is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Takeover request not found"
+        )
+    me = await _self(db, user)
+    owner_id = req.target_id if as_target else req.requester_id
+    if owner_id != me.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Not your takeover request to respond to"
+            if as_target
+            else "Not your takeover request to cancel",
+        )
+    if req.status != TakeoverStatus.pending:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"This request is already {req.status.value}",
+        )
+    return req
+
+
+@app.post("/takeover-requests/{request_id}/accept", response_model=TakeoverRequestOut)
+async def accept_takeover_request(
+    request_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    req = await _get_own_takeover_request(db, request_id, user, as_target=True)
+    try:
+        req = await crud.accept_takeover_request(db, req)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    await crud.notify_takeover_responded(db, req)
+    return TakeoverRequestOut.from_model(req)
+
+
+@app.post("/takeover-requests/{request_id}/decline", response_model=TakeoverRequestOut)
+async def decline_takeover_request(
+    request_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    req = await _get_own_takeover_request(db, request_id, user, as_target=True)
+    req = await crud.decline_takeover_request(db, req)
+    await crud.notify_takeover_responded(db, req)
+    return TakeoverRequestOut.from_model(req)
+
+
+@app.post("/takeover-requests/{request_id}/cancel", response_model=TakeoverRequestOut)
+async def cancel_takeover_request(
+    request_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    req = await _get_own_takeover_request(db, request_id, user, as_target=False)
+    req = await crud.cancel_takeover_request(db, req)
+    return TakeoverRequestOut.from_model(req)
 
 
 # ---- Task assignments / balancing tool -----------------------------------
@@ -540,9 +802,7 @@ async def run_balancing(
         task_assignments=[
             TaskAssignmentOut.from_model(a) for a in outcome.new_task_assignments
         ],
-        todo_assignments=[
-            TodoOut.model_validate(t) for t in outcome.new_todo_assignments
-        ],
+        todo_assignments=[TodoOut.from_model(t) for t in outcome.new_todo_assignments],
         reassignments=[
             ReassignmentOut(
                 task_name=row.task.name,
