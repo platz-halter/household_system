@@ -6,4 +6,4 @@
 # kept in sync by hand alongside it (no publish step reads them — this
 # is a Docker-deployed app, not a published package — so there's no
 # tooling to automate the two staying in sync; just change both together).
-__version__ = "1.0.0"
+__version__ = "1.0.1"

@@ -1,9 +1,11 @@
 # Household System V2 — Project State
 
-**Version 1.0.0** — the first declared release: every `PROJECT_SPEC.md`
-item is implemented (see that file's own note at the top), production
-hardening and a full pre-deploy security pass are done (see this file's
-own entries below). `shared/src/shared/__init__.py`'s `__version__` is
+**Version 1.0.1** — patch release on top of 1.0.0 (the first declared
+release: every `PROJECT_SPEC.md` item implemented, production hardening
+and a full pre-deploy security pass done — see this file's own entries
+below). 1.0.1 makes the Authentik group→role mapping admin-editable
+(see its own entry under "Auth service"), on top of 1.0.0's Authentik
+connection panel. `shared/src/shared/__init__.py`'s `__version__` is
 the single source of truth, surfaced in every service's `GET /health`
 and OpenAPI `info.version`, and in both frontends' Settings page footer
 (`js/version.js`) — all five `pyproject.toml` files' `version` fields
@@ -280,6 +282,71 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     caller itself doesn't escape, and every other list-rendering
     template (items, tasks, categories, todos, rooms, reports) escapes
     each interpolated field individually at its actual render site.
+- ✅ **Authentik group → role mapping is now admin-editable**, extending
+  the Authentik connection panel rather than adding a new one — asked
+  for directly after walking through the previous answer (edit
+  `shared/src/shared/auth.py`'s `GROUP_ROLE_MAP` + both frontends'
+  `ROLE_FROM_GROUPS`, rebuild every backend and the storage frontend,
+  redeploy) and finding that friction worth removing the same way the
+  issuer/JWKS/client-id fields already were.
+  - `authentik_settings` gained three columns, `admin_group`/
+    `user_group`/`viewer_group` (new migration, `server_default`
+    matching the previous hardcoded names, `alembic check` and a
+    fresh-DB upgrade both verified clean). `shared/config.py` gained
+    matching `authentik_admin_group`/`_user_group`/`_viewer_group` env
+    fallbacks (same default values). `GET`/`PUT`/`POST
+    /authentik-config/reset` all extended to carry the three fields —
+    same reauth requirement as the rest of that endpoint, same risk
+    class (whoever controls the group mapping controls who's an admin,
+    same as whoever controls the JWKS source).
+  - **`shared/auth.py`'s `GROUP_ROLE_MAP` module-level dict is gone.**
+    `_role_from_groups(groups, config)` now takes the live config
+    (already fetched once per call by its only caller,
+    `_verify_authentik_token`) and checks the three group names in a
+    fixed admin > user > viewer precedence — simpler and more
+    predictable than the old dict-based version, which effectively
+    kept the token's own group *array order* as the ad-hoc tiebreak
+    whenever someone belonged to more than one recognised group (an
+    accident of the old implementation, not a designed behavior worth
+    preserving). Relies on the three names being distinct, which...
+  - **...`PUT /authentik-config` now enforces**: rejects (400) a blank
+    group name, or reusing one name across two roles. Caught during
+    design, before writing any save logic: reusing a name doesn't mean
+    "grant both roles" the way it might sound — the fixed precedence
+    check means only the first-checked role (admin) would ever
+    actually be reachable through that name, silently stranding the
+    other role's access. Simpler to reject outright than to document
+    an edge case nobody actually wants.
+  - **Verified end-to-end against the live stack**, same fake-IdP
+    methodology as the original panel (fresh throwaway RSA keypair +
+    ephemeral `python -m http.server` container on `hs-internal`, no
+    image pulled): saved a config with `admin_group` renamed to
+    `custom-renamed-admins` through the real `PUT` route with correct
+    reauth; a token minted with `groups: ["custom-renamed-admins"]`
+    was accepted as admin by `household-backend` (`GET /reports`, a
+    real admin-only route, 200) within seconds, no restart; the exact
+    same claim but with the **old** default group name
+    (`household-system-admins`) was correctly rejected (403, fell back
+    to `viewer`) — proving the rename actually took effect rather than
+    just adding to the old mapping. Also confirmed the duplicate-name
+    rejection live (`admin_group == viewer_group` → 400) and reset back
+    to `.env` defaults afterward. Temporary local admin (for reauth)
+    and the fake IdP container both cleaned up afterward, same
+    precedent as the original panel's test.
+  - **Deliberately out of scope, disclosed rather than silently
+    skipped**: both frontends' `ROLE_FROM_GROUPS` (`js/auth.js`) stays
+    a hardcoded, UI-display-only mirror — making it dynamic too would
+    mean converting `getCurrentUserInfo()` (called synchronously,
+    throughout both frontends, every time a page decides what to show
+    a given role) to async, a meaningfully bigger and riskier change
+    than what was actually asked for. The backend enforcement — the
+    real security boundary — is fully dynamic with no redeploy needed;
+    only the client-side display of role-gated UI elements can lag
+    behind an admin-panel group rename until that frontend is next
+    rebuilt, exactly the same "UI-only, needs manual sync" tradeoff
+    that already existed (see `CLAUDE.md`) before this change, just
+    narrowed from "every group rename" down to "a group rename, if you
+    want the UI to match it before the next deploy."
 
 ## Storage service — backend
 

@@ -83,16 +83,19 @@ export async function renderAdmin(container) {
       <div class="settings-section">
         <h3>Authentik connection</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Change the Authentik OIDC settings here instead of hand-editing
-          <code>.env</code> on the server — every service picks up a
+          Change the Authentik OIDC settings — including which Authentik
+          group grants which role — here instead of hand-editing
+          <code>.env</code> (and previously, for the group mapping, a
+          source-code edit) on the server. Every service picks up a
           change within about a minute, no restart needed. Changing the
           issuer, JWKS URL, or client ID will sign out anyone currently
-          logged in through Authentik (local accounts are unaffected).
-          Saving or resetting always requires your LOCAL admin password
-          below, even if you're signed in through Authentik right now —
-          whoever can repoint these values controls who every service
-          trusts as an admin, so a currently-valid session alone isn't
-          enough.
+          logged in through Authentik (local accounts are unaffected);
+          renaming a group only affects the next token that group's
+          members present. Saving or resetting always requires your
+          LOCAL admin password below, even if you're signed in through
+          Authentik right now — whoever can repoint these values
+          controls who every service trusts as an admin, so a
+          currently-valid session alone isn't enough.
         </p>
         <div id="authentik-config-root"></div>
       </div>
@@ -557,6 +560,15 @@ const AUTHENTIK_FIELDS = [
   ["scope", "Scope"],
 ];
 
+// Separate from AUTHENTIK_FIELDS only so the render can put a divider/
+// heading between the two groups — saved together, same request, same
+// reauth.
+const GROUP_ROLE_FIELDS = [
+  ["admin_group", "Admin group"],
+  ["user_group", "User group"],
+  ["viewer_group", "Viewer group"],
+];
+
 async function loadAuthentikConfig(container) {
   const root = container.querySelector("#authentik-config-root");
   if (!root) return;
@@ -573,6 +585,17 @@ async function loadAuthentikConfig(container) {
 
   root.innerHTML = `
     ${AUTHENTIK_FIELDS.map(
+      ([key, label]) => `
+      <div class="field">
+        <label for="ak-${key}">${label}</label>
+        <input class="input" id="ak-${key}" value="${escapeAttr(config[key])}" />
+      </div>`
+    ).join("")}
+    <p class="muted" style="font-size: var(--font-size-xs); margin: var(--space-3) 0 4px;">
+      Which Authentik group grants which role. Must all be different — reusing a name for two
+      roles makes the higher one unreachable, not shared.
+    </p>
+    ${GROUP_ROLE_FIELDS.map(
       ([key, label]) => `
       <div class="field">
         <label for="ak-${key}">${label}</label>
@@ -605,7 +628,9 @@ async function loadAuthentikConfig(container) {
 
   root.querySelector("#ak-save").addEventListener("click", async () => {
     const body = {
-      ...Object.fromEntries(AUTHENTIK_FIELDS.map(([key]) => [key, root.querySelector(`#ak-${key}`).value.trim()])),
+      ...Object.fromEntries(
+        [...AUTHENTIK_FIELDS, ...GROUP_ROLE_FIELDS].map(([key]) => [key, root.querySelector(`#ak-${key}`).value.trim()])
+      ),
       ...reauthBody(),
     };
     const btn = root.querySelector("#ak-save");

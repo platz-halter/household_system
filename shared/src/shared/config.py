@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     )
     authentik_end_session_url: str = "https://authentik.pressnet.duckdns.org/application/o/household-system/end-session/"
     authentik_scope: str = "openid profile email groups"
+    # Which Authentik group name maps to which app role — used to be a
+    # hardcoded dict (shared/auth.py's GROUP_ROLE_MAP) that needed a
+    # source edit + rebuild + redeploy to change. Same fallback-until-
+    # overridden pattern as the seven fields above.
+    authentik_admin_group: str = "household-system-admins"
+    authentik_user_group: str = "household-system-users"
+    authentik_viewer_group: str = "household-system-viewers"
 
     # The local auth service signs its own JWTs with this secret so other
     # services can verify them the same way they'd verify an Authentik

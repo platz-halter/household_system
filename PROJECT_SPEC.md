@@ -172,12 +172,15 @@ Tracks physical items (cellar, pantry, etc.).
     paid (reference only, same as the conversion rate above — no real
     payout is connected) to track which have actually been settled.
   - The Authentik connection itself (issuer, JWKS URL, client ID,
-    authorize/token/end-session URLs, scope) is editable here too,
-    instead of hand-editing `.env` on the server. Saving requires a
-    separate local-admin re-authentication (not just a currently-valid
-    admin session) and takes effect across every service within about
-    a minute, no restart needed — see `shared/auth.py` and
-    `auth_service.main`'s `/authentik-config` routes.
+    authorize/token/end-session URLs, scope, **and which Authentik
+    group name maps to which app role**) is editable here too, instead
+    of hand-editing `.env` — and, for the group mapping specifically,
+    instead of a source-code edit + rebuild — on the server. Saving
+    requires a separate local-admin re-authentication (not just a
+    currently-valid admin session) and takes effect across every
+    service within about a minute, no restart needed — see
+    `shared/auth.py` and `auth_service.main`'s `/authentik-config`
+    routes.
 - **Break mode**: a user can mark themselves on break (vacation,
   sickness), which excludes them from the leaderboard and from new task
   assignments until they turn it off. It only hides them from those two

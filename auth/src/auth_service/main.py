@@ -139,6 +139,9 @@ class AuthentikConfigOut(BaseModel):
     token_url: str
     end_session_url: str
     scope: str
+    admin_group: str
+    user_group: str
+    viewer_group: str
 
 
 class AuthentikConfigIn(AuthentikConfigOut):
@@ -163,6 +166,9 @@ def _env_fallback_authentik_config() -> AuthentikConfigOut:
         token_url=s.authentik_token_url,
         end_session_url=s.authentik_end_session_url,
         scope=s.authentik_scope,
+        admin_group=s.authentik_admin_group,
+        user_group=s.authentik_user_group,
+        viewer_group=s.authentik_viewer_group,
     )
 
 
@@ -186,6 +192,9 @@ async def get_authentik_config(db: AsyncSession = Depends(get_db)):
         token_url=row.token_url,
         end_session_url=row.end_session_url,
         scope=row.scope,
+        admin_group=row.admin_group,
+        user_group=row.user_group,
+        viewer_group=row.viewer_group,
     )
 
 
@@ -244,6 +253,29 @@ async def _validate_issuer(issuer: str, jwks_url: str) -> None:
         ) from exc
 
 
+def _validate_group_names(admin_group: str, user_group: str, viewer_group: str) -> None:
+    """Rejects blank or non-distinct group names before saving.
+    `shared.auth._role_from_groups` checks these in a fixed admin >
+    user > viewer order and relies on them being distinct — reusing the
+    same name for two roles would silently make the higher one
+    unreachable (whichever role is checked first always wins), not
+    "belongs to both," which is the opposite of what reusing a name
+    would look like it should do."""
+    names = {"admin_group": admin_group, "user_group": user_group, "viewer_group": viewer_group}
+    for field, value in names.items():
+        if not value.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{field} can't be blank",
+            )
+    if len({admin_group, user_group, viewer_group}) != 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="admin_group, user_group and viewer_group must all be different — "
+            "reusing one would make the higher role unreachable, not shared.",
+        )
+
+
 @app.put("/authentik-config", response_model=AuthentikConfigOut)
 async def put_authentik_config(
     body: AuthentikConfigIn,
@@ -256,6 +288,7 @@ async def put_authentik_config(
     to change it."""
     await _check_reauth(db, body.reauth_username, body.reauth_password)
     await _validate_issuer(body.issuer, body.jwks_url)
+    _validate_group_names(body.admin_group, body.user_group, body.viewer_group)
 
     row = await db.scalar(select(AuthentikSettings).limit(1))
     if row is None:
@@ -267,6 +300,9 @@ async def put_authentik_config(
             token_url=body.token_url,
             end_session_url=body.end_session_url,
             scope=body.scope,
+            admin_group=body.admin_group,
+            user_group=body.user_group,
+            viewer_group=body.viewer_group,
         )
         db.add(row)
     else:
@@ -277,6 +313,9 @@ async def put_authentik_config(
         row.token_url = body.token_url
         row.end_session_url = body.end_session_url
         row.scope = body.scope
+        row.admin_group = body.admin_group
+        row.user_group = body.user_group
+        row.viewer_group = body.viewer_group
     await db.commit()
     return AuthentikConfigOut(
         issuer=row.issuer,
@@ -286,6 +325,9 @@ async def put_authentik_config(
         token_url=row.token_url,
         end_session_url=row.end_session_url,
         scope=row.scope,
+        admin_group=row.admin_group,
+        user_group=row.user_group,
+        viewer_group=row.viewer_group,
     )
 
 

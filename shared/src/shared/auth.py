@@ -12,7 +12,11 @@ anything, and an Authentik session from someone else keeps working at
 the same time.
 
 Role mapping (Authentik groups -> app role) happens once, here, so it's
-defined in exactly one place rather than duplicated per service.
+defined in exactly one place rather than duplicated per service. Which
+group name maps to which role is itself admin-editable (see
+_role_from_groups below) rather than hardcoded — the one thing that
+still needs a manual, per-frontend edit if you rename a group is the
+UI-only display mirror, `ROLE_FROM_GROUPS` in both frontends' `auth.js`.
 """
 
 import time
@@ -30,14 +34,6 @@ settings = get_settings()
 bearer_scheme = HTTPBearer(auto_error=True)
 
 Role = Literal["admin", "user", "viewer"]
-
-# Authentik group name -> app role. Adjust to match the svc-<app> groups
-# actually created for this application in Authentik.
-GROUP_ROLE_MAP: dict[str, Role] = {
-    "household-system-admins": "admin",
-    "household-system-users": "user",
-    "household-system-viewers": "viewer",
-}
 
 
 @dataclass
@@ -59,6 +55,9 @@ def _env_fallback_config() -> dict[str, str]:
         "token_url": settings.authentik_token_url,
         "end_session_url": settings.authentik_end_session_url,
         "scope": settings.authentik_scope,
+        "admin_group": settings.authentik_admin_group,
+        "user_group": settings.authentik_user_group,
+        "viewer_group": settings.authentik_viewer_group,
     }
 
 
@@ -133,10 +132,23 @@ class _JWKSCache:
 _jwks_cache = _JWKSCache()
 
 
-def _role_from_groups(groups: list[str]) -> Role:
-    for group in groups:
-        if group in GROUP_ROLE_MAP:
-            return GROUP_ROLE_MAP[group]
+def _role_from_groups(groups: list[str], config: dict[str, str]) -> Role:
+    # Read fresh from the live config on every call rather than a
+    # module-level dict — this is what makes an admin-saved group
+    # rename take effect within the usual _AuthentikConfigCache TTL,
+    # with no restart, the same as the other seven Authentik fields.
+    # Checked in this fixed admin > user > viewer priority order (not
+    # whatever order the token happens to list its groups in, unlike
+    # the old dict-based lookup this replaced) — relies on
+    # PUT /authentik-config rejecting non-distinct group names, so
+    # there's no ambiguity about which one "wins" if a token somehow
+    # carries more than one recognised group.
+    if config["admin_group"] in groups:
+        return "admin"
+    if config["user_group"] in groups:
+        return "user"
+    if config["viewer_group"] in groups:
+        return "viewer"
     # Default to the least-privileged role if the token carries no
     # recognised group — fail closed, not open.
     return "viewer"
@@ -171,7 +183,7 @@ async def _verify_authentik_token(token: str) -> CurrentUser:
     groups = claims.get("groups", [])
     return CurrentUser(
         subject=claims.get("preferred_username", claims["sub"]),
-        role=_role_from_groups(groups),
+        role=_role_from_groups(groups, config),
         source="authentik",
     )
 

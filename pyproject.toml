@@ -1,6 +1,6 @@
 [project]
 name = "household-system"
-version = "1.0.0"
+version = "1.0.1"
 description = "Household Management System V2 — workspace root"
 requires-python = ">=3.12"
 dependencies = []

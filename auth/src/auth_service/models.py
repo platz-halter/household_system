@@ -27,7 +27,17 @@ class AuthentikSettings(Base):
     the current value through `GET /authentik-config`, which falls back
     to the static env defaults in `shared/config.py` while this table
     is empty, so a fresh deploy still works before anyone touches the
-    panel."""
+    panel.
+
+    `admin_group`/`user_group`/`viewer_group` are the Authentik group
+    *names* that map to each app role — previously a hardcoded dict
+    (`shared.auth.GROUP_ROLE_MAP`) that needed a source edit + rebuild
+    + redeploy of every backend plus the storage frontend to change.
+    `shared.auth._role_from_groups` now reads these the same
+    cached-and-polled way as the other seven fields; see its own
+    docstring for the one piece that's still a static, UI-only mirror
+    (both frontends' `ROLE_FROM_GROUPS`, for client-side role display
+    only — never used for actual authorization)."""
 
     __tablename__ = "authentik_settings"
 
@@ -39,3 +49,12 @@ class AuthentikSettings(Base):
     token_url: Mapped[str] = mapped_column(String(512))
     end_session_url: Mapped[str] = mapped_column(String(512))
     scope: Mapped[str] = mapped_column(String(255))
+    admin_group: Mapped[str] = mapped_column(
+        String(255), server_default="household-system-admins"
+    )
+    user_group: Mapped[str] = mapped_column(
+        String(255), server_default="household-system-users"
+    )
+    viewer_group: Mapped[str] = mapped_column(
+        String(255), server_default="household-system-viewers"
+    )
