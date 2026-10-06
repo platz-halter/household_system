@@ -6,6 +6,7 @@ import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { openTaskPickerModal } from "./taskPicker.js";
 import { takeoverControl } from "./takeover.js";
+import { openEventGroupPickerModal, openTriggerConfirmModal } from "./eventGroups.js";
 import { escapeHtml, escapeAttr, dueBadge, initials, showSkeletonAfterDelay } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -17,11 +18,37 @@ const STATUS_FILTERS = [
   { id: "", label: "All" },
 ];
 
-const state = { status: "open" };
+// Per-viewer display preference, not server state — wrapped in try/catch
+// since a private-browsing/blocked-storage context can throw on either
+// read or write (see artifact/storage guidance this codebase otherwise
+// follows for localStorage). Defaults to grouped: the whole point of
+// event groups is that "Dinner"'s tasks read as one occurrence, not
+// scattered board rows.
+function loadGroupByEventPref() {
+  try {
+    const v = localStorage.getItem("household.board.groupByEvent");
+    return v === null ? true : v === "true";
+  } catch {
+    return true;
+  }
+}
+function saveGroupByEventPref(value) {
+  try {
+    localStorage.setItem("household.board.groupByEvent", String(value));
+  } catch {
+    /* ignore — per-viewer convenience only */
+  }
+}
+
+const state = { status: "open", groupByEvent: loadGroupByEventPref() };
 let usersCache = null;
 let tasksCache = null;
 let categoriesCache = null;
 let meCache = null;
+// Last-fetched page of todos — kept so toggling "group by event" can
+// re-render instantly without a refetch (grouping is purely a render-time
+// concern; the status filter is the only thing that needs the server).
+let todosCache = [];
 // Pending takeover requests this user has sent — swaps a row's "ask to
 // take over" button for an "Asked {target} [cancel]" state (see
 // takeover.js). Refetched alongside every todo list refresh so it never
@@ -50,26 +77,58 @@ export async function renderBoard(container) {
   const writable = canWrite();
 
   container.innerHTML = `
-    <div class="page">
+    <div class="page${writable ? " page-dual-fab" : ""}">
       <div class="chip-row" id="status-chips" style="margin-bottom: var(--space-3);">
         ${STATUS_FILTERS.map((f) => `<span class="chip${state.status === f.id ? " chip-active" : ""}" data-status="${f.id}">${f.label}</span>`).join("")}
+        <span class="chip${state.groupByEvent ? " chip-active" : ""}" id="group-toggle-chip">${icons.checklist} Group by event</span>
       </div>
       <div id="todo-list" class="stack"></div>
     </div>
-    ${writable ? `<button class="fab" id="add-todo-fab" aria-label="New todo">${icons.plus}</button>` : ""}
+    ${
+      writable
+        ? `<button class="fab-secondary" id="trigger-event-group-fab" aria-label="Trigger an event group" title="Trigger an event group">${icons.calendar}</button>
+           <button class="fab" id="add-todo-fab" aria-label="New todo">${icons.plus}</button>`
+        : ""
+    }
   `;
 
-  container.querySelectorAll("#status-chips .chip").forEach((chip) => {
+  // Scoped to [data-status] — #group-toggle-chip now shares this same
+  // row (user feedback: it used to sit on its own line below) but isn't
+  // a status filter, so it must stay out of both this click handler and
+  // the chip-active reset it does, or clicking it would overwrite
+  // state.status with undefined and clear every status chip's active
+  // state in the process.
+  container.querySelectorAll("#status-chips .chip[data-status]").forEach((chip) => {
     chip.addEventListener("click", () => {
       state.status = chip.dataset.status;
-      container.querySelectorAll("#status-chips .chip").forEach((c) => c.classList.remove("chip-active"));
+      container.querySelectorAll("#status-chips .chip[data-status]").forEach((c) => c.classList.remove("chip-active"));
       chip.classList.add("chip-active");
       refreshTodos(container, writable);
     });
   });
 
+  container.querySelector("#group-toggle-chip").addEventListener("click", (e) => {
+    state.groupByEvent = !state.groupByEvent;
+    saveGroupByEventPref(state.groupByEvent);
+    e.currentTarget.classList.toggle("chip-active", state.groupByEvent);
+    renderTodoList(container, writable);
+  });
+
   if (writable) {
     container.querySelector("#add-todo-fab").addEventListener("click", () => openTodoModal(container));
+    // Its own dedicated FAB rather than a button buried in the New Todo
+    // modal's footer — user feedback called that "not intuitive and
+    // hard to find." A direct entry point: straight to the group
+    // picker, no detour through the todo form first.
+    container.querySelector("#trigger-event-group-fab").addEventListener("click", () => {
+      openEventGroupPickerModal({
+        onSelect: (group) => {
+          openTriggerConfirmModal(group, {
+            onTriggered: () => refreshTodos(container, true),
+          });
+        },
+      });
+    });
   }
 
   await refreshTodos(container, writable);
@@ -144,14 +203,117 @@ async function refreshTodos(container, writable) {
   }
   cancelSkeleton();
 
-  if (todos.length === 0) {
+  todosCache = todos;
+  renderTodoList(container, writable);
+}
+
+// Re-renders from todosCache without refetching — used both after a real
+// refresh and when the "group by event" toggle flips, since grouping is
+// purely how this function lays out already-fetched rows.
+function renderTodoList(container, writable) {
+  const root = container.querySelector("#todo-list");
+  if (!root) return;
+
+  if (todosCache.length === 0) {
     root.innerHTML = `<div class="empty-state">${icons.board}<p style="margin-top: var(--space-2);">Nothing here</p></div>`;
     return;
   }
 
   root.innerHTML = "";
-  todos.forEach((todo) => root.appendChild(todoRow(todo, container, writable)));
+  // Every member of a run is pulled into ONE card, together, regardless
+  // of where each one sits in todosCache's own order — a chain
+  // descendant tagged with the same run usually spawns later (after its
+  // root is created) and so would otherwise land far below its root in
+  // a plain flat render. The card appears at the position of whichever
+  // member comes FIRST in list order (usually a root); every later
+  // member of that same run is skipped here since it's already inside
+  // that card.
+  const renderedRuns = new Set();
+  todosCache.forEach((todo) => {
+    if (state.groupByEvent && todo.event_group_run_id) {
+      if (renderedRuns.has(todo.event_group_run_id)) return;
+      renderedRuns.add(todo.event_group_run_id);
+      const members = todosCache.filter((t) => t.event_group_run_id === todo.event_group_run_id);
+      root.appendChild(eventCard(todo, members, container, writable));
+      return;
+    }
+    root.appendChild(todoRow(todo, container, writable));
+  });
   hydrateAvatars(root);
+}
+
+// One bordered card per EventGroupRun — so its members visually read as
+// "belong together," not just a heading floating above an otherwise
+// plain flat list (user feedback). Only ever shown while "group by
+// event" is on; the bulk-delete button below lives here too, so it's
+// only reachable in grouped view as well — flagged in the report, not
+// silently decided.
+function eventCard(firstTodo, members, container, writable) {
+  const card = document.createElement("div");
+  card.className = "event-card";
+  card.innerHTML = `
+    <div class="event-card-header">
+      <div class="event-card-title-group">
+        <span class="event-card-title">${escapeHtml(firstTodo.event_group_name || "Event")}</span>
+        <span class="event-card-date">${formatGroupDate(firstTodo.event_group_triggered_at)}</span>
+      </div>
+      ${writable ? `<button class="btn btn-icon btn-ghost" data-action="delete-event" aria-label="Delete this event" title="Delete this event">${icons.trash}</button>` : ""}
+    </div>
+    <div class="event-card-body stack"></div>
+  `;
+  const body = card.querySelector(".event-card-body");
+  members.forEach((m) => body.appendChild(todoRow(m, container, writable)));
+
+  if (writable) {
+    card.querySelector('[data-action="delete-event"]').addEventListener("click", () => {
+      openDeleteEventModal(container, writable, firstTodo.event_group_run_id, firstTodo.event_group_name);
+    });
+  }
+  return card;
+}
+
+// Bulk-delete everything from one event group run. A real delete, not a
+// cancel (user asked for "delete," and a soft cancel would just
+// reappear under the Cancelled/All filters) — crud.
+// delete_event_group_run_todos keeps anything already completed rather
+// than sweeping it away, so the warning has to name exactly what WILL
+// go, from the same server-side computation that performs the delete,
+// not a client-side guess from todosCache (which wouldn't know about a
+// chain descendant excluded from the group's own tag).
+async function openDeleteEventModal(container, writable, runId, groupName) {
+  let preview;
+  try {
+    preview = await api.get(`${HB}/event-group-runs/${runId}/delete-preview`);
+  } catch {
+    return; // api.js already showed a toast
+  }
+  if (preview.to_delete.length === 0) {
+    showToast("Nothing to delete — everything in this event is already completed", "warning");
+    return;
+  }
+  const names = preview.to_delete.map((t) => t.title).join(", ");
+  const keptNote = preview.to_keep.length
+    ? ` ${preview.to_keep.length} completed task${preview.to_keep.length === 1 ? "" : "s"} will be kept.`
+    : "";
+  const ok = await showConfirmDialog({
+    title: "Delete event",
+    message: `Delete "${groupName || "this event"}"? This permanently removes: ${names}.${keptNote}`,
+    confirmLabel: "Delete",
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const result = await api.post(`${HB}/event-group-runs/${runId}/delete`);
+    showToast(`Deleted ${result.to_delete.length} task${result.to_delete.length === 1 ? "" : "s"}`, "success");
+    refreshTodos(container, writable);
+  } catch {
+    /* api.js already showed a toast */
+  }
+}
+
+function formatGroupDate(iso) {
+  if (!iso) return "";
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(iso));
 }
 
 // Photos load in after the initial render rather than blocking it.
@@ -185,11 +347,29 @@ function todoRow(todo, container, writable) {
         : badge
           ? `<span class="badge badge-${badge.tone}">${escapeHtml(badge.label)}</span>`
           : "";
+  // "Chained from," not "After" — chain children now spawn alongside
+  // their parent, not once it's completed, so this row can easily be
+  // sitting open at the same time as the parent it's chained from, not
+  // strictly after it.
   const chainBadge = todo.chain_parent_task_name
-    ? `<span class="badge badge-neutral">After: ${escapeHtml(todo.chain_parent_task_name)}</span>`
+    ? `<span class="badge badge-neutral">Chained from: ${escapeHtml(todo.chain_parent_task_name)}</span>`
+    : "";
+  // Shown regardless of the "group by event" toggle — when grouping is
+  // off there's no cluster header to carry this information, and even
+  // when it's on, a row can end up far from its header (see
+  // renderTodoList), so the badge is the only reliable place to see it.
+  const eventBadge = todo.event_group_name
+    ? `<span class="badge badge-info">${escapeHtml(todo.event_group_name)}</span>`
     : "";
 
-  const iHoldIt = writable && meCache && todo.assigned_to && todo.assigned_to.id === meCache.id;
+  // Also requires status === "open": the `.takeover-slot` markup below
+  // only renders inside the open-only actions block, so without this a
+  // completed/cancelled todo you still happen to hold (nothing clears
+  // assigned_to on completion/cancel) would try to replaceWith() a slot
+  // that was never rendered — found live by filtering the Board to
+  // "Completed" while signed in as whoever held one.
+  const iHoldIt =
+    writable && meCache && todo.status === "open" && todo.assigned_to && todo.assigned_to.id === meCache.id;
 
   row.innerHTML = `
     <div class="list-row-body">
@@ -199,7 +379,8 @@ function todoRow(todo, container, writable) {
         ${assignee}
         ${statusBadge}
         ${chainBadge}
-        <span>by ${escapeHtml(todo.created_by.display_name)}</span>
+        ${eventBadge}
+        <span>${todo.created_by ? `by ${escapeHtml(todo.created_by.display_name)}` : "Scheduled"}</span>
       </div>
     </div>
     <div class="list-row-points"><span>${todo.points}</span><span class="muted">pts</span></div>
@@ -265,9 +446,21 @@ function todoRow(todo, container, writable) {
       }
     });
     row.querySelector('[data-action="cancel"]').addEventListener("click", async () => {
+      // Cancelling deletes any still-open chain task(s) this todo
+      // pre-spawned at its own creation (crud.cancel_todo) — warn by
+      // name before doing it, rather than silently removing them.
+      let chainChildren = [];
+      try {
+        chainChildren = await api.get(`${HB}/todos/${todo.id}/chain-children`, { silent: true });
+      } catch {
+        chainChildren = [];
+      }
+      const message = chainChildren.length
+        ? `Cancel "${todo.title}"? This will also delete its chain task${chainChildren.length === 1 ? "" : "s"}: ${chainChildren.map((c) => c.title).join(", ")}.`
+        : `Cancel "${todo.title}"?`;
       const ok = await showConfirmDialog({
         title: "Cancel todo",
-        message: `Cancel "${todo.title}"?`,
+        message,
         confirmLabel: "Cancel todo",
         danger: true,
       });
@@ -357,6 +550,10 @@ async function openTodoModal(container) {
             ${icons.chevronRight}
           </button>
         </div>
+        <div class="field hidden" id="t-chain-field">
+          <label class="row"><input type="checkbox" id="t-spawn-chain" checked /> <span>Also create its chain task(s) now</span></label>
+          <p class="muted" id="t-chain-preview" style="font-size: var(--font-size-xs); margin: 4px 0 0 24px;"></p>
+        </div>
         <div class="field">
           <label for="t-title">Title</label>
           <input class="input" id="t-title" required />
@@ -410,16 +607,58 @@ async function openTodoModal(container) {
   // list on mobile once there are more than a handful of tasks — a
   // popup picker with search + category filtering stays usable at any
   // size (see openTaskPickerModal).
+  // Set when a real task is picked (not "Custom") — sent as
+  // source_task_id so its chain children spawn immediately alongside
+  // this todo (crud._spawn_chain_children_on_creation), the same as an
+  // event group's own root todos. Stays set even if the prefilled
+  // title/points get edited afterward — it's still logically an
+  // instance of that task's occurrence.
+  let selectedSourceTaskId = null;
+  const chainFieldEl = overlay.querySelector("#t-chain-field");
+  const spawnChainCheckbox = overlay.querySelector("#t-spawn-chain");
+  const chainPreviewEl = overlay.querySelector("#t-chain-preview");
+  // Discards a stale fetch's result if picking task A, then quickly
+  // picking task B before A's own GET /chain-links lands — without
+  // this, A's chain task names could render under B's checkbox.
+  let chainLinksSeq = 0;
+  function renderChainPreview(links) {
+    chainPreviewEl.textContent = spawnChainCheckbox.checked
+      ? `Will also create: ${links.map((l) => l.child_task_name).join(", ")}`
+      : "";
+  }
   overlay.querySelector("#t-task-btn").addEventListener("click", () => {
     openTaskPickerModal({
       tasks,
       categories,
       customOption: { label: "Custom (one-off)" },
-      onSelect: (task) => {
+      onSelect: async (task) => {
+        selectedSourceTaskId = task ? task.id : null;
         overlay.querySelector("#t-task-label").textContent = task ? task.name : "Custom (one-off)";
         overlay.querySelector("#t-title").value = task ? task.name : "";
         overlay.querySelector("#t-description").value = task ? task.description || "" : "";
         overlay.querySelector("#t-points").value = task ? task.points : 1;
+
+        // The checkbox only matters — and only shows — when the picked
+        // task actually has a chain task to skip; nothing to deactivate
+        // otherwise. Defaults checked (spawn) every time a new task is
+        // picked, so an earlier uncheck doesn't silently carry over to
+        // a different task.
+        spawnChainCheckbox.checked = true;
+        chainFieldEl.classList.add("hidden");
+        chainPreviewEl.textContent = "";
+        const seq = ++chainLinksSeq;
+        if (task) {
+          let links = [];
+          try {
+            links = await api.get(`${HB}/tasks/${task.id}/chain-links`, { silent: true });
+          } catch {
+            links = [];
+          }
+          if (seq !== chainLinksSeq) return; // a newer pick already landed
+          chainFieldEl.classList.toggle("hidden", links.length === 0);
+          renderChainPreview(links);
+          spawnChainCheckbox.onchange = () => renderChainPreview(links);
+        }
       },
     });
   });
@@ -439,6 +678,8 @@ async function openTodoModal(container) {
       points: Number(overlay.querySelector("#t-points").value || 0),
       due_in_days: dueRaw === "" ? null : Number(dueRaw),
       assigned_to_id: assigneeRaw === "" ? null : Number(assigneeRaw),
+      source_task_id: selectedSourceTaskId,
+      spawn_chain_children: spawnChainCheckbox.checked,
     };
 
     try {
@@ -446,7 +687,7 @@ async function openTodoModal(container) {
       showToast("Posted to the board", "success");
       close();
       state.status = "open";
-      container.querySelectorAll("#status-chips .chip").forEach((c) => c.classList.toggle("chip-active", c.dataset.status === "open"));
+      container.querySelectorAll("#status-chips .chip[data-status]").forEach((c) => c.classList.toggle("chip-active", c.dataset.status === "open"));
       refreshTodos(container, true);
     } catch {
       /* api.js already showed a toast */

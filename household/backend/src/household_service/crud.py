@@ -1,7 +1,9 @@
 import calendar
+import logging
 import math
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,8 +11,14 @@ from sqlalchemy.orm import selectinload
 
 from household_service import balancing, push
 from household_service import reports as reports_pdf
+
+logger = logging.getLogger(__name__)
 from household_service.models import (
     Category,
+    EventGroup,
+    EventGroupExclusion,
+    EventGroupRun,
+    EventGroupTask,
     HouseholdSettings,
     HouseholdUser,
     Notification,
@@ -31,6 +39,7 @@ from household_service.models import (
 from household_service.schemas import (
     CategoryIn,
     CategoryUpdate,
+    EventGroupIn,
     HouseholdSettingsUpdate,
     HouseholdUserUpdate,
     PushSubscriptionIn,
@@ -432,6 +441,422 @@ async def delete_chain_link(db: AsyncSession, link: TaskChainLink) -> None:
     await db.commit()
 
 
+# ---- Event groups ---------------------------------------------------------
+
+
+def _event_group_query():
+    return select(EventGroup).options(
+        selectinload(EventGroup.roots).selectinload(EventGroupTask.task),
+        selectinload(EventGroup.exclusions),
+    )
+
+
+async def list_event_groups(db: AsyncSession) -> list[EventGroup]:
+    result = await db.execute(_event_group_query().order_by(EventGroup.name))
+    return list(result.scalars().unique().all())
+
+
+async def get_event_group(db: AsyncSession, group_id: int) -> EventGroup | None:
+    result = await db.execute(_event_group_query().where(EventGroup.id == group_id))
+    return result.scalar_one_or_none()
+
+
+async def _validate_event_group_roots(db: AsyncSession, task_ids: list[int]) -> None:
+    """A root must be a real, active, independently-schedulable task —
+    the same "one source of instances" reasoning that already excludes
+    a chain-child task from direct completion and the balancer's sweep
+    applies here too: letting an already-chained task also be a group
+    root would give it a second, independent way to spawn instances."""
+    for task_id in task_ids:
+        task = await get_task(db, task_id)
+        if task is None:
+            raise ValueError(f"Unknown task id: {task_id}")
+        if not task.active:
+            raise ValueError(
+                f'"{task.name}" is inactive and can\'t be in an event group'
+            )
+        if await is_chain_child(db, task_id):
+            raise ValueError(
+                f'"{task.name}" is already a chain task and can\'t also be an '
+                "event group root — chain it from one of the group's roots instead"
+            )
+
+
+async def create_event_group(db: AsyncSession, data: EventGroupIn) -> EventGroup:
+    existing = await db.scalar(
+        select(EventGroup.id).where(EventGroup.name == data.name)
+    )
+    if existing is not None:
+        raise ValueError("An event group with this name already exists")
+    await _validate_event_group_roots(db, data.root_task_ids)
+
+    group = EventGroup(
+        name=data.name,
+        schedule_recurrence=data.schedule_recurrence,
+        schedule_weekdays=data.schedule_weekdays,
+        schedule_hour=data.schedule_hour,
+    )
+    db.add(group)
+    await db.flush()
+    _add_event_group_members(db, group.id, data)
+    await db.commit()
+    return await get_event_group(db, group.id)
+
+
+async def update_event_group(
+    db: AsyncSession, group: EventGroup, data: EventGroupIn
+) -> EventGroup:
+    if data.name != group.name:
+        existing = await db.scalar(
+            select(EventGroup.id).where(
+                EventGroup.name == data.name, EventGroup.id != group.id
+            )
+        )
+        if existing is not None:
+            raise ValueError("An event group with this name already exists")
+    await _validate_event_group_roots(db, data.root_task_ids)
+
+    group.name = data.name
+    group.schedule_recurrence = data.schedule_recurrence
+    group.schedule_weekdays = data.schedule_weekdays
+    group.schedule_hour = data.schedule_hour
+    # Wholesale replace — same "PATCH just resends the whole set"
+    # semantics as Task.category_ids — simpler than diffing, and this
+    # app's scale (a handful of roots/exclusions per group) makes the
+    # delete-and-reinsert cost a non-issue.
+    await db.execute(
+        delete(EventGroupTask).where(EventGroupTask.event_group_id == group.id)
+    )
+    await db.execute(
+        delete(EventGroupExclusion).where(
+            EventGroupExclusion.event_group_id == group.id
+        )
+    )
+    _add_event_group_members(db, group.id, data)
+    await db.commit()
+    return await get_event_group(db, group.id)
+
+
+def _add_event_group_members(
+    db: AsyncSession, group_id: int, data: EventGroupIn
+) -> None:
+    """Shared by create/update — must be called on a session with the
+    group's own old membership rows already gone (update_event_group)
+    or never having existed (create_event_group). Not itself async: it
+    only calls db.add, which doesn't hit the database — the caller
+    commits once after this returns."""
+    root_ids = list(dict.fromkeys(data.root_task_ids))  # de-dupe, keep order
+    # A root can't also be excluded — silently drop the overlap rather
+    # than erroring, since the frontend never offers that combination
+    # in the first place (a root is never shown as a descendant to
+    # exclude from its own group).
+    excluded_ids = set(data.excluded_task_ids) - set(root_ids)
+    for position, task_id in enumerate(root_ids, start=1):
+        db.add(
+            EventGroupTask(event_group_id=group_id, task_id=task_id, position=position)
+        )
+    for task_id in excluded_ids:
+        db.add(EventGroupExclusion(event_group_id=group_id, task_id=task_id))
+
+
+async def delete_event_group(db: AsyncSession, group: EventGroup) -> None:
+    await db.delete(group)
+    await db.commit()
+
+
+async def get_event_group_run(db: AsyncSession, run_id: int) -> EventGroupRun | None:
+    return await db.get(EventGroupRun, run_id)
+
+
+async def preview_event_group(
+    db: AsyncSession, root_task_ids: list[int], excluded_task_ids: list[int]
+) -> list[dict]:
+    """Computes the full set of tasks an event group covers RIGHT NOW:
+    every root, plus each root's current direct chain children — the
+    one-level chain cap (see TaskChainLink) means that's the entire
+    tree, no recursion needed. Deliberately stateless (task ids in, not
+    a saved EventGroup) so the exact same computation serves the
+    create-modal's live preview (before a group has ever been saved)
+    and a fresh pre-trigger preview — a chain link added after the
+    group was saved shows up automatically either way, since this never
+    reads cached membership for which descendants exist, only for which
+    ones are excluded."""
+    excluded = set(excluded_task_ids)
+    items: list[dict] = []
+    for task_id in root_task_ids:
+        task = await get_task(db, task_id)
+        if task is None:
+            continue
+        items.append(
+            {
+                "task_id": task.id,
+                "task_name": task.name,
+                "points": task.points,
+                "is_root": True,
+                "parent_task_name": None,
+                "excluded": False,
+            }
+        )
+        links = await list_chain_links(db, task_id)
+        for link in links:
+            items.append(
+                {
+                    "task_id": link.child_task_id,
+                    "task_name": link.child_task.name,
+                    "points": link.child_task.points,
+                    "is_root": False,
+                    "parent_task_name": task.name,
+                    "excluded": link.child_task_id in excluded,
+                }
+            )
+    return items
+
+
+async def trigger_event_group(
+    db: AsyncSession, group: EventGroup, user: HouseholdUser | None
+) -> tuple[EventGroupRun, list[TodoItem]]:
+    """Creates one open TodoItem per root task, all tagged with a new
+    EventGroupRun, fairly distributed across eligible users in one
+    batch — the same fairness picture (`_gather_balancer_load`) and
+    balancing logic (`balancing.balance`) the daily sweep uses, just run
+    once immediately instead of waiting for it. Re-validates the roots
+    (a task could have gone inactive or become someone's chain child
+    since the group was saved) rather than trusting the saved
+    membership blindly.
+
+    `user` is None only for a scheduled auto-trigger
+    (run_scheduled_event_groups_if_due) — there's no human actor for
+    that, so `EventGroupRun.triggered_by_id`/`TodoItem.created_by_id`
+    are both left null rather than attributed to whoever happens to be
+    the admin running the server."""
+    if not group.roots:
+        raise ValueError("This event group has no tasks yet")
+    await _validate_event_group_roots(db, [r.task_id for r in group.roots])
+
+    run = EventGroupRun(
+        event_group_id=group.id, triggered_by_id=user.id if user else None
+    )
+    db.add(run)
+    await db.flush()
+
+    today = datetime.now(UTC).date()
+    created: list[TodoItem] = []
+    for root in group.roots:
+        todo = TodoItem(
+            title=root.task.name,
+            description=root.task.description,
+            points=root.task.points,
+            due_date=today,
+            created_by_id=user.id if user else None,
+            source_task_id=root.task_id,
+            event_group_run_id=run.id,
+            # A root's own chain children get spawned below, right in
+            # this same trigger — never a second time at completion.
+            chain_spawn_handled=True,
+        )
+        db.add(todo)
+        created.append(todo)
+    await db.flush()  # need ids for CandidateTodo below
+
+    all_users = await list_household_users(db)
+    eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
+    if eligible:
+        settings = await get_settings_row(db)
+        week_start, _week_end = _resolve_period(
+            ReportPeriod.week, today, settings.week_start_weekday
+        )
+        (
+            load_points,
+            load_count,
+            points_this_week,
+            _current,
+            _remaining,
+        ) = await _gather_balancer_load(db, eligible, today, week_start)
+        balancing_users = [
+            balancing.EligibleUser(
+                user_id=u.id,
+                points_this_week=points_this_week[u.id],
+                already_assigned_points=load_points[u.id],
+                already_assigned_count=load_count[u.id],
+            )
+            for u in eligible
+        ]
+        # Must exceed everyone's current count plus this whole batch —
+        # same reasoning as _assign_chain_todo_now's own cap: this call
+        # hands out a fixed number of items in one go, not a capped
+        # daily ration, so nobody should be skipped just for already
+        # holding something.
+        max_new_items_per_user = max(load_count.values(), default=0) + len(created)
+        result = balancing.balance(
+            users=balancing_users,
+            tasks=[],
+            todos=[
+                balancing.CandidateTodo(todo_id=t.id, points=t.points) for t in created
+            ],
+            max_new_items_per_user=max_new_items_per_user,
+        )
+        for todo in created:
+            picked = result.todo_assignments.get(todo.id)
+            if picked is not None:
+                todo.assigned_to_id = picked
+
+    # Each root's own chain children spawn now too, not just at its
+    # eventual completion — same request as the New Todo / "From task"
+    # path (crud.create_todo). Must happen AFTER the batch balance pass
+    # above, since a same_user child's/different_user exclusion's
+    # anchor is the root's FINAL assigned_to_id, not an intermediate
+    # unassigned state. `root_todo` (not the fresh refetch below) is
+    # kept around per child so each notification can name its own root.
+    spawned: list[tuple[TodoItem, list[TodoItem]]] = []
+    for root_todo in created:
+        children = await _spawn_chain_children_on_creation(
+            db, parent_todo=root_todo, event_group_run_id=run.id
+        )
+        spawned.append((root_todo, children))
+
+    await db.commit()
+
+    root_ids = {t.id for t in created}
+    all_ids = list(root_ids) + [c.id for _root, children in spawned for c in children]
+    result = await db.execute(
+        _todo_query().where(TodoItem.id.in_(all_ids)).order_by(TodoItem.id)
+    )
+    fresh_todos = list(result.scalars().all())
+    for todo in fresh_todos:
+        if todo.id not in root_ids or todo.assigned_to_id is None:
+            continue
+        if user is not None:
+            await notify_todo_assigned(db, todo, user)
+        else:
+            # notify_todo_assigned's "X asked you to" wording needs a
+            # requester — a scheduled trigger has none, so this gets its
+            # own body naming the group instead.
+            await _notify(
+                db,
+                todo.assigned_to_id,
+                title="New scheduled task",
+                body=f'"{group.name}" created: {todo.title}',
+                url="/board",
+            )
+    for root_todo, children in spawned:
+        for child in children:
+            if child.assigned_to_id is not None:
+                await notify_chain_child_spawned(db, child, root_todo.title)
+    return run, fresh_todos
+
+
+def _event_group_due(
+    recurrence: str | None,
+    weekdays: list[int] | None,
+    hour: int,
+    ran_today: bool,
+    now: datetime,
+    *,
+    tz: str = "UTC",
+) -> bool:
+    """Pure predicate behind run_scheduled_event_groups_if_due, kept
+    separate so it's unit-testable without waiting for a real clock
+    hour to roll around. An exact hour match, not `>=` — same reasoning
+    as run_scheduled_nudge_if_due: `>=` would fire immediately the
+    moment someone saves a schedule whose hour already passed today,
+    and would fire a whole backlog of missed hours after downtime
+    instead of just the one tick that's actually due.
+
+    `now` is the real instant (any aware datetime — UTC in practice);
+    `tz` is HouseholdSettings.timezone, and the hour/weekday check is
+    done against `now` converted INTO that zone, not raw UTC — an
+    admin picking "18" means 18:00 in their own timezone, not UTC,
+    which this used to assume (user report: "Time for time scheduled
+    event groups is in UTC"). Defaults to "UTC" so every existing call
+    site/test that doesn't pass `tz` keeps its old, exact behavior.
+
+    DST caveat, not handled specially: on a spring-forward day, a
+    schedule set for the hour that gets skipped (e.g. 02:00 in a zone
+    that jumps 02:00->03:00) simply never matches that day — there's
+    no "02:00" to compare against. On a fall-back day, the repeated
+    hour matches on its first occurrence; `ran_today` then suppresses
+    the second."""
+    if recurrence is None or ran_today:
+        return False
+    local_now = now.astimezone(ZoneInfo(tz))
+    if local_now.hour != hour:
+        return False
+    if recurrence == "daily":
+        return True
+    if recurrence == "weekly":
+        return bool(weekdays) and local_now.weekday() in weekdays
+    return False
+
+
+async def run_scheduled_event_groups_if_due(
+    db: AsyncSession, *, now: datetime | None = None
+) -> list[tuple[EventGroup, EventGroupRun, list[TodoItem]]]:
+    """Called hourly by household_service.scheduler. Checks every
+    scheduled group independently (`now` injectable so a live tick can
+    be run on demand — in tests, or to verify this without waiting for
+    the clock to actually reach the right hour). "Already ran today"
+    counts a MANUAL trigger too, not just a previous scheduled one —
+    triggering "Dinner" by hand earlier the same day should suppress
+    tonight's automatic one, not produce a second Dinner. "Today" here
+    means the household's configured local calendar day (Household
+    Settings.timezone), not UTC's — `since`/`until` are that local
+    day's own midnight-to-midnight span, converted to UTC for the
+    query, which stays correct across a DST shift (that day is 23 or
+    25 hours long in UTC terms, and this captures exactly that span,
+    not a flat 24h window).
+
+    One group's failure (e.g. a root went inactive since the group was
+    saved — trigger_event_group raises ValueError) is caught and logged
+    rather than aborting every other group's check in the same tick;
+    the rollback matters because a failed flush/commit leaves the
+    session unusable for whatever runs next in the same tick otherwise."""
+    now = now or datetime.now(UTC)
+    settings = await get_settings_row(db)
+    tz = ZoneInfo(settings.timezone)
+    local_today = now.astimezone(tz).date()
+    since = datetime.combine(local_today, time.min, tzinfo=tz).astimezone(UTC)
+    until = datetime.combine(local_today, time.max, tzinfo=tz).astimezone(UTC)
+
+    result = await db.execute(
+        select(EventGroup)
+        .where(EventGroup.schedule_recurrence.is_not(None))
+        .options(selectinload(EventGroup.roots).selectinload(EventGroupTask.task))
+    )
+    groups = list(result.scalars().all())
+
+    triggered: list[tuple[EventGroup, EventGroupRun, list[TodoItem]]] = []
+    for group in groups:
+        ran_today = await db.scalar(
+            select(EventGroupRun.id).where(
+                EventGroupRun.event_group_id == group.id,
+                EventGroupRun.triggered_at >= since,
+                EventGroupRun.triggered_at <= until,
+            )
+        )
+        if not _event_group_due(
+            group.schedule_recurrence,
+            group.schedule_weekdays,
+            group.schedule_hour,
+            ran_today is not None,
+            now,
+            tz=settings.timezone,
+        ):
+            continue
+        try:
+            run, todos = await trigger_event_group(db, group, None)
+        except ValueError:
+            logger.warning(
+                "Scheduled trigger of event group %s (%r) failed",
+                group.id,
+                group.name,
+                exc_info=True,
+            )
+            await db.rollback()
+            continue
+        triggered.append((group, run, todos))
+    return triggered
+
+
 async def _completions_today_count(db: AsyncSession, task_id: int) -> int:
     today = datetime.now(UTC).date()
     since = datetime.combine(today, time.min, tzinfo=UTC)
@@ -546,6 +971,7 @@ def _todo_query():
         selectinload(TodoItem.assigned_to),
         selectinload(TodoItem.completed_by),
         selectinload(TodoItem.chain_link).selectinload(TaskChainLink.parent_task),
+        selectinload(TodoItem.event_group_run).selectinload(EventGroupRun.event_group),
     )
 
 
@@ -605,6 +1031,11 @@ async def create_todo(
 ) -> TodoItem:
     if data.assigned_to_id is not None:
         await _check_assignable(db, data.assigned_to_id)
+    if (
+        data.source_task_id is not None
+        and await get_task(db, data.source_task_id) is None
+    ):
+        raise ValueError(f"Unknown task id: {data.source_task_id}")
     todo = TodoItem(
         title=data.title,
         description=data.description,
@@ -612,13 +1043,25 @@ async def create_todo(
         due_date=_todo_due_date(data.due_in_days),
         assigned_to_id=data.assigned_to_id,
         created_by_id=creator.id,
+        source_task_id=data.source_task_id,
     )
     db.add(todo)
+    await db.flush()  # need todo.id before spawning its own chain children
+    to_notify: list[TodoItem] = []
+    if data.source_task_id is not None:
+        # "Handled" either way — actually spawned, or the creator
+        # explicitly opted out — so complete_todo never spawns a second
+        # set later (see that function's own guard).
+        todo.chain_spawn_handled = True
+        if data.spawn_chain_children:
+            to_notify = await _spawn_chain_children_on_creation(db, parent_todo=todo)
     await db.commit()
     await db.refresh(
         todo,
         attribute_names=["created_by", "assigned_to", "completed_by", "created_at"],
     )
+    for child in to_notify:
+        await notify_chain_child_spawned(db, child, todo.title)
     return todo
 
 
@@ -666,31 +1109,56 @@ async def reassign_todo(
 async def complete_todo(
     db: AsyncSession, todo: TodoItem, user: HouseholdUser
 ) -> TodoItem:
-    """Completes `todo` and awards its points. If `todo` is itself a
-    chain-spawned instance (todo.chain_link_id set), also spawns the
-    NEXT level of the chain — the task it represents is
-    `chain_link.child_task_id`, not a Task row this TodoItem points to
-    directly, so that's what's used as the new parent (multi-level
-    chains, see TaskChainLink)."""
+    """Completes `todo` and awards its points. Which Task (if any) this
+    todo is an instance of — `chain_link.child_task_id` if it's a
+    chain-spawned instance, else `source_task_id` if it was created
+    directly from a task's own definition (an event group's root todos,
+    "From task" on the New Todo form) — gets stamped onto the
+    PointsEntry too, so `times_per_day`/assignment-progress counting
+    sees this completion the same as a direct Task completion would.
+    An ordinary, freely-typed todo has neither set, so this is a no-op
+    for it, same as before.
+
+    Chain children are normally spawned already, at the PARENT's own
+    creation (crud._spawn_chain_children_on_creation via create_todo /
+    trigger_event_group) — `todo.chain_spawn_handled` is true for any
+    todo that went through that, whether it actually spawned anything
+    or the creator explicitly opted out, so this never spawns a second
+    set for one of those. Only still spawns here as a fallback for a
+    todo that predates that change (chain_spawn_handled still false —
+    old data) or one completed via a chain-child todo itself
+    (`chain_link_id` set — always a no-op in practice, since chaining
+    is capped at one level: a chain child can never itself be a
+    parent)."""
     todo.status = TodoStatus.completed
     todo.completed_by_id = user.id
     todo.completed_at = datetime.now(UTC)
+    represented_task_id: int | None = None
+    if todo.chain_link_id is not None:
+        link = await db.get(TaskChainLink, todo.chain_link_id)
+        if link is not None:
+            represented_task_id = link.child_task_id
+    else:
+        represented_task_id = todo.source_task_id
     entry = PointsEntry(
         household_user_id=user.id,
         points=todo.points,
         source=PointsSource.todo,
         todo_item_id=todo.id,
+        task_id=represented_task_id,
     )
     db.add(entry)
     await db.flush()
     await _cancel_pending_takeover_for_todo(db, todo.id)
     to_notify: list[TodoItem] = []
-    if todo.chain_link_id is not None:
-        link = await db.get(TaskChainLink, todo.chain_link_id)
-        if link is not None:
-            to_notify = await _spawn_chain_children(
-                db, parent_task_id=link.child_task_id, entry=entry, completer=user
-            )
+    if represented_task_id is not None and not todo.chain_spawn_handled:
+        to_notify = await _spawn_chain_children(
+            db,
+            parent_task_id=represented_task_id,
+            entry=entry,
+            completer=user,
+            event_group_run_id=todo.event_group_run_id,
+        )
     await db.commit()
     await db.refresh(todo, attribute_names=["completed_by", "completed_at", "status"])
     for child in to_notify:
@@ -699,16 +1167,153 @@ async def complete_todo(
 
 
 async def cancel_todo(db: AsyncSession, todo: TodoItem) -> TodoItem:
+    """Cancelling deletes any chain children this todo pre-spawned at
+    its OWN creation that are still open (user request: "if the parent
+    task gets cancelled the chain task gets deleted with it") — a
+    pre-spawned child only exists as a forecast of the parent actually
+    happening, and cancelling says it won't. Deliberately only the
+    still-open ones: a child someone's already completed keeps standing
+    on its own (they did real work; cancelling the parent afterward
+    shouldn't claw that back), and one already cancelled on its own is
+    left as-is too. The frontend warns about this before calling here
+    (see GET /todos/{id}/chain-children / crud.list_chain_children) —
+    this function itself just does it, unconditionally, once asked."""
     todo.status = TodoStatus.cancelled
     await _cancel_pending_takeover_for_todo(db, todo.id)
+    await db.execute(
+        delete(TodoItem).where(
+            TodoItem.spawned_by_todo_id == todo.id, TodoItem.status == TodoStatus.open
+        )
+    )
     await db.commit()
     await db.refresh(todo, attribute_names=["status"])
     return todo
 
 
+async def _hard_delete_todos(db: AsyncSession, todo_ids: list[int]) -> None:
+    """Shared by every real (hard) delete path: a single todo
+    (delete_todo), a whole event group run's worth at once
+    (delete_event_group_run_todos), and the scheduled overdue cleanup
+    (run_scheduled_overdue_cleanup). Does NOT commit — callers do, once,
+    after whatever else they need in the same transaction.
+
+    `TodoItem.spawned_by_todo_id`'s `ON DELETE CASCADE` doesn't look at
+    status, so deleting an open parent would otherwise also wipe out a
+    child that's already completed (and earned real points) or already
+    cancelled on its own — unlike the softer crud.cancel_todo, which
+    only ever removes a still-OPEN child. First detaches (nulls
+    spawned_by_todo_id on) any non-open child of `todo_ids`, exactly the
+    same "stays, just loses the why pointer" treatment chain_link_id's
+    own ON DELETE SET NULL already gets elsewhere — then deletes. A
+    child that's itself in `todo_ids` is unaffected by the detach (it's
+    getting deleted outright anyway)."""
+    if not todo_ids:
+        return
+    await db.execute(
+        update(TodoItem)
+        .where(
+            TodoItem.spawned_by_todo_id.in_(todo_ids),
+            TodoItem.status != TodoStatus.open,
+        )
+        .values(spawned_by_todo_id=None)
+    )
+    await db.execute(delete(TodoItem).where(TodoItem.id.in_(todo_ids)))
+
+
 async def delete_todo(db: AsyncSession, todo: TodoItem) -> None:
-    await db.delete(todo)
+    await _hard_delete_todos(db, [todo.id])
     await db.commit()
+
+
+async def _event_group_run_cleanup_candidates(
+    db: AsyncSession, run_id: int
+) -> list[TodoItem]:
+    """Every todo a bulk delete of this run would consider: todos
+    actually tagged with the run (roots, plus any chain descendant that
+    inherited the tag), PLUS any chain descendant spawned by one of
+    those that ISN'T tagged — a descendant the group's creator
+    explicitly excluded from the group's tag (EventGroupExclusion) is
+    still part of "this event" for a bulk delete's purposes, it just
+    never showed up clustered or badged for it. One level of lookup is
+    enough: chaining is capped at one level, so a spawned child can
+    never itself be a parent with further children."""
+    tagged = await db.execute(
+        select(TodoItem).where(TodoItem.event_group_run_id == run_id)
+    )
+    tagged_todos = list(tagged.scalars().all())
+    tagged_ids = {t.id for t in tagged_todos}
+    if not tagged_ids:
+        return []
+    spawned = await db.execute(
+        select(TodoItem).where(TodoItem.spawned_by_todo_id.in_(tagged_ids))
+    )
+    extra = [t for t in spawned.scalars().all() if t.id not in tagged_ids]
+    return tagged_todos + extra
+
+
+async def event_group_run_delete_preview(
+    db: AsyncSession, run_id: int
+) -> tuple[list[TodoItem], list[TodoItem]]:
+    """What a bulk delete of this run would do, without doing it —
+    backs the frontend's confirmation warning. Returns (to_delete,
+    to_keep): to_keep is whichever of the candidates is already
+    completed (kept untouched — they earned real points), to_delete is
+    everything else (open or already-cancelled)."""
+    candidates = await _event_group_run_cleanup_candidates(db, run_id)
+    to_keep = [t for t in candidates if t.status == TodoStatus.completed]
+    to_delete = [t for t in candidates if t.status != TodoStatus.completed]
+    return to_delete, to_keep
+
+
+async def delete_event_group_run_todos(
+    db: AsyncSession, run_id: int
+) -> tuple[list[TodoItem], list[TodoItem]]:
+    """Actually performs the bulk delete the preview above describes —
+    same candidate computation, so the two can never disagree about
+    what's affected. Routes through _hard_delete_todos so a completed
+    todo among the candidates is detached and spared, not swept away by
+    spawned_by_todo_id's cascade, even though it's also one of the
+    things event_group_run_delete_preview would have called a
+    'candidate'."""
+    to_delete, to_keep = await event_group_run_delete_preview(db, run_id)
+    await _hard_delete_todos(db, [t.id for t in to_delete])
+    await db.commit()
+    return to_delete, to_keep
+
+
+async def run_scheduled_overdue_cleanup(
+    db: AsyncSession, *, today: date | None = None
+) -> list[TodoItem]:
+    """Called hourly by household_service.scheduler (no "already ran
+    today" dedup needed, unlike the nudge/balancing/event-group ticks —
+    the query is naturally idempotent: once a row's gone, it can't
+    match again). `today` is injectable so this can be exercised
+    without waiting for the clock, same reasoning as
+    crud._event_group_due's own `now` parameter.
+
+    "Overdue by more than N days" means the same thing the Board's own
+    due-date badge does (util.js's dueBadge: due_date < today, both
+    anchored to UTC) — just with N days of extra grace before this
+    deletes it, not the day it first turns overdue. Only ever considers
+    still-OPEN todos with a due date at all; nothing else can be
+    "overdue" in the first place."""
+    settings = await get_settings_row(db)
+    if settings.overdue_delete_after_days is None:
+        return []
+    today = today or datetime.now(UTC).date()
+    cutoff = today - timedelta(days=settings.overdue_delete_after_days)
+    result = await db.execute(
+        select(TodoItem).where(
+            TodoItem.status == TodoStatus.open,
+            TodoItem.due_date.is_not(None),
+            TodoItem.due_date < cutoff,
+        )
+    )
+    overdue = list(result.scalars().all())
+    if overdue:
+        await _hard_delete_todos(db, [t.id for t in overdue])
+        await db.commit()
+    return overdue
 
 
 async def claim_todo(
@@ -941,7 +1546,7 @@ def _is_eligible_for_tasks(user: HouseholdUser) -> bool:
 
 
 async def _assign_chain_todo_now(
-    db: AsyncSession, todo: TodoItem, *, exclude_user_id: int
+    db: AsyncSession, todo: TodoItem, *, exclude_user_id: int | None
 ) -> None:
     """Immediately assigns a freshly-spawned "different person" chain
     child to whoever's currently least loaded, using the exact same
@@ -949,9 +1554,13 @@ async def _assign_chain_todo_now(
     one todo right now instead of waiting for the next scheduled run (a
     once-a-day cadence would otherwise leave a same-day chain todo
     unassigned for hours). Never assigns to `exclude_user_id` (whoever
-    completed the parent). Left open/unassigned if nobody else is
-    eligible — exactly like an ordinary sweep leftover, and still
-    excluded from self-claiming (see claim_todo)."""
+    completed the parent at completion-time spawn, or whoever the
+    parent todo is currently assigned to at creation-time spawn — see
+    _spawn_chain_children / _spawn_chain_children_on_creation — None if
+    there's nobody to exclude, e.g. the parent is itself unassigned).
+    Left open/unassigned if nobody else is eligible — exactly like an
+    ordinary sweep leftover, and still excluded from self-claiming (see
+    claim_todo)."""
     as_of = datetime.now(UTC).date()
     all_users = await list_household_users(db)
     eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
@@ -1000,12 +1609,86 @@ async def _assign_chain_todo_now(
         todo.assigned_to_id = picked
 
 
+async def _event_group_exclusions(db: AsyncSession, event_group_id: int) -> set[int]:
+    result = await db.execute(
+        select(EventGroupExclusion.task_id).where(
+            EventGroupExclusion.event_group_id == event_group_id
+        )
+    )
+    return {row[0] for row in result.all()}
+
+
+async def _excluded_task_ids_for_run(
+    db: AsyncSession, event_group_run_id: int | None
+) -> set[int]:
+    if event_group_run_id is None:
+        return set()
+    run = await db.get(EventGroupRun, event_group_run_id)
+    if run is None:
+        return set()
+    return await _event_group_exclusions(db, run.event_group_id)
+
+
+async def _spawn_one_chain_child(
+    db: AsyncSession,
+    link: TaskChainLink,
+    *,
+    due_date: date,
+    created_by_id: int | None,
+    anchor_user_id: int | None,
+    spawned_by_entry_id: int | None,
+    spawned_by_todo_id: int | None,
+    event_group_run_id: int | None,
+    excluded_task_ids: set[int],
+) -> TodoItem | None:
+    """Builds and persists one chain-spawned TodoItem for `link` — the
+    shared tail of both _spawn_chain_children (completion-time) and
+    _spawn_chain_children_on_creation (creation-time), which only
+    differ in WHEN they run and what `anchor_user_id` means (whoever
+    completed the parent, vs. whoever the parent is currently assigned
+    to). `anchor_user_id` is who a same_user link assigns directly to,
+    or who a different_user link's balancer pick excludes — either can
+    be None (same_user: parent unassigned, so leave the child
+    unassigned too; different_user: nobody to exclude).
+
+    Returns the child whenever it ended up with a real assignee (either
+    branch), so a caller that wants to notify someone can — the two
+    callers differ on whether a same_user pick is worth notifying (see
+    each one's own docstring for why), so that filtering happens on
+    their side, not here."""
+    child = TodoItem(
+        title=link.child_task.name,
+        description=link.child_task.description,
+        points=link.child_task.points,
+        due_date=due_date,
+        created_by_id=created_by_id,
+        chain_link_id=link.id,
+        spawned_by_entry_id=spawned_by_entry_id,
+        spawned_by_todo_id=spawned_by_todo_id,
+    )
+    if event_group_run_id is not None and link.child_task_id not in excluded_task_ids:
+        child.event_group_run_id = event_group_run_id
+    if link.same_user:
+        # Direct assignment, bypassing the balancer entirely — this is
+        # "the same person does both," not a fairness decision.
+        child.assigned_to_id = anchor_user_id
+        db.add(child)
+        await db.flush()
+        return child if child.assigned_to_id is not None else None
+    child.exclude_user_id = anchor_user_id
+    db.add(child)
+    await db.flush()
+    await _assign_chain_todo_now(db, child, exclude_user_id=anchor_user_id)
+    return child if child.assigned_to_id is not None else None
+
+
 async def _spawn_chain_children(
     db: AsyncSession,
     *,
     parent_task_id: int,
     entry: PointsEntry,
     completer: HouseholdUser,
+    event_group_run_id: int | None = None,
 ) -> list[TodoItem]:
     """Spawns one TodoItem per chain link hanging off `parent_task_id`,
     for the occurrence just logged as `entry`. Must run in the same
@@ -1016,38 +1699,135 @@ async def _spawn_chain_children(
     (chain_link_id, spawned_by_entry_id) if this is ever retried for the
     same entry.
 
+    Still the only path for a Task completed directly (crud.
+    complete_task — a daily standing chore, or a weekly/monthly one
+    completed straight from Home, neither of which is ever a TodoItem),
+    and the fallback for a todo that predates _spawn_chain_children_on_
+    creation (chain_spawn_handled still false — see complete_todo).
+
+    `event_group_run_id`: if the completed todo that triggered this was
+    itself tagged with an event group run, each spawned child inherits
+    the same tag — UNLESS that specific child task is one the group's
+    creator explicitly excluded from grouping (EventGroupExclusion; see
+    PROJECT_SPEC.md's "Event groups") — so a "Dinner" run's chain
+    reactions stay clustered with it on the Board, except the ones
+    someone deliberately said don't count as a Dinner task.
+
     Returns the different-person children that got assigned, for the
     caller to push-notify AFTER its own final commit —
     push.send_to_subscriptions commits internally (it prunes dead
     subscriptions as it goes), so notifying from inside this function,
     before the caller's commit, would split one logical transaction
     (points entry + all spawned children) into several."""
-    to_notify: list[TodoItem] = []
     links = await list_chain_links(db, parent_task_id)
+    if not links:
+        return []
+
+    excluded_task_ids = await _excluded_task_ids_for_run(db, event_group_run_id)
+    to_notify: list[TodoItem] = []
     for link in links:
-        child = TodoItem(
-            title=link.child_task.name,
-            description=link.child_task.description,
-            points=link.child_task.points,
+        child = await _spawn_one_chain_child(
+            db,
+            link,
             due_date=datetime.now(UTC).date(),
             created_by_id=completer.id,
-            chain_link_id=link.id,
+            anchor_user_id=completer.id,
             spawned_by_entry_id=entry.id,
+            spawned_by_todo_id=None,
+            event_group_run_id=event_group_run_id,
+            excluded_task_ids=excluded_task_ids,
         )
-        if link.same_user:
-            # Direct assignment, bypassing the balancer entirely — this
-            # is "the same person does both," not a fairness decision.
-            child.assigned_to_id = completer.id
-            db.add(child)
-            await db.flush()
-        else:
-            child.exclude_user_id = completer.id
-            db.add(child)
-            await db.flush()
-            await _assign_chain_todo_now(db, child, exclude_user_id=completer.id)
-            if child.assigned_to_id is not None:
-                to_notify.append(child)
+        # A same_user child is assigned straight to `completer` — the
+        # very person who just completed the parent — so notifying
+        # them about a task they implicitly just gave themselves would
+        # be pointless. Only a different_user pick is worth telling
+        # someone about here.
+        if child is not None and not link.same_user:
+            to_notify.append(child)
     return to_notify
+
+
+async def _spawn_chain_children_on_creation(
+    db: AsyncSession,
+    *,
+    parent_todo: TodoItem,
+    event_group_run_id: int | None = None,
+) -> list[TodoItem]:
+    """The creation-time sibling of _spawn_chain_children — called right
+    when `parent_todo` itself is created (crud.create_todo /
+    trigger_event_group), not when it's completed, per the user's
+    explicit request: chain tasks should already exist alongside their
+    parent, not only appear once the parent's actually done.
+
+    `parent_todo` must already have an id (caller flushes first) and
+    its final `assigned_to_id` already decided — for an event group's
+    root this means AFTER the batch balancer pass has assigned it, not
+    before, since that's what `anchor_user_id` resolves to here.
+    Idempotent via uq_todo_chain_spawn_by_todo (chain_link_id,
+    spawned_by_todo_id).
+
+    Deliberately does NOT try to keep a same_user child in sync with
+    the parent's assignee afterward — reassigning, claiming, or taking
+    over the parent later never touches an already-spawned child (user
+    request: "reassignment only changes the reassigned task without
+    touching the chain task"). If the parent is unassigned right now,
+    a same_user child is created unassigned too, and a different_user
+    child's balancer pick has nobody in particular to exclude."""
+    links = await list_chain_links(db, parent_todo.source_task_id)
+    if not links:
+        return []
+
+    excluded_task_ids = await _excluded_task_ids_for_run(db, event_group_run_id)
+    to_notify: list[TodoItem] = []
+    for link in links:
+        child = await _spawn_one_chain_child(
+            db,
+            link,
+            due_date=parent_todo.due_date or datetime.now(UTC).date(),
+            created_by_id=parent_todo.created_by_id,
+            anchor_user_id=parent_todo.assigned_to_id,
+            spawned_by_entry_id=None,
+            spawned_by_todo_id=parent_todo.id,
+            event_group_run_id=event_group_run_id,
+            excluded_task_ids=excluded_task_ids,
+        )
+        # Unlike _spawn_chain_children's completion-time notify filter,
+        # a same_user pick here is still worth telling someone about —
+        # the anchor is whoever the PARENT happens to be assigned to,
+        # not whoever's currently acting, so it's very possibly someone
+        # who hasn't touched this page at all yet.
+        if child is not None:
+            to_notify.append(child)
+    return to_notify
+
+
+async def notify_chain_child_spawned(
+    db: AsyncSession, child: TodoItem, parent_title: str
+) -> None:
+    """Notifies whoever a chain-spawned child landed on at CREATION
+    time (_spawn_chain_children_on_creation) — distinct wording from
+    notify_todo_assigned's "X asked you to," since nobody asked for
+    this, it's an automatic side effect of the parent now existing."""
+    await _notify(
+        db,
+        child.assigned_to_id,
+        title="New chain task",
+        body=f'After "{parent_title}": {child.title}',
+        url="/board",
+    )
+
+
+async def list_chain_children(db: AsyncSession, todo_id: int) -> list[TodoItem]:
+    """Still-open children pre-spawned at `todo_id`'s own creation — the
+    ones crud.cancel_todo would delete if this todo got cancelled right
+    now. Used only to warn about that before it happens (GET /todos/
+    {id}/chain-children); see cancel_todo for why only OPEN ones."""
+    result = await db.execute(
+        select(TodoItem).where(
+            TodoItem.spawned_by_todo_id == todo_id, TodoItem.status == TodoStatus.open
+        )
+    )
+    return list(result.scalars().all())
 
 
 async def run_balancing(
@@ -1763,6 +2543,8 @@ async def update_settings(
     settings.nudge_hour = data.nudge_hour
     settings.week_start_weekday = data.week_start_weekday
     settings.auto_report_enabled = data.auto_report_enabled
+    settings.overdue_delete_after_days = data.overdue_delete_after_days
+    settings.timezone = data.timezone
     await db.commit()
     await db.refresh(settings)
     return settings
@@ -1934,7 +2716,14 @@ async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int, int]:
     their goal — if you just want to check push delivery works at all,
     use send_test_push instead (see /push/test)."""
     settings = await get_settings_row(db)
-    week_start, _ = week_bounds(datetime.now(UTC).date(), settings.week_start_weekday)
+    # Local calendar date (HouseholdSettings.timezone), not UTC's — so
+    # this agrees with run_scheduled_nudge_if_due's own local weekday/
+    # hour check about which week is "this week." Mixing a local check
+    # with a UTC week stamp here could double-send or skip a week right
+    # around a local midnight that falls on the other side of the UTC
+    # day boundary.
+    local_today = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
+    week_start, _ = week_bounds(local_today, settings.week_start_weekday)
     since = datetime.combine(week_start, time.min, tzinfo=UTC)
     users = await list_household_users(db)
 
@@ -1979,14 +2768,26 @@ async def run_scheduled_nudge_if_due(db: AsyncSession) -> tuple[int, int, int] |
     """Called hourly by household_service.scheduler. Returns None (and
     does nothing) if the automatic schedule is off, it's not the
     configured weekday/hour right now, or this week's nudge already went
-    out — otherwise runs it and returns send_weekly_nudge's result."""
+    out — otherwise runs it and returns send_weekly_nudge's result.
+
+    The weekday/hour check is against HouseholdSettings.timezone's
+    local time, not raw UTC (same user report as the event-group
+    schedule's own fix) — an admin picking "Monday at 18" means their
+    own timezone's Monday 18:00, not UTC's. week_bounds also gets the
+    local date, matching send_weekly_nudge's own basis for the week it
+    stamps as sent, so the two can't disagree about which week this
+    is right around a local midnight that falls on the other side of
+    the UTC day boundary."""
     settings = await get_settings_row(db)
     if settings.nudge_weekday is None:
         return None
-    now = datetime.now(UTC)
-    if now.weekday() != settings.nudge_weekday or now.hour != settings.nudge_hour:
+    local_now = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone))
+    if (
+        local_now.weekday() != settings.nudge_weekday
+        or local_now.hour != settings.nudge_hour
+    ):
         return None
-    week_start, _ = week_bounds(now.date(), settings.week_start_weekday)
+    week_start, _ = week_bounds(local_now.date(), settings.week_start_weekday)
     if settings.last_nudge_sent_week == week_start.isoformat():
         return None
     return await send_weekly_nudge(db)

@@ -22,9 +22,16 @@ from household_service.schemas import (
     CategoryIn,
     CategoryOut,
     CategoryUpdate,
+    ChainChildOut,
     ChainLinkIn,
     ChainLinkOut,
     ChainParentOut,
+    EventGroupIn,
+    EventGroupOut,
+    EventGroupPreviewItem,
+    EventGroupPreviewRequest,
+    EventGroupRunCleanup,
+    EventGroupTriggerResult,
     HouseholdSettingsOut,
     HouseholdSettingsUpdate,
     HouseholdUserBrief,
@@ -51,6 +58,7 @@ from household_service.schemas import (
     TodoCreate,
     TodoOut,
     TodoReassignIn,
+    TodoStubOut,
     TodoUpdate,
     VapidPublicKeyOut,
 )
@@ -433,6 +441,166 @@ async def delete_chain_link(
     await crud.delete_chain_link(db, link)
 
 
+# ---- Event groups -----------------------------------------------------
+
+
+# Declared before /event-groups/{group_id} below — "preview" would
+# otherwise risk being parsed as that route's int path param (same
+# ordering rule as storage's /items/bulk* before /items/{item_id}).
+@app.post("/event-groups/preview", response_model=list[EventGroupPreviewItem])
+async def preview_event_group(
+    data: EventGroupPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    items = await crud.preview_event_group(
+        db, data.root_task_ids, data.excluded_task_ids
+    )
+    return [EventGroupPreviewItem(**item) for item in items]
+
+
+@app.get("/event-groups", response_model=list[EventGroupOut])
+async def list_event_groups(
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    groups = await crud.list_event_groups(db)
+    return [EventGroupOut.from_model(g) for g in groups]
+
+
+@app.post(
+    "/event-groups", response_model=EventGroupOut, status_code=status.HTTP_201_CREATED
+)
+async def create_event_group(
+    data: EventGroupIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    try:
+        group = await crud.create_event_group(db, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return EventGroupOut.from_model(group)
+
+
+@app.get("/event-groups/{group_id}", response_model=EventGroupOut)
+async def get_event_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    group = await crud.get_event_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event group not found"
+        )
+    return EventGroupOut.from_model(group)
+
+
+@app.patch("/event-groups/{group_id}", response_model=EventGroupOut)
+async def patch_event_group(
+    group_id: int,
+    data: EventGroupIn,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    group = await crud.get_event_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event group not found"
+        )
+    try:
+        group = await crud.update_event_group(db, group, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return EventGroupOut.from_model(group)
+
+
+@app.delete("/event-groups/{group_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_event_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    group = await crud.get_event_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event group not found"
+        )
+    await crud.delete_event_group(db, group)
+
+
+@app.post("/event-groups/{group_id}/trigger", response_model=EventGroupTriggerResult)
+async def trigger_event_group(
+    group_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_write),
+):
+    group = await crud.get_event_group(db, group_id)
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event group not found"
+        )
+    me = await _self(db, user)
+    try:
+        run, todos = await crud.trigger_event_group(db, group, me)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    return EventGroupTriggerResult(
+        run_id=run.id, todos=[TodoOut.from_model(t) for t in todos]
+    )
+
+
+@app.get(
+    "/event-group-runs/{run_id}/delete-preview", response_model=EventGroupRunCleanup
+)
+async def preview_event_group_run_delete(
+    run_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    """Dry run for the Board's bulk-delete confirmation — what would be
+    removed, and what would be kept, without actually doing either."""
+    run = await crud.get_event_group_run(db, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event group run not found"
+        )
+    to_delete, to_keep = await crud.event_group_run_delete_preview(db, run_id)
+    return EventGroupRunCleanup(
+        to_delete=[TodoStubOut.model_validate(t) for t in to_delete],
+        to_keep=[TodoStubOut.model_validate(t) for t in to_keep],
+    )
+
+
+@app.post("/event-group-runs/{run_id}/delete", response_model=EventGroupRunCleanup)
+async def delete_event_group_run(
+    run_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_write),
+):
+    """Bulk-deletes everything from one event group run (e.g. one
+    "Dinner" occurrence) at once — a real hard delete, not a cancel;
+    see crud.delete_event_group_run_todos for why completed todos among
+    them are spared."""
+    run = await crud.get_event_group_run(db, run_id)
+    if run is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Event group run not found"
+        )
+    to_delete, to_keep = await crud.delete_event_group_run_todos(db, run_id)
+    return EventGroupRunCleanup(
+        to_delete=[TodoStubOut.model_validate(t) for t in to_delete],
+        to_keep=[TodoStubOut.model_validate(t) for t in to_keep],
+    )
+
+
 @app.delete("/tasks/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_task(
     task_id: int,
@@ -560,6 +728,25 @@ async def complete_todo(
         )
     completer = await _self(db, user)
     return TodoOut.from_model(await crud.complete_todo(db, todo, completer))
+
+
+@app.get("/todos/{todo_id}/chain-children", response_model=list[ChainChildOut])
+async def list_chain_children(
+    todo_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_read),
+):
+    """Still-open children this todo pre-spawned at its own creation —
+    what cancelling it right now would also delete (crud.cancel_todo).
+    The frontend calls this before showing the cancel confirmation, to
+    warn by name rather than silently deleting them."""
+    todo = await crud.get_todo(db, todo_id)
+    if todo is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Todo not found"
+        )
+    children = await crud.list_chain_children(db, todo_id)
+    return [ChainChildOut.model_validate(c) for c in children]
 
 
 @app.post("/todos/{todo_id}/cancel", response_model=TodoOut)

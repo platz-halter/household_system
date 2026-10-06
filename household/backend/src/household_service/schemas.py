@@ -1,4 +1,6 @@
 from datetime import date, datetime
+from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -207,6 +209,41 @@ class ChainParentOut(BaseModel):
         )
 
 
+class TodoStubOut(BaseModel):
+    """Just enough to name a todo in a confirmation or a result summary
+    — used for the event-group-run bulk delete's preview/result
+    (EventGroupRunCleanup)."""
+
+    id: int
+    title: str
+
+    model_config = {"from_attributes": True}
+
+
+class EventGroupRunCleanup(BaseModel):
+    """Shared shape for both the bulk-delete dry-run preview (GET) and
+    the real result (POST) of deleting everything from one event group
+    run — same crud computation backs both, so the two can't drift
+    apart (see crud.event_group_run_delete_preview /
+    delete_event_group_run_todos)."""
+
+    to_delete: list[TodoStubOut]
+    to_keep: list[TodoStubOut]
+
+
+class ChainChildOut(BaseModel):
+    """A still-open TodoItem that was pre-spawned at THIS todo's own
+    creation (see crud._spawn_chain_children_on_creation) — used only to
+    warn before cancelling: "this will also delete {these}" (crud.
+    cancel_todo deletes them for real once confirmed). Deliberately
+    thin — just enough to name them in a confirm dialog."""
+
+    id: int
+    title: str
+
+    model_config = {"from_attributes": True}
+
+
 class TaskCompleteRequest(BaseModel):
     """Optional override so an admin/user can log a completion on behalf of
     someone else; omit (or send an empty body) to log it for yourself."""
@@ -270,6 +307,18 @@ class TodoCreate(BaseModel):
         default=None, ge=0, description="0 = due today; omit for no due date"
     )
     assigned_to_id: int | None = None
+    # Set when posting a todo prefilled "From task" — its chain children
+    # (if any) now spawn immediately alongside this todo itself, rather
+    # than waiting for completion (see crud._spawn_chain_children_on_
+    # creation), the same as a task-sourced todo an event group created
+    # (crud.trigger_event_group).
+    source_task_id: int | None = None
+    # Only consulted when source_task_id is also set. True (default)
+    # spawns this task's chain children right away, same as an event
+    # group's roots always do. False "deactivates" them for this one
+    # todo specifically — the frontend only shows this as a checkbox
+    # when the picked task actually has outgoing chain links to skip.
+    spawn_chain_children: bool = True
 
 
 class TodoReassignIn(BaseModel):
@@ -299,7 +348,10 @@ class TodoOut(BaseModel):
     points: int
     due_date: date | None
     status: TodoStatus
-    created_by: HouseholdUserBrief
+    # None only for a scheduled Event Group's own auto-trigger — no human
+    # actor at all for that (see crud.trigger_event_group). The frontend
+    # shows "Scheduled" in place of "by {name}" when this is None.
+    created_by: HouseholdUserBrief | None
     assigned_to: HouseholdUserBrief | None
     completed_by: HouseholdUserBrief | None
     completed_at: datetime | None
@@ -308,6 +360,13 @@ class TodoOut(BaseModel):
     # name, for the frontend to show "After: {name}" instead of the
     # ordinary "From the board" label. None for a user-posted todo.
     chain_parent_task_name: str | None = None
+    # Set only for a todo tagged with an event group run (either one of
+    # the group's own root todos, or a chain descendant that inherited
+    # the tag — see crud._spawn_chain_children) — lets the Board cluster
+    # everything from the same triggering together and label it.
+    event_group_run_id: int | None = None
+    event_group_name: str | None = None
+    event_group_triggered_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -320,7 +379,11 @@ class TodoOut(BaseModel):
             points=todo.points,
             due_date=todo.due_date,
             status=todo.status,
-            created_by=HouseholdUserBrief.model_validate(todo.created_by),
+            created_by=(
+                HouseholdUserBrief.model_validate(todo.created_by)
+                if todo.created_by
+                else None
+            ),
             assigned_to=(
                 HouseholdUserBrief.model_validate(todo.assigned_to)
                 if todo.assigned_to
@@ -336,7 +399,113 @@ class TodoOut(BaseModel):
             chain_parent_task_name=(
                 todo.chain_link.parent_task.name if todo.chain_link else None
             ),
+            event_group_run_id=todo.event_group_run_id,
+            event_group_name=(
+                todo.event_group_run.event_group.name if todo.event_group_run else None
+            ),
+            event_group_triggered_at=(
+                todo.event_group_run.triggered_at if todo.event_group_run else None
+            ),
         )
+
+
+# ---- Event groups ---------------------------------------------------------
+
+
+class EventGroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    root_task_ids: list[int] = Field(min_length=1)
+    # Chain descendants of a root to leave untagged when they eventually
+    # spawn — see EventGroupExclusion. Any id here that isn't actually a
+    # descendant of one of the roots (or that duplicates a root) is just
+    # ignored, not an error — the frontend only ever sends ids straight
+    # from the live preview, so this is a defensive default rather than
+    # a validation path that needs its own error message.
+    excluded_task_ids: list[int] = Field(default_factory=list)
+    # None = not scheduled (the only way to trigger it is the manual
+    # button). "monthly" is deliberately not offered — see EventGroup's
+    # own docstring for why. UTC, same convention as
+    # HouseholdSettings.nudge_hour.
+    schedule_recurrence: Literal["daily", "weekly"] | None = None
+    schedule_weekdays: list[int] | None = None
+    schedule_hour: int = Field(default=18, ge=0, le=23)
+
+    @field_validator("schedule_weekdays")
+    @classmethod
+    def _check_schedule_weekdays(cls, v):
+        return _validate_weekdays(v)
+
+    @model_validator(mode="after")
+    def _check_schedule_recurrence(self) -> "EventGroupIn":
+        if self.schedule_recurrence == "weekly":
+            if not self.schedule_weekdays:
+                raise ValueError("a weekly schedule needs at least one weekday")
+        else:
+            self.schedule_weekdays = None
+        return self
+
+
+class EventGroupRootOut(BaseModel):
+    task_id: int
+    task_name: str
+    points: int
+    position: int
+
+
+class EventGroupOut(BaseModel):
+    id: int
+    name: str
+    created_at: datetime
+    roots: list[EventGroupRootOut]
+    excluded_task_ids: list[int]
+    schedule_recurrence: Literal["daily", "weekly"] | None
+    schedule_weekdays: list[int] | None
+    schedule_hour: int
+
+    model_config = {"from_attributes": True}
+
+    @classmethod
+    def from_model(cls, group) -> "EventGroupOut":
+        return cls(
+            id=group.id,
+            name=group.name,
+            created_at=group.created_at,
+            roots=[
+                EventGroupRootOut(
+                    task_id=r.task_id,
+                    task_name=r.task.name,
+                    points=r.task.points,
+                    position=r.position,
+                )
+                for r in group.roots
+            ],
+            excluded_task_ids=[e.task_id for e in group.exclusions],
+            schedule_recurrence=group.schedule_recurrence,
+            schedule_weekdays=group.schedule_weekdays,
+            schedule_hour=group.schedule_hour,
+        )
+
+
+class EventGroupPreviewRequest(BaseModel):
+    root_task_ids: list[int] = Field(min_length=1)
+    excluded_task_ids: list[int] = Field(default_factory=list)
+
+
+class EventGroupPreviewItem(BaseModel):
+    task_id: int
+    task_name: str
+    points: int
+    is_root: bool
+    # Which root spawns this — None for a root itself, the root's own
+    # name for a chain descendant (so the frontend can show "After: X",
+    # same label convention as TodoOut.chain_parent_task_name).
+    parent_task_name: str | None = None
+    excluded: bool = False
+
+
+class EventGroupTriggerResult(BaseModel):
+    run_id: int
+    todos: list[TodoOut]
 
 
 # ---- Task assignments / balancing tool ---------------------------------
@@ -454,6 +623,8 @@ class HouseholdSettingsOut(BaseModel):
     week_start_weekday: int
     auto_report_enabled: bool
     last_auto_report_period: date | None
+    overdue_delete_after_days: int | None
+    timezone: str
     model_config = {"from_attributes": True}
 
 
@@ -465,11 +636,25 @@ class HouseholdSettingsUpdate(BaseModel):
     nudge_hour: int = Field(default=18, ge=0, le=23)
     week_start_weekday: int = Field(default=0, ge=0, le=6)
     auto_report_enabled: bool = False
+    # None (default) = off. See HouseholdSettings' own docstring.
+    overdue_delete_after_days: int | None = Field(default=None, ge=1)
+    # IANA name — see HouseholdSettings' own docstring for exactly what
+    # this does and doesn't affect.
+    timezone: str = Field(default="UTC")
 
     @field_validator("currency")
     @classmethod
     def _normalize_currency(cls, v: str) -> str:
         return v.strip().upper()
+
+    @field_validator("timezone")
+    @classmethod
+    def _validate_timezone(cls, v: str) -> str:
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone: {v!r}") from exc
+        return v
 
 
 # ---- Reports -------------------------------------------------------------

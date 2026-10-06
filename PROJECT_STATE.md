@@ -1,9 +1,96 @@
 # Household System V2 — Project State
 
-**Version 1.1.0** — a new feature on top of 1.0.4's four patch releases
-(which sit on top of 1.0.0, the first declared release: every
-`PROJECT_SPEC.md` item implemented, production hardening and a full
-pre-deploy security pass done — see this file's own entries below).
+**Version 1.2.0** — new features on top of 1.1.0 (chained tasks, the
+on-break/takeover-request additions, and five rounds of user-reported
+follow-ups — all committed and now in production) and 1.0.4's four
+patch releases (which sit on top of 1.0.0, the first declared release:
+every `PROJECT_SPEC.md` item implemented, production hardening and a
+full pre-deploy security pass done — see this file's own entries
+below).
+- 1.2.0 adds **Event Groups**: a named bundle of tasks (e.g. "Dinner")
+  that posts all of them to the board in one tap, taking the existing
+  one-level chain cap into account so a `Set the table -> Clear the
+  table` style chain still "just works" as part of the group without
+  any new chaining concept, with a creator-editable per-task opt-out
+  from being tagged into the group (a chained task is still created,
+  just without the group's label). Trigger-time assignment reuses the
+  balancer's own fairness pass immediately, rather than waiting for the
+  6-hour sweep. Also adds a **schedule** per group (daily, or specific
+  weekdays, at a configured UTC hour) so a group can trigger itself
+  automatically instead of needing someone to tap it every time. See
+  "Household service — backend"/"— frontend" for the full design, the
+  stateless-preview and exclusions-not-inclusions decisions, the "a
+  root todo must still fire its own chain children" fix this depended
+  on, the scheduling due-check design, and the live-verification notes
+  for both sides.
+- 1.2.0 also picked up two small follow-ups on the Tasks/Board pages:
+  the "Group by event" toggle moved onto the same row as the Board's
+  Open/Completed/Cancelled/All status chips instead of its own row
+  below them; and the Tasks-page calendar view now shows daily tasks on
+  every day cell (muted, so weekly tasks still stand out) instead of
+  leaving them off entirely — see "Household service — frontend" for
+  both.
+- 1.2.0 also picked up a third round: the notification panel no longer
+  visibly flickers shut and reopens after "Mark all read" or dismissing
+  one (a real measured empty-content gap during the re-render, not just
+  a vague impression — see below); and Event Groups can now be
+  triggered manually straight from the Board's New Todo modal, not only
+  from the Tasks page, via a shared `eventGroups.js` module both pages
+  now use for the same trigger-confirmation flow. See "Household
+  service — frontend" for both.
+- 1.2.0 also picked up a fourth round: Event Groups moved from a
+  barely-visible icon button below the (often long) Tasks list to a
+  full-width labelled button between Categories and Tasks, with a real
+  call-to-action empty state on both the Tasks page and the Board's
+  picker, after user feedback that the feature was hard to find. See
+  "Household service — frontend" for the full entry.
+- 1.2.0 also picked up a fifth round, a real design reversal: **chain
+  tasks now spawn the moment their parent is created, not once it's
+  completed** — user request: "Tasks should appear not only after
+  finishing the pre chained task but should already be created on task
+  creation." This is the opposite of 1.1.0's original, deliberate
+  design (see its own entry below, which this one now supersedes for
+  anything created through a `TodoItem` — a manually-posted "from task"
+  todo, or an event group's root). Reassigning, claiming, or taking
+  over the parent afterward never touches an already-spawned child
+  (explicit user request); cancelling the parent deletes its still-open
+  chain children with it (confirmed by name first), but leaves an
+  already-completed or already-cancelled one alone. A new checkbox on
+  the Board's New Todo form — shown only when the picked task actually
+  has one — lets the poster skip spawning a chain task for that one
+  todo specifically; adding or removing which tasks chain a task at all
+  is still only ever done from the Tasks page. A `Task` completed
+  directly from Home (a daily standing chore, or a weekly/monthly one
+  with no `TodoItem` at all) still spawns its chain children at
+  completion, same as before — there's no "creation" moment to hook
+  into there; I flagged this scoping boundary rather than guessing it
+  should also change. See "Household service — backend"/"— frontend"
+  for the full design, the idempotency/cascade-delete details, and the
+  live-verification notes for both sides.
+- 1.2.0 also picked up a sixth round: the Board can now **bulk-delete**
+  an entire triggered event occurrence in one action (a real delete,
+  not a cancel, with a server-built warning naming exactly what goes —
+  anything already completed is kept); both pages' event-group entry
+  points moved again, this time to a dedicated secondary FAB stacked
+  above the primary one, after feedback that the previous placement
+  (a full-width Tasks-page button, a buried Board modal-footer button)
+  still wasn't intuitive; grouped Board todos now sit inside one
+  bordered card per occurrence instead of just a heading above a flat
+  list; the New Todo form's chain-task checkbox now names which task(s)
+  it would create; and a new admin setting auto-deletes a board todo
+  once it's been overdue for a configured number of days. See
+  "Household service — backend"/"— frontend" for the full design and
+  live-verification notes.
+- 1.2.0 also picked up a seventh round: the two stacked FABs (the round
+  above) weren't actually centered on the same vertical axis — fixed
+  (4px, half their 8px width difference); and every "At (UTC)" schedule
+  picker (the weekly reminder, an Event Group's own trigger time) was
+  always interpreted as literal UTC even though nothing in the UI said
+  so clearly enough — a new admin-configurable household timezone
+  (default UTC, so nothing changes until someone sets it) fixes both
+  the behavior and the labels. See "Household service — backend"/"—
+  frontend" for the full design, the DST/weekday-crossover correctness
+  notes, and live-verification notes.
 - 1.1.0 adds **chained tasks**: completing one task can auto-spawn
   others onto the board as one-off todos, so a parent chore like "Set
   the table" can define child chores like "Clear the table" that only
@@ -16,10 +103,8 @@ pre-deploy security pass done — see this file's own entries below).
   from the sweep/direct-completion/Home's standalone list) and
   "Household service — frontend" for the Tasks-page chain-link editor,
   the "After: {parent}" todo label, and the Tasks-page calendar view.
-- 1.1.0 also adds (same uncommitted release — nothing from this version
-  has shipped yet, so these three ride along rather than bumping to
-  1.2.0): on-break users are now excluded from every "assign this to
-  someone" picker and are rejected server-side if assigned anyway
+- 1.1.0 also adds: on-break users are now excluded from every "assign
+  this to someone" picker and are rejected server-side if assigned anyway
   (previously only the balancer itself respected break mode); an
   **admin-only reassign** for open board todos (`POST /todos/{id}
   /reassign`, no acceptance needed — distinct from a takeover request);
@@ -1499,6 +1584,376 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     picker. Verified live.
   - Models/`PROJECT_SPEC.md`/`CLAUDE.md` updated to describe the
     one-level cap instead of the old multi-level design.
+- ✅ **1.2.0: Event Groups.** User request, with a worked
+  "Dinner" example: a named bundle of **root** tasks (`EventGroup` ->
+  `EventGroupTask`, unique per group, ordered by `position`) that
+  creates one open `TodoItem` per root in a single tap, taking the
+  existing one-level chain cap into account so a handful of chain links
+  can cover a whole event without any new chaining concept. New tables:
+  `EventGroup` (name, unique), `EventGroupTask` (roots only — a chain
+  descendant is never itself a row here, it's implied by the root's own
+  `TaskChainLink`s), `EventGroupExclusion` (which of a root's chain
+  descendants to leave untagged when they spawn), `EventGroupRun` (one
+  row per *trigger* — lets the Board tell today's Dinner apart from a
+  different day's). `TodoItem` gained `source_task_id` (which Task this
+  todo is an instance of, whether from an event group root or "From
+  task" on the New Todo form) and `event_group_run_id`.
+  - **Exclusions are stored, not inclusions** — a deliberate inversion
+    from the obvious-looking "store which descendants to include." If
+    the saved state were "included descendants," a chain link added
+    *after* the group was saved would silently never be grouped (it
+    wouldn't be in the saved include-list). Storing the opposite —
+    which descendants the creator explicitly opted *out* — means a new
+    chain link is grouped by default, matching the user's own framing:
+    "Empty dishwasher ... shouldn't be grouped as a dinner activity" is
+    phrased as an exception, not as an inclusion.
+  - **Stateless preview** (`crud.preview_event_group`): takes raw task
+    ids, not a saved group, so the exact same computation serves the
+    create-modal's live preview (before a group has ever been saved)
+    and a fresh preview right before trigger — it always walks
+    `TaskChainLink` live, never cached membership, so a chain link added
+    after the group was saved shows up automatically either way.
+  - **Completing a root todo now correctly fires its own chain
+    children** — the one gap that would have made this feature useless
+    without a fix. A chain only used to fire off `TodoItem
+    .chain_link_id`, which is null for a todo created directly from a
+    task (an event group's own roots, or "From task" on the New Todo
+    form) rather than spawned by another chain link. `complete_todo` now
+    resolves `represented_task_id = chain_link.child_task_id if
+    chain_link_id else source_task_id` and spawns from that — so
+    "Fill dishwasher," created as an event-group root with no
+    `chain_link_id` of its own, still spawns "Handwash cutlery" and
+    "Empty dishwasher" on completion.
+  - **Fixed a real double-counting gap found along the way**:
+    `complete_todo` only ever set `PointsEntry.todo_item_id`, never
+    `.task_id`, for a todo sourced from a task — so a task-sourced todo's
+    completion didn't count toward that task's own `times_per_day` cap
+    or assignment-progress queries, the same as a direct Task completion
+    would. Now sets both.
+  - **Trigger-time fair assignment** (`crud.trigger_event_group`):
+    creates all root todos in one batch, then runs the balancer's own
+    fairness pass (`_gather_balancer_load` + `balancing.balance`) once
+    immediately, rather than leaving them for the 6-hour sweep — a
+    "hosting dinner now" task is time-sensitive, unlike a routine weekly
+    chore. Re-validates every root fresh (a task could have gone
+    inactive or become a chain child since the group was saved) instead
+    of trusting the saved membership blindly.
+  - Root validation (`crud._validate_event_group_roots`) rejects an
+    inactive task or an existing chain child as a root — a chain child
+    already has one source of instances (its parent's completion); a
+    second, independent one via an event group would violate the same
+    "one source of instances" rule chain tasks already follow. Checked
+    at create, at update, **and** again fresh at trigger time.
+  - **Scheduling** (follow-up user request): `EventGroup` gained
+    `schedule_recurrence` (`"daily"`/`"weekly"`/`None` — a plain
+    `String(10)`, not a Postgres enum, so adding/dropping a choice
+    later never needs its own migration dance; `"monthly"` deliberately
+    not offered, since there's no "sometime this month" concept that
+    makes sense for an immediate-creation trigger), `schedule_weekdays`
+    (0=Monday..6=Sunday, only for weekly), `schedule_hour` (UTC, same
+    convention as `HouseholdSettings.nudge_hour`). A new hourly
+    `household_service.scheduler._event_group_tick` calls
+    `crud.run_scheduled_event_groups_if_due`, which checks every
+    scheduled group against a pure, independently unit-tested predicate
+    (`crud._event_group_due` — `household/backend/tests/
+    test_event_group_schedule.py`, 9 cases): an **exact** hour match,
+    not `>=` (mirrors `run_scheduled_nudge_if_due`'s own reasoning —
+    `>=` would fire the instant a schedule whose hour already passed
+    today gets saved, and fire a whole backlog of missed hours after
+    downtime instead of the one tick actually due), and "already ran
+    today" checks for ANY `EventGroupRun` today, manual or scheduled —
+    triggering "Dinner" by hand earlier the same day correctly
+    suppresses tonight's automatic one rather than producing a second
+    Dinner. One group's `ValueError` (e.g. a root went inactive since
+    the group was saved) is caught and rolled back per-group, not
+    left to abort every other group checked in the same tick.
+    `trigger_event_group`'s `user` param is now `HouseholdUser | None`
+    (`None` for a scheduled auto-trigger — there's no human actor for
+    that), which made `TodoItem.created_by_id`/`EventGroupRun
+    .triggered_by_id` both need to become nullable (new migration
+    `0b83dc22261d`, on top of the `created_at`/… one from the base
+    feature — never folded into that already-applied one, per
+    `CLAUDE.md`'s "never edit an applied migration"). A scheduled
+    trigger's notification can't reuse `notify_todo_assigned`'s "X
+    asked you to" wording (no requester), so it gets its own body
+    naming the group instead. **Caveat, not fixed**: a daily-scheduled
+    group's todos stack on top of yesterday's if those are still open
+    — no de-duplication against an already-open, not-yet-completed
+    instance from a previous trigger.
+  - `_todo_query()` eager-loads `TodoItem.event_group_run ->
+    EventGroupRun.event_group` (needed by `TodoOut.event_group_name`);
+    manually audited all 9 `TodoOut.from_model()` call sites to confirm
+    each either sources from that query, only partially refreshes
+    already-loaded relationships, or has a guaranteed-null
+    `event_group_run_id` — avoiding a repeat of the lazy-load-outside-
+    a-session (`MissingGreenlet`) class of bug.
+  - **Caught my own bug before it shipped**: a first draft of the
+    create/update helper (`_add_event_group_members`) computed the
+    root/exclusion id sets correctly but never actually called
+    `db.add(...)` — the group's membership would have saved as
+    permanently empty. Caught re-reading the function, not by testing;
+    fixed by making it take `db` explicitly and actually construct +
+    add each `EventGroupTask`/`EventGroupExclusion` row.
+  - New routes: `POST /event-groups/preview` (declared before
+    `/event-groups/{group_id}` — same "literal route before dynamic"
+    ordering this codebase already uses for storage's `/items/bulk*`),
+    `GET`/`POST /event-groups`, `GET`/`PATCH`/`DELETE
+    /event-groups/{group_id}`, `POST /event-groups/{group_id}/trigger`.
+    Gated `can_read`/`can_write`, not admin-only — same as chain links.
+  - Verified live against the running dev backend using the user's own
+    "Dinner" example end to end: preview output structurally matches the
+    example; group creation persists roots/exclusions correctly; trigger
+    creates one todo per root, fairly split across two different
+    eligible users; completing a root todo fires its own chain children,
+    with the excluded one ("Empty dishwasher") still created but
+    correctly left untagged; two separate triggers of the same group
+    produce two independently-tagged runs; a chain-child or inactive
+    task as a root is rejected at both save and trigger time; deleting
+    the group leaves its todos in place, just ungrouped (cascade-then-
+    `SET NULL`). Test fixtures cleaned up afterward. The scheduling
+    follow-up was separately verified live, inside the running
+    container, by calling `run_scheduled_event_groups_if_due` directly
+    with an injected `now`: a daily group scheduled for 18:00 UTC fired
+    at `now=18:00` (created its todo, fairly assigned, `created_by_id`
+    correctly null, tagged with a fresh `EventGroupRun`, and wrote a
+    "New scheduled task" in-app `Notification` for the assignee), and a
+    second call with the same `now` correctly triggered nothing (today
+    already had a run). Test fixtures cleaned up afterward.
+- ✅ **1.2.0 follow-up: chain tasks spawn at parent creation, not
+  completion.** User request, explicit: "Tasks should appear not only
+  after finishing the pre chained task but should already be created
+  on task creation." A real reversal of 1.1.0's original design (see
+  that entry above) — the user also specified two constraints up
+  front, both implemented exactly as asked: "Reassignment only changes
+  the reassigned task without touching the chain task" and "if the
+  parent task gets cancelled the chain task gets deleted with it (add
+  a separate confirmation warning)."
+  - New `crud._spawn_chain_children_on_creation(db, *, parent_todo,
+    event_group_run_id=None)` — the creation-time sibling of the
+    existing `_spawn_chain_children` (completion-time). Both now share
+    a common tail, `_spawn_one_chain_child`, factored out specifically
+    so the two paths can't quietly drift apart on the actual
+    TodoItem-building logic; they only differ in what `anchor_user_id`
+    resolves to (whoever completed the parent, vs. whoever the parent
+    is CURRENTLY assigned to) and what gets stamped for idempotency
+    (`spawned_by_entry_id` vs. the new `spawned_by_todo_id`).
+  - Called from `create_todo` (a manually-posted "from task" todo) and
+    from `trigger_event_group`, for every root, right AFTER the
+    group's batch balance pass finalizes each root's `assigned_to_id`
+    — a same_user child's anchor, or a different_user child's
+    exclusion, has to be the root's FINAL assignee, not an
+    intermediate unassigned one. `EventGroupTriggerResult.todos` now
+    includes the spawned children too, not just the roots, so the
+    trigger toast's count is accurate.
+  - New `TodoItem.spawned_by_todo_id` (self-FK, `ON DELETE CASCADE` —
+    the only FK on this model that cascades instead of `SET NULL`,
+    since a pre-spawned child only exists as a forecast of its parent
+    happening; hard-deleting the parent takes it with it) with its own
+    `uq_todo_chain_spawn_by_todo` unique constraint (new migration
+    `91f748ff9d57`, on top of the scheduling one — never folded
+    together, per `CLAUDE.md`'s "never edit an applied migration").
+    Both unique constraints (the older entry-keyed one, this new
+    todo-keyed one) can be null at once for an ordinary todo, but never
+    both set for the same row — exactly one spawn mechanism per child.
+  - New `TodoItem.chain_spawn_handled` (default false) — set true on
+    the PARENT the instant creation-time spawning runs for it, whether
+    it actually spawned anything or the poster explicitly opted out.
+    `complete_todo` checks this before falling back to the old
+    completion-time `_spawn_chain_children` call, so a todo that
+    already got its children at creation never gets a second set.
+    Deliberately defaults false so a todo from before this change
+    (`chain_spawn_handled` still false, no `spawned_by_todo_id` row
+    exists for it) still falls back to spawning at completion exactly
+    like it always did — this round doesn't retroactively touch
+    anything already in flight.
+  - **Reassignment never touches an already-spawned child** — this
+    needed no new code at all, just discipline about NOT adding any:
+    `reassign_todo`, `claim_todo`, and `accept_takeover_request` are
+    completely unchanged. A same_user child's assignee is decided once,
+    at the moment both it and its parent exist, and never re-derived
+    afterward.
+  - **Cancelling deletes still-open chain children** (`crud.
+    cancel_todo`): `DELETE FROM todo_items WHERE spawned_by_todo_id =
+    :id AND status = 'open'`, added right alongside the existing
+    pending-takeover cleanup. Deliberately scoped to OPEN children
+    only — one someone's already completed keeps standing on its own
+    merit (cancelling the parent afterward shouldn't claw back real
+    work), and one already cancelled on its own is left exactly as is.
+    New `GET /todos/{id}/chain-children` (`crud.list_chain_children`)
+    lets the frontend name them in a confirmation before this happens,
+    rather than deleting silently.
+  - **The checkbox** ("Also create its chain task(s) now," board.js's
+    New Todo form): `TodoCreate.spawn_chain_children` (default true).
+    False "deactivates" it for that one todo specifically and
+    permanently — `create_todo` sets `chain_spawn_handled = true`
+    either way, so unchecking it isn't just a delay, `complete_todo`
+    will never spawn it later either. Per the user's explicit framing
+    ("Adding/Removing chain tasks will only be possible from the tasks
+    view"), there's no equivalent control on event groups — only
+    which chain descendants get the group's TAG is adjustable there
+    (the pre-existing `EventGroupExclusion`), not whether they're
+    created at all.
+  - **Notification wording**: a creation-time spawn gets its own body
+    ("New chain task" / `After "{parent}": {child}"`) rather than
+    reusing `notify_todo_assigned`'s "X asked you to" — nobody asked
+    for this, it's an automatic side effect of the parent now existing.
+    Unlike the completion-time path (which never notifies a same_user
+    pick, since that's the person who just acted), a creation-time
+    same_user pick IS notified — the anchor is whoever the parent
+    happens to be assigned to, not necessarily whoever's online right
+    now doing something.
+  - **Scope, stated rather than assumed**: only `TodoItem`-creating
+    paths (`create_todo`, `trigger_event_group`) spawn at creation. A
+    `Task` completed directly from Home — a daily standing chore, or a
+    weekly/monthly one via its balancer-assigned `TaskAssignment`,
+    neither of which is ever a `TodoItem` — has no "creation" moment to
+    hook a spawn into, so `complete_task` still spawns at completion,
+    unchanged. This inconsistency (board-posted chain tasks appear
+    immediately; recurring-task-driven ones still appear on
+    completion) was flagged to the user rather than silently decided
+    either way.
+  - Verified live against the running backend: a same_user chain
+    posted "from task" spawned its child immediately, assigned to the
+    SAME person as the parent; a different_user one spawned assigned
+    to someone else entirely (excluding the parent's assignee);
+    reassigning the parent to a third person left the already-spawned
+    child's assignee untouched; completing the parent afterward did
+    NOT spawn a second child; the opt-out checkbox (`spawn_chain_
+    children: false`) correctly produced zero children, and completing
+    that parent afterward still didn't spawn one; `GET /todos/{id}
+    /chain-children` correctly listed an open child before cancelling,
+    and cancelling correctly deleted it; a SEPARATE run confirmed a
+    child already completed before its parent was cancelled survived
+    the cancel untouched; triggering an event group with both a
+    same_user and a different_user root-chain pair correctly spawned
+    all 4 todos (2 roots + 2 children) in the one trigger, each with
+    the right assignee and all 4 tagged with the new `EventGroupRun`.
+    Test fixtures cleaned up afterward.
+- ✅ **1.2.0 follow-up: bulk-delete an event group run, and a scheduled
+  overdue cleanup — both real hard deletes.** User requests: "Board:
+  Ability to bulk delete event group -> Warning message shows which
+  tasks will get deleted" and "Option in Admin panel to delete overdue
+  taks after a set amount of days."
+  - **"Delete" has to mean delete.** A soft `cancel_todo`-style status
+    change would leave the rows visible again under the
+    Cancelled/All filters — not what either request asked for. Both
+    features hard-delete via a new shared `crud._hard_delete_todos
+    (db, todo_ids)`.
+  - **Why a shared helper was necessary, not just convenient**:
+    `TodoItem.spawned_by_todo_id`'s `ON DELETE CASCADE` doesn't look at
+    status — deleting an open parent would otherwise also wipe out a
+    child that's already completed (and earned real points) or already
+    cancelled on its own. `_hard_delete_todos` first nulls
+    `spawned_by_todo_id` on any NON-open child of the ids being
+    deleted (the same "stays, just loses the why pointer" treatment
+    `chain_link_id`'s own `SET NULL` already gets elsewhere), then
+    deletes. `delete_todo` (the pre-existing single-item route) now
+    routes through this too, not just the two new features — it had
+    the exact same latent gap before this.
+  - **The warning has to match reality exactly, so it's computed on
+    the server, not guessed from the frontend's already-loaded
+    `todosCache`.** `crud._event_group_run_cleanup_candidates(db,
+    run_id)` is every todo a bulk delete of one run would consider:
+    todos actually tagged with the run, PLUS any chain descendant
+    spawned by one of those that ISN'T tagged (excluded from the
+    group's own tag via `EventGroupExclusion` — still part of "this
+    event" for a bulk delete, even though it never showed up clustered
+    or badged for it). A naive `todosCache.filter(run_id)` on the
+    frontend would have silently missed exactly that excluded
+    descendant. `event_group_run_delete_preview` (dry run) and
+    `delete_event_group_run_todos` (the real thing) share this same
+    candidate computation, so the two can never disagree about what's
+    affected — new `GET`/`POST /event-group-runs/{run_id}/delete-
+    preview`/`delete`, both returning the same `EventGroupRunCleanup`
+    shape (`to_delete`/`to_keep`, each a list of `TodoStubOut`).
+  - **Overdue cleanup**: new `HouseholdSettings.overdue_delete_after_
+    days` (`None` default = off, migration `e8639b5f66da`, on top of
+    the chain-tasks-at-creation one — never folded together). A new
+    hourly `_overdue_cleanup_tick` calls `crud.
+    run_scheduled_overdue_cleanup`, which hard-deletes (via the same
+    shared helper, so a completed chain child of an overdue parent is
+    spared the same way) any still-open todo whose `due_date` is more
+    than the configured number of days in the past — "overdue" defined
+    exactly the way the Board's own due-date badge already does
+    (`util.js`'s `dueBadge`: `due_date < today`, UTC-anchored). No
+    "already ran today" bookkeeping needed, unlike the nudge/event-
+    group ticks — the delete query is naturally idempotent.
+  - Verified live against the running backend: built a parent with a
+    same_user child (excluded from an event group's tag) and a
+    different_user child (tagged), triggered the group, completed the
+    excluded child, then called the delete-preview — it correctly
+    listed the parent and the tagged child as `to_delete` and the
+    completed (untagged!) child as `to_keep`; the real delete matched
+    exactly, and the kept child's own `PointsEntry` (confirmed via
+    `GET /points/recent`) survived completely intact, `todo_item_id`
+    still pointing at the surviving row. For overdue cleanup: backdated
+    a dedicated test fixture 30 days via raw SQL inside the running
+    container (the API can't backdate — `due_in_days` must be `>= 0`),
+    temporarily set `overdue_delete_after_days=10` through the real
+    admin endpoint, ran the cleanup with an explicit `today` so the
+    test wasn't racing the real clock, and confirmed it deleted only
+    the 30-days-overdue fixture while leaving a real pre-existing
+    1-day-overdue row (already in this dev database, not mine) alone
+    — then immediately turned the setting back off. Test fixtures
+    cleaned up afterward.
+- ✅ **1.2.0 follow-up: a household-configurable timezone for the two
+  "at this hour" schedule pickers.** User report: "Time for time
+  scheduled event groups is in UTC -> Admin setting for Timezone."
+  - New `HouseholdSettings.timezone` (`String(64)`, `NOT NULL`, default
+    `"UTC"` — migration `7a2baea5f6dc`). Validated against the real
+    IANA database with `ZoneInfo(v)` in `HouseholdSettingsUpdate`'s own
+    field validator (422 on an unrecognized name), not a hand-maintained
+    allow-list.
+  - `crud._event_group_due` gained a `tz: str = "UTC"` keyword-only
+    param — converts `now` to that zone (`now.astimezone(ZoneInfo(tz))`)
+    before reading `.hour`/`.weekday()`, instead of assuming `now` is
+    already the right clock to read directly. Defaults to `"UTC"`
+    specifically so every pre-existing call/test that doesn't pass it
+    keeps its exact old behavior unchanged — confirmed live: all 9
+    pre-existing tests still pass with zero edits.
+  - `run_scheduled_event_groups_if_due`'s "already ran today" window
+    is now the household's own LOCAL calendar day (not UTC's) —
+    computed as that local day's midnight-to-midnight span in its own
+    zone, then converted to UTC for the actual query bounds. This
+    stays correct across a DST transition (that local day is 23 or 25
+    hours long in UTC terms; converting the local boundaries captures
+    exactly that span, not a naive flat 24h window).
+  - **`run_scheduled_nudge_if_due`/`send_weekly_nudge` got the full
+    same treatment**, not just a label change — this wasn't explicitly
+    asked for, but leaving the nudge schedule in raw UTC right next to
+    the now-fixed Event Group one, on the exact same Admin panel page,
+    would have been a confusing inconsistency I chose not to ship.
+    Both the weekday/hour check AND the `last_nudge_sent_week` dedup
+    stamp now derive from the same local-time `now` — stamping from a
+    DIFFERENT basis than the check would risk a double-send or a
+    skipped week right around a local midnight that falls on the other
+    side of the UTC day boundary; keeping both on one shared local
+    `now` avoids that by construction, not by coincidence.
+  - **DST edge case, documented rather than solved**: on a spring-
+    forward day, a schedule set for the local hour that gets skipped
+    entirely (e.g. `02:00` in a zone that jumps straight to `03:00`)
+    simply never matches that one day — there's no such local time to
+    compare against. Noted in `_event_group_due`'s own docstring.
+  - Added 5 new unit tests to the existing 9 in `test_event_group_
+    schedule.py` (41 → 46 passing overall): a default-tz regression
+    guard, Europe/Berlin firing correctly in both CEST (+2) and CET
+    (+1) for the same wall-clock hour, and — the one that actually
+    proves this isn't just a fixed-offset shift — a weekday-crossover
+    case where 2026-10-06 03:00 UTC (a Tuesday in raw UTC) is still
+    Monday evening in `America/Los_Angeles`, and a Monday-only schedule
+    correctly fires there while a Tuesday-only one correctly doesn't.
+  - Verified live against the running backend end to end, not just in
+    tests: set the household timezone to `Europe/Berlin` through the
+    real `PUT /settings`, created a daily Event Group scheduled for
+    `18`, and called `run_scheduled_event_groups_if_due` directly
+    inside the running container — it fired at `now=16:00 UTC`
+    (=18:00 CEST) and correctly did NOT fire at raw `18:00 UTC`
+    (=20:00 CEST) on either that same day or a fresh day with no prior
+    run, proving the hour conversion itself rather than just the
+    dedup. A second call at the hour it DID fire on produced nothing
+    (already ran that local day). Reset the timezone back to `UTC` and
+    cleaned up all test fixtures (the group, its task, both triggered
+    todos) afterward.
 
 ## Household service — frontend
 
@@ -1999,9 +2454,9 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   of its scheduled weekdays across the visible month, with every
   **monthly** task called out in a separate "This month:" strip above
   the grid (a monthly task has no specific day of the month to place it
-  on). Deliberately excludes daily tasks (on every cell by definition —
-  wouldn't tell anyone anything a list doesn't already) and chain-child
-  tasks (no independent schedule of their own). The grid's column order
+  on). Excludes chain-child tasks (no independent schedule of their
+  own) — see the 1.2.0 follow-up directly below for daily tasks, which
+  this originally also excluded. The grid's column order
   respects the admin-configured week start (`GET /settings`'s
   `week_start_weekday`), same rotation math as Stats' activity heatmap
   (`(weekday - weekStart + 7) % 7`) — kept independent of that module
@@ -2016,6 +2471,353 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   the daily task nowhere on the grid, today's cell visibly outlined,
   and prev/next navigation working, all with zero console errors. Test
   fixtures cleaned up afterward.
+- ✅ **1.2.0 follow-up: daily tasks now show on the calendar.** User
+  report: "Tasks set to daily don't show up in calendar as scheduled."
+  The exclusion above was deliberate at the time (a daily task's own
+  docstring already explains it's "on every cell by definition"), but
+  that reasoning didn't match what the user actually wanted — seeing a
+  task they set to Daily show up as scheduled somewhere on this page.
+  Now shown on **every** day cell, styled with a new `.cal-day-task-
+  daily` class (reduced opacity, italic) so a weekly task — the one
+  actually scheduled for that specific day — still reads as the more
+  notable entry at a glance. Chain-child tasks are still excluded
+  regardless of recurrence. Verified live at phone width: 31 non-empty
+  day cells in October 2026, 62 daily-task entries (2 daily tasks × 31
+  days), zero console errors.
+- ✅ **1.2.0: Event Groups UI.** Tasks page gained an "Event
+  Groups" section below Categories/Tasks: a list of saved groups
+  (viewer-visible, read-only), each writable user's row carrying a
+  one-tap trigger button. The create/edit modal avoids the exact
+  "dropdown floods with too many tasks" complaint that drove the
+  chain-link picker's redesign — root tasks are added the same way a
+  chain child is (the existing `openTaskPickerModal` search+category
+  popup, picking = adding immediately), shown afterward as removable
+  chips, not a native multi-select or a wall of checkboxes.
+  - **Live preview inside the modal**: every root add/remove calls
+    `POST /event-groups/preview` and re-renders the full list — each
+    root plain, each chain descendant with its own checkbox (checked =
+    grouped) labelled "After: {root}". A request-sequence counter
+    discards a stale response if a fast double-click fires two preview
+    calls back to back. Checkboxes are keyed by `task_id`, not list
+    position: the one-level chain cap still allows the same task to be
+    chained from two different roots in one group, so two checkboxes
+    can represent the same real task — toggling either one syncs both,
+    since they're the same `EventGroupExclusion` row. On save, any
+    exclusion the most recent preview response didn't confirm still
+    exists gets dropped, so a stale exclusion can't silently reappear
+    if that same task is chained again later under a different link.
+  - **A saved root can go stale** (deactivated, or chained under
+    another task, since the group was last saved) — shown as a dimmed,
+    flagged chip ("⚠", tooltip explaining it'll be removed) rather than
+    either silently vanishing or letting Save 400 against
+    `crud._validate_event_group_roots`. Dropped from the payload
+    automatically, never sent.
+  - **Trigger confirmation shows the full tree before anything is
+    created** — the user's explicit ask ("Shows all tasks that will be
+    created by the group in an overview before creation"). Re-fetches
+    `POST /event-groups/preview` fresh (not the group's last-saved
+    shape) right before showing the confirm modal, marking every row
+    both by timing ("Created now" for a root, "After: {root}" for a
+    descendant — a descendant isn't created until its root is actually
+    completed) and by grouping ("Grouped"/"Not grouped"). `showConfirmDialog`
+    only takes a plain string, so this needed its own small modal
+    rather than that shared one.
+  - **Board**: a "Group by event" toggle chip, sharing the same row as
+    the Open/Completed/Cancelled/All status chips (moved there in a
+    1.2.0 follow-up — see below; originally its own row underneath),
+    localStorage-persisted per viewer and wrapped in try/catch, default
+    on, clusters open/completed todos sharing an `event_group_run_id`
+    under a header naming the group and the trigger date (e.g. "Dinner
+    — Oct 6"). A header is inserted once, the first time a run's id is
+    seen in the list's existing order — a chain descendant tagged with
+    the same run usually spawns later (after its root is completed) and
+    so lands far below with no second header of its own. Every todo row
+    still carries a small "Dinner"-style badge regardless of the toggle
+    (`todosCache` is kept so toggling re-renders instantly, no refetch),
+    since a row can end up far from its header, and there's no header
+    at all when the toggle is off.
+  - New CSS: `.list-group-header` (Board's cluster header),
+    `.eg-preview-row`/`.eg-preview-descendant` (the preview rows in both
+    the create modal and the trigger-confirm modal).
+  - **1.2.0 follow-up: schedule UI.** The create/edit modal gained a
+    "Also trigger this automatically" checkbox revealing a Repeats
+    select (Every day / Specific weekdays — mirrors the Task modal's
+    own recurrence UI, including reusing its `.weekday-pill` picker)
+    and an "At (UTC)" hour select, labelled and laid out the same way
+    the Admin panel's weekly-nudge schedule already is. Each saved
+    group's list row shows a badge summarizing its schedule (e.g. "Tue
+    Thu · 09:00 UTC") when one is set. Verified live: enabling a weekly
+    schedule, picking Tue/Thu at 09:00, saving, and reopening the same
+    group round-tripped every field correctly (checkbox, recurrence,
+    both weekday pills, hour), with the list row's badge matching.
+  - **1.2.0 follow-up: "Group by event" moved onto the status row.**
+    User feedback: it read as an odd extra row below
+    Open/Completed/Cancelled/All. Moved into the same `#status-chips`
+    chip-row. This meant three existing selectors needed scoping to
+    `.chip[data-status]` specifically, or they'd also catch the new
+    chip: the status click handler (would have set `state.status =
+    undefined` and cleared every status chip's active state when the
+    toggle was clicked), its own active-state reset, and
+    `openTodoModal`'s post-save reset-to-"Open" line (would have
+    silently turned the toggle off every time a todo was posted, since
+    `c.dataset.status === "open"` is false for a chip with no
+    `data-status` at all). Verified live at 375px width: the row wraps
+    onto a second line rather than overflowing (`flex-wrap: wrap`
+    already in `.chip-row`), and clicking either the toggle or a status
+    chip only ever changes that chip's own active state.
+  - **Found and fixed a real, pre-existing bug while verifying the
+    above at phone width** — unrelated to Event Groups itself, surfaced
+    by filtering the Board to "Completed" during this round's
+    verification: `board.js`'s `iHoldIt` (whether to show the
+    takeover-ask control on a row) didn't check `todo.status ===
+    "open"`, only whether you're the assignee. The `.takeover-slot`
+    element it replaces only renders inside the open-only actions
+    block, so holding a todo that's since been completed or cancelled
+    (nothing clears `assigned_to` on either) crashed `replaceWith()`
+    against an element that was never there. Fixed by adding the status
+    check to `iHoldIt` itself.
+  - Verified in a real headless Chromium session (driven directly over
+    the DevTools protocol — Playwright itself isn't installed in this
+    sandbox, so the harness talks CDP via Python's `websockets` package
+    instead) against the running dev stack, using the user's own Dinner
+    example: searched and added both roots through the picker, watched
+    the live preview populate with the correct "After: {root}" rows,
+    unchecked "Empty dishwasher," saved, opened the trigger-confirm
+    modal and confirmed it showed all 5 rows with the correct now/later
+    and grouped/not-grouped marks, triggered it, confirmed the Board
+    clustered the two created todos under a "EGUI Dinner — Oct 6"
+    header, toggled grouping off and confirmed the header disappeared
+    while the badges stayed, reloaded and confirmed the toggle's OFF
+    state persisted, then logged in as a fresh local viewer account and
+    confirmed the section is visible but has no add/trigger controls and
+    its rows aren't clickable. Zero console exceptions at every step.
+    Test fixtures (tasks, todos, the event group) cleaned up afterward
+    via the API; the throwaway local viewer account itself was left in
+    place, since the auth service has no delete-user endpoint yet.
+- ✅ **1.2.0 follow-up: notification panel flicker fixed.** User
+  report: "Notification window closes and reappears for a moment after
+  pressing mark all read or x." Root cause: `renderPanelList` cleared
+  `#notif-panel-plain` to an empty string and `#notif-panel-takeover`
+  to a loading skeleton BEFORE the refetch even started, then refilled
+  both once it landed — on a re-render of an already-open panel (every
+  call except the very first), that put a real empty/skeleton gap
+  between the old content disappearing and the new content appearing.
+  Confirmed live by polling the panel's DOM every 20ms through a click
+  on "Mark all read": `#notif-panel-plain`'s `innerHTML` length went
+  non-zero → 0 → non-zero again within about 90ms — a real, measured
+  blank flash, not a guess. Fixed by only doing the initial clear-to-
+  skeleton on the panel's true first render (`renderPanelList(overlay,
+  { initial: true })`, called only from `openNotificationPanel`); every
+  other call now leaves the old content on screen untouched until
+  `renderTakeoverSection`/`renderPlainSection` swap it for the new
+  content in one atomic step, so there's nothing in between to see.
+  Re-verified the same way after the fix: the DOM polling showed the
+  list going directly from the old full content to the new full
+  content, no zero-length sample in between, across both "Mark all
+  read" and the "x" dismiss button. Zero console exceptions.
+- ✅ **1.2.0 follow-up: Event Groups can now be triggered from the
+  Board, not just the Tasks page.** User request. The New Todo modal's
+  footer gained a second button, "Event group…", next to "Post to
+  board" — closes that modal and opens a simple pick-one list of saved
+  event groups (`eventGroups.js`'s `openEventGroupPickerModal`, no
+  search/category filter like `taskPicker.js`, since a household
+  realistically has a handful of these, not dozens of tasks), then the
+  same trigger-confirmation modal the Tasks page already uses
+  (`openTriggerConfirmModal`, now pulled out of `tasks.js` into the new
+  shared `eventGroups.js` module rather than duplicated — its unused
+  `container` parameter from the original version was dropped in the
+  move, and it gained an `onTriggered` callback so board.js can refresh
+  the todo list afterward; `tasks.js`'s own call site needs neither).
+  Verified live end to end: opened the New Todo modal, clicked "Event
+  group…", confirmed that modal closed and the picker opened listing
+  the real saved groups, picked one by name, confirmed the trigger
+  modal showed the correct preview, confirmed, saw the success toast,
+  and confirmed the newly created todo appeared on the Board tagged
+  with that group — then separately re-verified the Tasks page's own
+  trigger button still works unchanged after the extraction. Zero
+  console exceptions either way. Test fixtures cleaned up afterward.
+- ✅ **1.2.0 follow-up: Event Groups made easier to find and create.**
+  User feedback: "the event group button is hard to find and not well
+  placed." It previously sat below the Tasks list (often the longest
+  section on the page, so Event Groups needed a scroll past it) with
+  only a small icon-only "+" matching Categories' own minor "+" button
+  — nothing signaled it as a feature worth noticing. Moved the whole
+  section between Categories and Tasks; replaced the icon button with
+  a full-width labelled "New event group…" one (keeping the id
+  `add-event-group-btn` stable); and turned the empty state from quiet
+  muted text into a real call to action (a centered "Create your first
+  one" button). The Board's own picker (see the entry above) got the
+  same treatment for ITS empty state — "create one on the Tasks page"
+  is now an actual button that calls `navigate("/tasks")`, not just
+  text naming where to go. Verified live at 375px width: the "Event
+  Groups" heading and its new button both measured well within the
+  viewport height on page load (no scroll needed), and the button
+  still opens the create modal correctly. Zero console exceptions.
+- ✅ **1.2.0 follow-up: chain-task UI for the creation-time spawn
+  change above.** The New Todo form (board.js) gained a checkbox,
+  "Also create its chain task(s) now" (`#t-spawn-chain`, defaults
+  checked), shown only when the picked "from task" actually has an
+  outgoing chain link (`GET /tasks/{id}/chain-links`, fetched the
+  moment a task is picked) — nothing to deactivate otherwise, so the
+  field stays hidden. Unchecking it sends `spawn_chain_children: false`
+  with the post.
+  - **Cancel confirmation now warns by name.** Before showing the
+    cancel confirm dialog, board.js calls the new `GET /todos/{id}
+    /chain-children`; if it comes back non-empty, the dialog's message
+    becomes "Cancel '{title}'? This will also delete its chain
+    task(s): {names}." instead of the plain "Cancel '{title}'?" — the
+    user explicitly asked for this as "a separate confirmation
+    warning," not just a silent cascade delete.
+  - **Wording swept clean of the now-false "After" timing claim.**
+    Chain descendants used to only ever exist because their parent HAD
+    happened, so "After: {parent}" was literally true; now that they
+    spawn alongside the parent instead, a todo tagged "After: Set the
+    table" can sit open on the board at the same time "Set the table"
+    is still open too — reading "after" there would look like a bug,
+    not a feature. Every "After: X" badge became "Chained from: X"
+    (lineage, not timing) in three places: the Board's own chain badge
+    on a todo row (`chain_parent_task_name`), the create/edit Event
+    Group modal's live preview (`tasks.js`), and the trigger-confirm
+    modal (`eventGroups.js`, shared with the Board's own trigger
+    button) — which also now marks every row "Created now" uniformly
+    (root AND descendant alike), since both really are created in the
+    same trigger now.
+  - Verified live in a real headless Chromium session: picking a task
+    WITH a chain link correctly revealed the checkbox (hidden
+    beforehand and for a task with none); unchecking it and posting
+    produced zero chain-spawned todos on the board, confirmed via the
+    API; cancelling a parent with an open pre-spawned child showed the
+    exact warning text naming the child, and confirming it removed
+    BOTH from the board. (Caught two of my own test-script bugs along
+    the way, not product bugs — a picker click that landed on the
+    wrong row, and a cancel click that landed on the child's own row
+    instead of the parent's, both because my selector matched on
+    whatever text was ANYWHERE in the row rather than the row's own
+    title specifically; the "Chained from: X" text on a child's row
+    made this easy to trip over by searching for the parent's name.
+    Re-verified correctly once the selectors targeted `.list-row-title`
+    exactly.) Zero console exceptions once corrected. Test fixtures
+    cleaned up afterward.
+- ✅ **1.2.0 follow-up: event-group entry points moved to a secondary
+  FAB, Board clusters into real cards, bulk delete, and a chain-task
+  preview.** User feedback, several items at once: the Board's event-
+  group button "doesn't feel intuitive and is hard to find"; "Group
+  Event Views in a new top card instead of just a heading... to make
+  them identifiable as an event that belongs together"; "Replace [the
+  Tasks page's] add event group button with a button similar to
+  [creating something else already on that page]"; "Display in task
+  creation view which chain tasks will be created if Also create
+  chain tasks is selected"; and the bulk-delete UI for the backend
+  entry above.
+  - **New `.fab-secondary`** (`components.css`) — a second, smaller
+    FAB stacked 68px above the primary one, same accent color (not
+    muted) specifically so it reads as an equally real action, not an
+    afterthought. Both the Board (`#trigger-event-group-fab`, opens
+    the group picker directly — no more detour through the New Todo
+    modal, whose footer button is gone entirely now) and the Tasks
+    page (`#add-event-group-fab`, replacing last round's full-width
+    inline button) use it, specifically because repeated "hard to
+    find" feedback on two different placements pointed at the same
+    fix: a real, persistent, thumb-reachable button, not a button
+    competing for attention inside other UI.
+  - A page using two stacked FABs needs the new `.page-dual-fab` class
+    too (extra `padding-bottom`) or the primary FAB visually covers
+    the last rows once scrolled to the bottom — verified live at
+    375px width by actually scrolling to the bottom and comparing the
+    true last row's position against both FABs (an initial version of
+    this check, done without scrolling first, wrongly flagged a false
+    positive — a row still above the fold at the top of the page looked
+    "covered" by the fixed-position FAB's own screen coordinates, which
+    only means something once you're actually scrolled down).
+  - **Tasks-page wording note**: the user's exact phrase was "replace
+    [...] with a button similar to group creation," which is genuinely
+    ambiguous between "similar to how Categories' own creation button
+    looks" (a small heading-icon) and "similar to how Task creation
+    works" (the existing FAB) — I read it as the latter, since it's
+    consistent with the Board fix the same message explicitly asked
+    for, but didn't confirm this before building it. Flagged in the
+    report.
+  - **Event cards**: new `.event-card`/`.event-card-header`/`.event-
+    card-title-group`/`.event-card-title`/`.event-card-date` CSS.
+    `board.js`'s `renderTodoList` now pulls EVERY member of a run into
+    one card together, regardless of where each one sits in the
+    fetched list order — a chain descendant tagged with the same run
+    can spawn well after its root and used to land far below it in a
+    flat render; now it's inside the same card regardless. The card
+    only exists while "group by event" is on — there's nothing to put
+    it on when grouping is off, so the bulk-delete button (below) is
+    only reachable in grouped view; stated here rather than silently
+    decided either way.
+  - **Bulk delete UI**: the card header's trash-icon button
+    (`eventCard`'s `[data-action="delete-event"]`) calls
+    `openDeleteEventModal`, which fetches the real server-side preview
+    (`GET /event-group-runs/{run_id}/delete-preview`) and builds the
+    confirm dialog's message from it — naming every affected task by
+    title, plus a note on how many completed tasks are being kept, if
+    any — rather than guessing from `todosCache`. Confirming calls
+    `POST /event-group-runs/{run_id}/delete` and refreshes the board.
+  - **Chain-task preview**: the New Todo form's "Also create its chain
+    task(s) now" checkbox (added last round) now has a line underneath
+    naming what it would create ("Will also create: Clear the table"),
+    built from the exact same `GET /tasks/{id}/chain-links` fetch that
+    already decided whether to show the checkbox at all — no second
+    network call. A request-sequence counter guards against picking
+    task A then quickly task B before A's own fetch lands, which could
+    otherwise show A's chain task names under B's checkbox. The line
+    toggles off when the checkbox is unchecked (reinforcing what
+    unchecking it actually does) and back on when re-checked.
+  - Verified live in a real headless Chromium session at 375px width:
+    both FABs render without overlapping each other, the Tasks page's
+    FAB opens the create-group modal, the Board's FAB opens the group
+    picker directly; an event card renders with the correct title/date
+    and a working delete button; the full bulk-delete flow (open →
+    server preview → confirm dialog naming the task → confirm → card
+    disappears from the board) worked end to end; the chain-task
+    preview correctly showed/hid/re-showed the child task name as the
+    checkbox was toggled. Zero console exceptions. Test fixtures
+    (tasks, an event group, its triggered todos) cleaned up afterward.
+- ✅ **1.2.0 follow-up: FAB centering fix, and an admin timezone
+  picker.** User reports: "Event group button on Board and Tasks is
+  not centered" and "Time for time scheduled event groups is in UTC ->
+  Admin setting for Timezone."
+  - **FAB centering**: `.fab-secondary`'s `right` was the exact same
+    value as `.fab`'s own (`var(--space-5)`), but the two buttons are
+    different widths (48px vs. 56px) — right-aligning two different-
+    width boxes to the same edge leaves their CENTERS 4px apart, not
+    stacked on one vertical axis. Fixed by adding half that 8px
+    difference (`+4px`) to `.fab-secondary`'s own `right`. Verified
+    live by measuring `(left + right) / 2` for both buttons on both
+    the Board and Tasks pages at 375px width — both now report the
+    identical center-x (diff of `0`), not just "looks closer."
+  - **Timezone picker**: new "Timezone" settings block on the Admin
+    panel (`admin.js`'s `loadTimezone`), placed right before
+    "Reminders" since that section's own hour picker depends on it.
+    Populates a real `<select>` from `Intl.supportedValuesOf
+    ("timeZone")` when the browser supports it (with `"UTC"` prepended
+    if the browser's own list omits that plain alias — confirmed
+    Chrome's does), falling back to a free-text input (still server-
+    validated) otherwise. `admin.js`'s `patchSettings` — the single
+    shared `PUT /settings` call site, since that route replaces the
+    whole settings row — needed `timezone: current.timezone` added to
+    its spread-defaults, or every OTHER unrelated Save (goal, nudge,
+    overdue) would have silently reset it back to the schema's own
+    `"UTC"` default; this is the exact same gap `overdue_delete_after_
+    days` had the round before, caught this time before shipping by
+    grepping for every `PUT ${HB}/settings` call site up front rather
+    than after the fact.
+  - Every `"At (UTC)"` label became the real configured zone instead:
+    `admin.js`'s nudge-hour label, and both the label and explanatory
+    paragraph next to `tasks.js`'s Event Group schedule-hour picker. A
+    new module-level `timezoneCache` in `tasks.js` (fetched once per
+    page load, alongside categories/tasks) backs both that label and
+    the schedule-summary badge on each saved group's own list row
+    (e.g. "Tue Thu · 09:00 Europe/Berlin") without a network round
+    trip per row.
+  - Verified live: set the household timezone to `Europe/Berlin`
+    through the real Admin panel UI, confirmed the nudge-hour label
+    updated to say so, reset it back to `UTC` through the same UI, and
+    confirmed on reload that both the picker's selected value and the
+    label text reverted correctly. Zero console exceptions.
 - ✅ Alembic set up per service (independent revision histories), using
   the shared `shared/migrations.py` env logic.
 - ✅ `shared/entrypoint.sh` runs `alembic upgrade head` before `uvicorn`

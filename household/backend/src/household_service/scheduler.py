@@ -65,6 +65,21 @@ async def _balancing_tick() -> None:
         )
 
 
+async def _event_group_tick() -> None:
+    """Runs every hour on the hour; most ticks are no-ops — most groups
+    aren't scheduled at all, and the ones that are only match one exact
+    hour (see crud._event_group_due)."""
+    async with async_session_factory() as db:
+        triggered = await crud.run_scheduled_event_groups_if_due(db)
+    for group, run, todos in triggered:
+        logger.info(
+            "Scheduled event group triggered: %r (run=%s, %s todo(s))",
+            group.name,
+            run.id,
+            len(todos),
+        )
+
+
 async def _auto_report_tick() -> None:
     """Runs every hour on the hour; most ticks are no-ops (see
     crud.run_scheduled_auto_report_if_due — it's a "catch up" check, not
@@ -79,6 +94,25 @@ async def _auto_report_tick() -> None:
             report.period_start,
             report.period_end,
         )
+
+
+async def _overdue_cleanup_tick() -> None:
+    """Runs every hour on the hour; a no-op unless an admin has set
+    HouseholdSettings.overdue_delete_after_days (off by default). No
+    "already ran today" dedup needed — the delete query is naturally
+    idempotent, a row that's already gone can't match it again on the
+    next tick. Wrapped defensively (a bad row shouldn't be possible,
+    but this is a real delete, not a dry run) so a failure doesn't take
+    down the whole scheduler loop."""
+    async with async_session_factory() as db:
+        try:
+            deleted = await crud.run_scheduled_overdue_cleanup(db)
+        except Exception:
+            await db.rollback()
+            logger.exception("Scheduled overdue cleanup failed")
+            return
+    if deleted:
+        logger.info("Scheduled overdue cleanup: deleted %s todo(s)", len(deleted))
 
 
 def start() -> None:
@@ -102,6 +136,20 @@ def start() -> None:
         _auto_report_tick,
         CronTrigger(minute=10),
         id="auto_report_tick",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _event_group_tick,
+        CronTrigger(minute=15),
+        id="event_group_tick",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _overdue_cleanup_tick,
+        CronTrigger(minute=20),
+        id="overdue_cleanup_tick",
         replace_existing=True,
         misfire_grace_time=3600,
     )

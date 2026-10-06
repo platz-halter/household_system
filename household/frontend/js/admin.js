@@ -44,6 +44,18 @@ export async function renderAdmin(container) {
       </div>
 
       <div class="settings-section">
+        <h3>Timezone</h3>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
+          Which timezone "At ..." times below (the reminder schedule, and
+          each Event Group's own schedule on the Tasks page) are in. Changing
+          this changes what those existing schedules actually fire at in wall-
+          clock terms, not just their label. Nothing else in the app — due
+          dates, the weekly goal period, the balancer — is affected.
+        </p>
+        <div id="timezone-root"></div>
+      </div>
+
+      <div class="settings-section">
         <h3>Reminders</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
           Pushes anyone subscribed (Settings &rarr; Notifications) who's below
@@ -78,6 +90,18 @@ export async function renderAdmin(container) {
         </div>
         <div id="auto-report-root" style="margin-bottom: var(--space-3);"></div>
         <div id="reports-root"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>Overdue tasks</h3>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
+          Automatically removes a board todo once it's been overdue for
+          longer than this — a real delete, not a cancel, so it stops
+          cluttering every status filter including "All." A todo
+          someone's already completed is never touched by this,
+          regardless of how overdue it was before that.
+        </p>
+        <div id="overdue-cleanup-root"></div>
       </div>
 
       <div class="settings-section">
@@ -135,9 +159,11 @@ export async function renderAdmin(container) {
   });
 
   await loadWeekStart(container);
+  await loadTimezone(container);
   await loadGoal(container);
   await loadMoneyRate(container);
   await loadSchedule(container);
+  await loadOverdueCleanup(container);
   await loadAutoReport(container);
   await loadReports(container);
   await loadAuthentikConfig(container);
@@ -164,6 +190,58 @@ async function loadWeekStart(container) {
         showToast('Saved — "this week" now starts on that day everywhere', "success");
       } catch {
         /* api.js already showed a toast */
+      }
+    });
+  } catch {
+    cancelSkeleton();
+    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+  }
+}
+
+// Intl.supportedValuesOf isn't in every browser yet — falls back to a
+// plain text input (server-side validated against the real IANA
+// database either way, via ZoneInfo) rather than hand-maintaining a
+// parallel list of timezone names here.
+function listTimezones() {
+  if (typeof Intl.supportedValuesOf !== "function") return null;
+  try {
+    const zones = Intl.supportedValuesOf("timeZone");
+    // Chrome's own list doesn't include the plain "UTC" alias — without
+    // this, selecting a fresh household's actual default value has
+    // nothing to show, and re-saving the form would silently pick
+    // whatever the list's first real entry happens to be instead.
+    return zones.includes("UTC") ? zones : ["UTC", ...zones];
+  } catch {
+    return null;
+  }
+}
+
+async function loadTimezone(container) {
+  const root = container.querySelector("#timezone-root");
+  if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
+  try {
+    const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
+    const zones = listTimezones();
+    root.innerHTML = `
+      <div class="row">
+        ${
+          zones
+            ? `<select class="select grow" id="timezone-select">
+                 ${zones.map((z) => `<option value="${escapeAttr(z)}" ${settings.timezone === z ? "selected" : ""}>${escapeHtml(z)}</option>`).join("")}
+               </select>`
+            : `<input class="input grow" id="timezone-select" value="${escapeAttr(settings.timezone)}" placeholder="e.g. Europe/Berlin" />`
+        }
+        <button class="btn btn-primary" id="timezone-save">Save</button>
+      </div>
+    `;
+    root.querySelector("#timezone-save").addEventListener("click", async () => {
+      try {
+        await patchSettings({ timezone: root.querySelector("#timezone-select").value.trim() });
+        showToast("Saved", "success");
+      } catch {
+        /* api.js already showed a toast (e.g. an unrecognized name typed into the fallback input) */
       }
     });
   } catch {
@@ -262,6 +340,8 @@ async function patchSettings(partial) {
     nudge_hour: current.nudge_hour,
     week_start_weekday: current.week_start_weekday,
     auto_report_enabled: current.auto_report_enabled,
+    overdue_delete_after_days: current.overdue_delete_after_days,
+    timezone: current.timezone,
     ...partial,
   });
 }
@@ -289,7 +369,7 @@ async function loadSchedule(container) {
           </select>
         </div>
         <div class="field">
-          <label for="schedule-hour">At (UTC)</label>
+          <label for="schedule-hour">At (${escapeHtml(settings.timezone)})</label>
           <select class="select" id="schedule-hour">
             ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${settings.nudge_hour === h ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("")}
           </select>
@@ -322,6 +402,57 @@ async function loadSchedule(container) {
   } catch {
     cancelSkeleton();
     root.innerHTML = `<div class="empty-state">Couldn't load the reminder schedule</div>`;
+  }
+}
+
+async function loadOverdueCleanup(container) {
+  const root = container.querySelector("#overdue-cleanup-root");
+  if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
+  try {
+    const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
+    const enabled = settings.overdue_delete_after_days !== null;
+
+    root.innerHTML = `
+      <div class="field">
+        <label class="row"><input type="checkbox" id="overdue-enabled" ${enabled ? "checked" : ""} /> <span>Automatically delete overdue todos</span></label>
+      </div>
+      <div class="field" id="overdue-fields" style="margin-top: var(--space-2); ${enabled ? "" : "display:none;"}">
+        <label for="overdue-days">After this many days overdue</label>
+        <input class="input" type="number" min="1" id="overdue-days" value="${enabled ? settings.overdue_delete_after_days : 7}" />
+      </div>
+      <div class="row" style="margin-top: var(--space-2);">
+        <span class="muted" style="font-size: var(--font-size-xs); flex: 1;"></span>
+        <button class="btn btn-primary" id="overdue-save">Save</button>
+      </div>
+    `;
+
+    const enabledCheckbox = root.querySelector("#overdue-enabled");
+    const fields = root.querySelector("#overdue-fields");
+    enabledCheckbox.addEventListener("change", () => {
+      fields.style.display = enabledCheckbox.checked ? "" : "none";
+    });
+
+    root.querySelector("#overdue-save").addEventListener("click", async () => {
+      const on = enabledCheckbox.checked;
+      const days = Number(root.querySelector("#overdue-days").value || 0);
+      if (on && days < 1) {
+        showToast("Enter at least 1 day", "warning");
+        return;
+      }
+      try {
+        await patchSettings({
+          overdue_delete_after_days: on ? days : null,
+        });
+        showToast("Saved", "success");
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+  } catch {
+    cancelSkeleton();
+    root.innerHTML = `<div class="empty-state">Couldn't load this setting</div>`;
   }
 }
 

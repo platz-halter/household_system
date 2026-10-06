@@ -248,6 +248,129 @@ class TaskAssignment(Base):
     household_user: Mapped[HouseholdUser] = relationship()
 
 
+class EventGroup(Base):
+    """A named bundle of "root" tasks that get created on the board
+    together, on demand — e.g. "Dinner": Set the table, Fill dishwasher.
+    Deliberately a flat list of roots, not a tree: chaining is capped at
+    one level (see TaskChainLink), so a root task's own chain children
+    are never stored here — they're computed live from the current
+    chain-link graph at preview/trigger time (crud.preview_event_group),
+    which is also why a chain link added after this group was saved
+    still shows up automatically. `EventGroupExclusion` is the one
+    thing about a root's descendants that IS persisted here: which ones
+    are deliberately left out of this group's tagging (e.g. "Empty
+    dishwasher" is still chained from "Fill dishwasher" and still gets
+    created when its turn comes, it's just not tagged as a Dinner
+    task).
+
+    `schedule_recurrence` (None = not scheduled) lets a group trigger
+    itself automatically instead of needing someone to tap it every
+    time — "daily" or "weekly" only, deliberately: unlike Task's own
+    recurrence, there's no "sometime this month" concept that makes
+    sense for an immediate-creation trigger (which specific day would
+    a "monthly" group fire on?), so that case is simply not offered
+    here. A plain `String`, not a Postgres enum, so adding/dropping a
+    choice later never needs its own migration dance (see
+    MIGRATIONS.md's enum section) the way `Task.recurrence` would.
+    `schedule_weekdays` only matters for "weekly" (0=Monday..6=Sunday,
+    same convention as `Task.weekdays`). `schedule_hour` is UTC, same
+    convention as `HouseholdSettings.nudge_hour` — see
+    household_service.scheduler/crud.run_scheduled_event_groups_if_due
+    for the actual due-check."""
+
+    __tablename__ = "event_groups"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), unique=True)
+    schedule_recurrence: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    schedule_weekdays: Mapped[list[int] | None] = mapped_column(
+        ARRAY(Integer), nullable=True
+    )
+    schedule_hour: Mapped[int] = mapped_column(Integer, default=18, server_default="18")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    roots: Mapped[list["EventGroupTask"]] = relationship(
+        back_populates="event_group",
+        cascade="all, delete-orphan",
+        order_by="EventGroupTask.position",
+    )
+    exclusions: Mapped[list["EventGroupExclusion"]] = relationship(
+        back_populates="event_group", cascade="all, delete-orphan"
+    )
+
+
+class EventGroupTask(Base):
+    """One root task in an EventGroup — triggering the group creates a
+    one-off TodoItem for each of these immediately (crud.
+    trigger_event_group), fairly assigned the same way the balancer's
+    sweep assigns anything else. `position` is display/creation order."""
+
+    __tablename__ = "event_group_tasks"
+    __table_args__ = (
+        UniqueConstraint("event_group_id", "task_id", name="uq_event_group_task"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_group_id: Mapped[int] = mapped_column(
+        ForeignKey("event_groups.id", ondelete="CASCADE")
+    )
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    event_group: Mapped[EventGroup] = relationship(back_populates="roots")
+    task: Mapped[Task] = relationship()
+
+
+class EventGroupExclusion(Base):
+    """A chain descendant of one of this group's root tasks that should
+    NOT inherit the group's tag when it eventually spawns (see
+    crud._spawn_chain_children's event_group_run_id handling) — it's
+    still created normally through the ordinary chain mechanism, it
+    just isn't grouped/badged as part of this event."""
+
+    __tablename__ = "event_group_exclusions"
+    __table_args__ = (
+        UniqueConstraint("event_group_id", "task_id", name="uq_event_group_exclusion"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_group_id: Mapped[int] = mapped_column(
+        ForeignKey("event_groups.id", ondelete="CASCADE")
+    )
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"))
+
+    event_group: Mapped[EventGroup] = relationship(back_populates="exclusions")
+    task: Mapped[Task] = relationship()
+
+
+class EventGroupRun(Base):
+    """One occurrence of triggering an EventGroup — e.g. "Dinner" on a
+    particular evening. Exists so the Board can cluster everything from
+    THIS specific triggering together without conflating it with a
+    different day's run of the same group. Deleting the EventGroup
+    cascades here, which in turn SET NULLs every TodoItem.
+    event_group_run_id it tagged — the todos themselves are never
+    touched, just ungrouped."""
+
+    __tablename__ = "event_group_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    event_group_id: Mapped[int] = mapped_column(
+        ForeignKey("event_groups.id", ondelete="CASCADE")
+    )
+    triggered_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("household_users.id", ondelete="SET NULL"), nullable=True
+    )
+    triggered_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    event_group: Mapped[EventGroup] = relationship()
+    triggered_by: Mapped[HouseholdUser | None] = relationship()
+
+
 class TodoItem(Base):
     """A one-off task request posted to the todo board, separate from the
     recurring `Task` schedule — also how a chain task's spawned instance
@@ -266,6 +389,16 @@ class TodoItem(Base):
         UniqueConstraint(
             "chain_link_id", "spawned_by_entry_id", name="uq_todo_chain_spawn"
         ),
+        # Same idempotency guarantee, for the OTHER way a chain child can
+        # get spawned now: at its parent's own creation (see
+        # crud._spawn_chain_children_on_creation), not just at the
+        # parent's completion. A chain child from completion has
+        # spawned_by_todo_id null; one from creation has
+        # spawned_by_entry_id null — never both, so these two
+        # constraints can't collide with each other either.
+        UniqueConstraint(
+            "chain_link_id", "spawned_by_todo_id", name="uq_todo_chain_spawn_by_todo"
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -277,7 +410,14 @@ class TodoItem(Base):
         Enum(TodoStatus, name="todo_status"), default=TodoStatus.open
     )
 
-    created_by_id: Mapped[int] = mapped_column(ForeignKey("household_users.id"))
+    # Null only for a scheduled Event Group's own auto-trigger (see
+    # crud.trigger_event_group/run_scheduled_event_groups_if_due) — there's
+    # no human actor at all for that, unlike every other way a TodoItem
+    # gets created. The frontend shows "Scheduled" in place of "by {name}"
+    # when this is null.
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey("household_users.id"), nullable=True
+    )
     # Who it was requested of, if anyone in particular (drives the push
     # notification once that's built) — any user/admin can still complete
     # it, this is metadata rather than an access restriction.
@@ -299,15 +439,39 @@ class TodoItem(Base):
     # spawned this instance (ON DELETE SET NULL — if the link's later
     # removed, the already-spawned todo stays, it just loses the "why"
     # pointer). spawned_by_entry_id is the specific PointsEntry whose
-    # completion triggered the spawn — works whether the parent was a
-    # Task completion or another chain todo's completion (chains can run
-    # more than one level deep) — paired with chain_link_id in the
+    # completion triggered the spawn — paired with chain_link_id in the
     # unique constraint above for idempotent spawning.
     chain_link_id: Mapped[int | None] = mapped_column(
         ForeignKey("task_chain_links.id", ondelete="SET NULL"), nullable=True
     )
     spawned_by_entry_id: Mapped[int | None] = mapped_column(
         ForeignKey("points_entries.id", ondelete="SET NULL"), nullable=True
+    )
+    # The PARENT todo whose own CREATION (not completion) spawned this
+    # chain child — see crud._spawn_chain_children_on_creation. ON DELETE
+    # CASCADE (not SET NULL, unlike every other FK on this model): a
+    # pre-spawned child only exists as a forecast of its parent actually
+    # happening, so hard-deleting the parent takes it with it. Cancelling
+    # the parent (a status change, not a delete) can't rely on this FK —
+    # crud.cancel_todo deletes any still-OPEN child explicitly instead,
+    # deliberately leaving an already-completed or already-cancelled one
+    # alone (see that function's own docstring).
+    spawned_by_todo_id: Mapped[int | None] = mapped_column(
+        ForeignKey("todo_items.id", ondelete="CASCADE"), nullable=True
+    )
+    # True once this todo's own chain children have been handled at
+    # CREATION time (crud.create_todo / trigger_event_group) — whether
+    # that meant actually spawning them, or the creator explicitly opted
+    # out via "Also create its chain tasks" unchecked. Either way,
+    # complete_todo must not spawn them a second time. Only ever
+    # meaningful for a todo with source_task_id set; left at its default
+    # for everything else (a chain-spawned child can't itself have chain
+    # children — chaining is capped at one level — and an ordinary
+    # custom todo has no task to look chain links up on in the first
+    # place). Defaults false so a todo created before this flag existed
+    # still falls back to complete_todo's old completion-time spawn.
+    chain_spawn_handled: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default="false"
     )
     # Only set for a "different person" chain spawn — whoever completed
     # the parent, who must NOT receive this todo. Enforced both at spawn
@@ -317,8 +481,33 @@ class TodoItem(Base):
     exclude_user_id: Mapped[int | None] = mapped_column(
         ForeignKey("household_users.id", ondelete="SET NULL"), nullable=True
     )
+    # Which Task this todo is a one-off instance OF — set when it was
+    # created directly from a task's own definition rather than freely
+    # typed (an event group's root todos, and "From task" on the New
+    # Todo form). This is what lets completing it still fire its own
+    # chain children (crud.complete_todo) and count toward that task's
+    # times_per_day cap/assignment progress (crud.complete_todo also
+    # stamps this onto the PointsEntry) — without it, a task-sourced
+    # todo would be indistinguishable from a freely-typed one and its
+    # chain would never fire. ON DELETE SET NULL: if the task is later
+    # deleted, the already-created todo stays, it just loses the "which
+    # task" pointer (same pattern as chain_link_id above).
+    source_task_id: Mapped[int | None] = mapped_column(
+        ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    # Which EventGroupRun created (if a root) or propagated to (if a
+    # chain descendant spawned from a run-tagged todo — see
+    # crud._spawn_chain_children) this todo — null for anything outside
+    # an event group. Purely a display/grouping tag (Board's "group by
+    # event" toggle); nothing about completion or chain-spawning cares
+    # whether this is set.
+    event_group_run_id: Mapped[int | None] = mapped_column(
+        ForeignKey("event_group_runs.id", ondelete="SET NULL"), nullable=True
+    )
 
-    created_by: Mapped[HouseholdUser] = relationship(foreign_keys=[created_by_id])
+    created_by: Mapped[HouseholdUser | None] = relationship(
+        foreign_keys=[created_by_id]
+    )
     assigned_to: Mapped[HouseholdUser | None] = relationship(
         foreign_keys=[assigned_to_id]
     )
@@ -328,6 +517,8 @@ class TodoItem(Base):
     chain_link: Mapped[TaskChainLink | None] = relationship(
         foreign_keys=[chain_link_id]
     )
+    source_task: Mapped[Task | None] = relationship(foreign_keys=[source_task_id])
+    event_group_run: Mapped[EventGroupRun | None] = relationship()
 
 
 class TakeoverStatus(str, enum.Enum):
@@ -496,6 +687,37 @@ class HouseholdSettings(Base):
         Boolean, default=False, server_default="false"
     )
     last_auto_report_period: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    # None (default) = off, same opt-in pattern as the nudge schedule and
+    # auto-report. When set, the hourly scheduler tick
+    # (household_service.scheduler._overdue_cleanup_tick,
+    # crud.run_scheduled_overdue_cleanup) hard-deletes any still-OPEN todo
+    # whose due_date is more than this many days in the past — "overdue"
+    # the same way the Board's own due-date badge defines it
+    # (util.js's dueBadge: due_date < today, both UTC-anchored). Goes
+    # through the same shared crud._hard_delete_todos every other hard
+    # delete does, so a completed/cancelled chain child this todo itself
+    # spawned is detached and kept, not swept away by
+    # TodoItem.spawned_by_todo_id's ON DELETE CASCADE.
+    overdue_delete_after_days: Mapped[int | None] = mapped_column(
+        Integer, nullable=True
+    )
+
+    # IANA name (e.g. "Europe/Berlin"), admin-editable, default "UTC" so
+    # an unconfigured household keeps the exact old behavior. Used to
+    # interpret `nudge_hour`/`nudge_weekday` and every EventGroup's own
+    # `schedule_hour`/`schedule_weekdays` in the household's own local
+    # time rather than raw UTC (crud._event_group_due,
+    # run_scheduled_nudge_if_due/send_weekly_nudge) — those used to
+    # assume UTC outright, which is what a real household reported as
+    # confusing ("Time for time scheduled event groups is in UTC").
+    # Deliberately NOT used for anything else time-related in this app
+    # (due_date comparisons, week_start_weekday's own day boundary,
+    # the balancer, etc.) — those stay UTC-anchored; this only affects
+    # the two "what hour of the day" schedule pickers above.
+    timezone: Mapped[str] = mapped_column(
+        String(64), default="UTC", server_default="UTC"
+    )
 
 
 class ReportPeriod(str, enum.Enum):

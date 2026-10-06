@@ -5,6 +5,7 @@ import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { openTaskPickerModal } from "./taskPicker.js";
+import { openTriggerConfirmModal } from "./eventGroups.js";
 import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -16,6 +17,13 @@ function canWrite() {
 
 let categoriesCache = [];
 let tasksCache = [];
+let eventGroupsCache = [];
+// Used only to LABEL an event group's "At ..." hour (both the schedule
+// badge on its list row and the create/edit modal's own picker) — the
+// hour itself is stored/interpreted server-side (crud._event_group_due);
+// this is purely so the admin isn't shown "09:00" with no indication of
+// which timezone that actually means.
+let timezoneCache = "UTC";
 
 // Persists across re-renders within the same page load (same pattern as
 // board.js's status filter / home.js's search state) — switching to
@@ -28,12 +36,21 @@ export async function renderTasks(container) {
   const writable = canWrite();
 
   container.innerHTML = `
-    <div class="page">
+    <div class="page${writable ? " page-dual-fab" : ""}">
       <div class="section-heading">
         <h2>Categories</h2>
         ${writable ? `<button class="btn btn-icon" id="add-category-btn" aria-label="New category">${icons.plus}</button>` : ""}
       </div>
       <div class="chip-row" id="category-list" style="margin-bottom: var(--space-2);"></div>
+
+      <div class="section-heading">
+        <h2>Event Groups</h2>
+      </div>
+      <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
+        One tap creates several tasks at once — "Dinner" can post "Set the table" and "Fill
+        dishwasher" together, chain tasks included.
+      </p>
+      <div id="event-group-list" class="stack" style="margin-bottom: var(--space-2);"></div>
 
       <div class="section-heading">
         <h2>Tasks</h2>
@@ -44,12 +61,23 @@ export async function renderTasks(container) {
       </div>
       <div id="task-view-root"></div>
     </div>
-    ${writable ? `<button class="fab" id="add-task-fab" aria-label="New task">${icons.plus}</button>` : ""}
+    ${
+      writable
+        ? `<button class="fab-secondary" id="add-event-group-fab" aria-label="New event group" title="New event group">${icons.calendar}</button>
+           <button class="fab" id="add-task-fab" aria-label="New task">${icons.plus}</button>`
+        : ""
+    }
   `;
 
   if (writable) {
     container.querySelector("#add-category-btn").addEventListener("click", () => openCategoryModal(container, writable));
     container.querySelector("#add-task-fab").addEventListener("click", () => openTaskModal(container, writable));
+    // A dedicated FAB, consistent with the Board's own "trigger an event
+    // group" one — previously a full-width inline button, itself a fix
+    // for an earlier "hard to find" icon-only button; this round's
+    // feedback was that THAT button still didn't feel intuitive, so it
+    // moved again, this time to match the Board's new pattern exactly.
+    container.querySelector("#add-event-group-fab").addEventListener("click", () => openEventGroupModal(container, writable));
   }
 
   container.querySelectorAll("#task-view-toggle .chip").forEach((chip) => {
@@ -60,8 +88,28 @@ export async function renderTasks(container) {
     });
   });
 
+  try {
+    timezoneCache = (await api.get(`${HB}/settings`, { silent: true })).timezone;
+  } catch {
+    timezoneCache = "UTC";
+  }
   await loadCategories(container, writable);
+  await loadEventGroups(container, writable);
   await renderTaskView(container, writable);
+}
+
+// Unfiltered (incl. inactive tasks), independent of which Tasks sub-view
+// (list vs. calendar) is currently showing — the Event Group modal's
+// root-task picker needs this even when the page loaded straight into
+// Calendar view, where loadTasks() below never runs (it targets
+// #task-list, which only exists in list view).
+async function ensureTasksCache() {
+  try {
+    tasksCache = await api.get(`${HB}/tasks`);
+  } catch {
+    tasksCache = tasksCache || [];
+  }
+  return tasksCache;
 }
 
 async function renderTaskView(container, writable) {
@@ -100,13 +148,15 @@ function isSameLocalDay(a, b) {
 
 // A month grid of every WEEKLY task scheduled on each day, plus a
 // summary strip for MONTHLY ones (which have no specific day of the
-// month to place them on — just "sometime this month"). Deliberately
-// leaves out daily tasks: they're on every day by definition (a
-// "standing chore," not scheduled the way this app uses the word
-// elsewhere — see Recurrence's own docstring), so a calendar full of
-// the same entries on every cell wouldn't tell anyone anything a plain
-// list doesn't already. Also leaves out chain-child tasks — they have
-// no independent schedule of their own (see TaskChainLink).
+// month to place them on — just "sometime this month"). DAILY tasks
+// show on every cell too, dimmed (.cal-day-task-daily) so a weekly
+// task — the one actually scheduled for that specific day — still
+// stands out; daily tasks used to be left off entirely on the
+// reasoning that "on every cell by definition" wouldn't tell anyone
+// anything a plain list doesn't already, but a user still expects a
+// task they set to Daily to actually show up as scheduled somewhere on
+// this page. Leaves out chain-child tasks regardless of recurrence —
+// they have no independent schedule of their own (see TaskChainLink).
 async function renderCalendar(root) {
   const labelEl = root.querySelector("#cal-month-label");
   const monthlyRoot = root.querySelector("#cal-monthly-list");
@@ -136,6 +186,7 @@ async function renderCalendar(root) {
     return;
   }
 
+  const dailyTasks = tasks.filter((t) => t.recurrence === "daily" && !t.is_chain_child);
   const weeklyTasks = tasks.filter((t) => t.recurrence === "weekly" && !t.is_chain_child);
   const monthlyTasks = tasks.filter((t) => t.recurrence === "monthly" && !t.is_chain_child);
 
@@ -163,11 +214,12 @@ async function renderCalendar(root) {
       if (d === null) return `<div class="cal-day cal-day-empty"></div>`;
       const dateObj = new Date(year, month, d);
       const weekday = (dateObj.getDay() + 6) % 7; // 0=Mon..6=Sun, matches Task.weekdays
-      const dayTasks = weeklyTasks.filter((t) => (t.weekdays || []).includes(weekday));
+      const weeklyDayTasks = weeklyTasks.filter((t) => (t.weekdays || []).includes(weekday));
       return `
         <div class="cal-day${isSameLocalDay(dateObj, today) ? " cal-day-today" : ""}">
           <div class="cal-day-number">${d}</div>
-          ${dayTasks.map((t) => `<div class="cal-day-task" title="${escapeAttr(t.name)} (${t.points} pts)">${escapeHtml(t.name)}</div>`).join("")}
+          ${weeklyDayTasks.map((t) => `<div class="cal-day-task" title="${escapeAttr(t.name)} (${t.points} pts)">${escapeHtml(t.name)}</div>`).join("")}
+          ${dailyTasks.map((t) => `<div class="cal-day-task cal-day-task-daily" title="${escapeAttr(t.name)} (${t.points} pts) — every day">${escapeHtml(t.name)}</div>`).join("")}
         </div>
       `;
     })
@@ -232,6 +284,71 @@ function scheduleLabel(task) {
   }
   if (task.recurrence === "monthly") return "Monthly";
   return "Every day";
+}
+
+async function loadEventGroups(container, writable) {
+  const root = container.querySelector("#event-group-list");
+  if (!root) return;
+
+  let groups;
+  try {
+    groups = await api.get(`${HB}/event-groups`);
+  } catch {
+    root.innerHTML = `<div class="empty-state">Couldn't load event groups</div>`;
+    return;
+  }
+  eventGroupsCache = groups;
+
+  if (groups.length === 0) {
+    root.innerHTML = writable
+      ? `<div class="empty-state">
+           <p style="margin: 0 0 var(--space-3);">No event groups yet</p>
+           <button type="button" class="btn btn-primary" id="event-group-empty-cta">${icons.plus}<span>Create your first one</span></button>
+         </div>`
+      : `<div class="empty-state"><p style="margin:0;">No event groups yet</p></div>`;
+    if (writable) {
+      root.querySelector("#event-group-empty-cta").addEventListener("click", () => openEventGroupModal(container, writable));
+    }
+    return;
+  }
+  root.innerHTML = "";
+  groups.forEach((group) => root.appendChild(eventGroupRow(group, container, writable)));
+}
+
+function scheduleSummary(group) {
+  if (!group.schedule_recurrence) return null;
+  const when =
+    group.schedule_recurrence === "daily"
+      ? "Every day"
+      : (group.schedule_weekdays || []).map((d) => WEEKDAY_LABELS[d]).join(" ");
+  return `${when} · ${String(group.schedule_hour).padStart(2, "0")}:00 ${timezoneCache}`;
+}
+
+function eventGroupRow(group, container, writable) {
+  const row = document.createElement("div");
+  row.className = "list-row";
+  const schedule = scheduleSummary(group);
+  row.innerHTML = `
+    <div class="list-row-body">
+      <div class="list-row-title">${escapeHtml(group.name)}</div>
+      <div class="list-row-meta">
+        <span>${group.roots.length} task${group.roots.length === 1 ? "" : "s"}</span>
+        ${schedule ? `<span class="badge badge-info">${escapeHtml(schedule)}</span>` : ""}
+      </div>
+    </div>
+    ${writable ? `<button type="button" class="btn btn-icon btn-primary" data-action="trigger" aria-label="Create today's tasks for ${escapeAttr(group.name)}" title="Create today's tasks">${icons.send}</button>` : ""}
+  `;
+
+  if (writable) {
+    row.querySelector('[data-action="trigger"]').addEventListener("click", (e) => {
+      e.stopPropagation();
+      openTriggerConfirmModal(group);
+    });
+    row.addEventListener("click", () => openEventGroupModal(container, writable, group));
+  } else {
+    row.style.cursor = "default";
+  }
+  return row;
 }
 
 function taskRow(task, container, writable) {
@@ -338,6 +455,314 @@ function openCategoryModal(container, writable, category = null) {
         close();
         loadCategories(container, writable);
         loadTasks(container, writable);
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+  }
+}
+
+// `group` is null for "New event group". Roots are tracked as a plain
+// ordered array (not a Set) so position is preserved on save, same as
+// the chain-link picker's "pick = add, right away" flow — there's no
+// separate confirm step for adding a root either.
+async function openEventGroupModal(container, writable, group = null) {
+  await ensureTasksCache();
+  const timezone = timezoneCache;
+
+  // A saved root can go stale (deactivated, or chained under another
+  // task) since the group was last saved — split those out as
+  // "flagged" so they're shown but clearly marked for removal, rather
+  // than either hiding them silently or letting a save attempt 400
+  // against crud._validate_event_group_roots.
+  let selectedRoots = [];
+  let flaggedRoots = [];
+  if (group) {
+    for (const r of group.roots) {
+      const task = tasksCache.find((t) => t.id === r.task_id);
+      if (task && task.active && !task.is_chain_child) {
+        selectedRoots.push({ id: r.task_id, name: r.task_name });
+      } else {
+        flaggedRoots.push({ id: r.task_id, name: r.task_name });
+      }
+    }
+  }
+  const excludedIds = new Set(group?.excluded_task_ids || []);
+  // Narrows excludedIds to ids the live preview actually confirmed exist
+  // right now — populated by every successful refreshPreview() call, and
+  // used to drop stale exclusions on save (see the save handler below).
+  let lastPreviewTaskIds = new Set();
+  let previewSeq = 0;
+
+  const { body, close } = openModalShell(group ? "Edit event group" : "New event group");
+
+  body.innerHTML = `
+    <div class="stack">
+      <div class="field">
+        <label for="eg-name">Name</label>
+        <input class="input" id="eg-name" value="${escapeAttr(group?.name || "")}" required />
+      </div>
+      <div class="field">
+        <label>Tasks in this group</label>
+        <div class="chip-row" id="eg-roots" style="margin-bottom: var(--space-2);"></div>
+        ${
+          writable
+            ? `<button type="button" class="btn btn-ghost btn-block" id="eg-add-root-btn" style="justify-content: center;">
+                 ${icons.plus}<span>Add a task…</span>
+               </button>`
+            : ""
+        }
+      </div>
+      <div class="field">
+        <label>Preview</label>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
+          Everything below is created when this group is triggered: each task above, right away,
+          plus any task already chained from it. Uncheck a chained task to leave it out of this
+          group — it still gets created, just without this group's tag.
+        </p>
+        <div id="eg-preview-list" class="stack"></div>
+      </div>
+      <div class="field">
+        <label class="row">
+          <input type="checkbox" id="eg-schedule-enabled" ${group?.schedule_recurrence ? "checked" : ""} ${writable ? "" : "disabled"} />
+          <span>Also trigger this automatically</span>
+        </label>
+        <div id="eg-schedule-fields" style="margin-top: var(--space-2); ${group?.schedule_recurrence ? "" : "display:none;"}">
+          <label for="eg-schedule-recurrence">Repeats</label>
+          <select class="select" id="eg-schedule-recurrence" ${writable ? "" : "disabled"}>
+            <option value="daily" ${(group?.schedule_recurrence ?? "daily") === "daily" ? "selected" : ""}>Every day</option>
+            <option value="weekly" ${group?.schedule_recurrence === "weekly" ? "selected" : ""}>Specific weekdays</option>
+          </select>
+          <div class="weekday-picker" id="eg-schedule-weekdays" style="margin-top: var(--space-2); ${group?.schedule_recurrence === "weekly" ? "" : "display:none;"}">
+            ${WEEKDAY_LABELS.map((label, i) => `<div class="weekday-pill${(group?.schedule_weekdays || []).includes(i) ? " on" : ""}" data-day="${i}">${label}</div>`).join("")}
+          </div>
+          <label for="eg-schedule-hour" style="margin-top: var(--space-2); display: block;">At (${escapeHtml(timezone)})</label>
+          <select class="select" id="eg-schedule-hour" ${writable ? "" : "disabled"}>
+            ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${(group?.schedule_hour ?? 18) === h ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("")}
+          </select>
+          <p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">
+            ${escapeHtml(timezone)}, same as the weekly nudge's schedule on the Admin panel — change
+            the timezone itself there, not here. Already triggering it by hand today counts, too —
+            the automatic trigger skips a day it's already run on, whether that run was manual or
+            scheduled.
+          </p>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      ${group && writable ? `<button class="btn btn-danger" id="eg-delete">${icons.trash}</button>` : ""}
+      ${writable ? `<button class="btn btn-primary grow" id="eg-save">Save</button>` : ""}
+    </div>
+  `;
+
+  function renderRootChips() {
+    const root = body.querySelector("#eg-roots");
+    if (selectedRoots.length === 0 && flaggedRoots.length === 0) {
+      root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">No tasks yet — add one below</span>`;
+      return;
+    }
+    root.innerHTML = [
+      ...selectedRoots.map(
+        (r) => `
+        <span class="chip chip-active" data-id="${r.id}">
+          ${escapeHtml(r.name)}
+          ${writable ? `<button type="button" aria-label="Remove ${escapeAttr(r.name)}" data-remove="${r.id}">&times;</button>` : ""}
+        </span>`
+      ),
+      ...flaggedRoots.map(
+        (r) => `
+        <span class="chip" data-id="${r.id}" title="No longer eligible — will be removed when you save" style="opacity: 0.6;">
+          ${escapeHtml(r.name)} ⚠
+          ${writable ? `<button type="button" aria-label="Remove ${escapeAttr(r.name)}" data-remove="${r.id}">&times;</button>` : ""}
+        </span>`
+      ),
+    ].join("");
+    root.querySelectorAll("button[data-remove]").forEach((btn) => {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const id = Number(btn.dataset.remove);
+        selectedRoots = selectedRoots.filter((r) => r.id !== id);
+        flaggedRoots = flaggedRoots.filter((r) => r.id !== id);
+        renderRootChips();
+        refreshPreview();
+      });
+    });
+  }
+
+  function renderPreviewList(items) {
+    const previewRoot = body.querySelector("#eg-preview-list");
+    if (items.length === 0) {
+      previewRoot.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">Nothing to preview</span>`;
+      return;
+    }
+    previewRoot.innerHTML = items
+      .map((item) => {
+        if (item.is_root) {
+          return `
+          <div class="eg-preview-row">
+            <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
+            <span class="badge badge-success">Created now</span>
+          </div>`;
+        }
+        const checked = !excludedIds.has(item.task_id);
+        return `
+          <div class="eg-preview-row eg-preview-descendant">
+            <label class="row" style="gap: var(--space-2); flex: 1; min-width: 0;">
+              <input type="checkbox" data-task-id="${item.task_id}" ${checked ? "checked" : ""} ${writable ? "" : "disabled"} />
+              <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
+            </label>
+            <span class="badge badge-success">Created now</span>
+            <span class="badge badge-neutral">Chained from: ${escapeHtml(item.parent_task_name)}</span>
+          </div>`;
+      })
+      .join("");
+
+    if (!writable) return;
+    previewRoot.querySelectorAll("input[type=checkbox][data-task-id]").forEach((cb) => {
+      cb.addEventListener("change", () => {
+        const id = Number(cb.dataset.taskId);
+        if (cb.checked) excludedIds.delete(id);
+        else excludedIds.add(id);
+        // The one-level chain cap still allows the SAME task to be
+        // chained from two different roots in this group (A->X, B->X) —
+        // both checkboxes are the same EventGroupExclusion row, so they
+        // must always agree rather than drifting independently.
+        previewRoot.querySelectorAll(`input[data-task-id="${id}"]`).forEach((other) => {
+          other.checked = cb.checked;
+        });
+      });
+    });
+  }
+
+  async function refreshPreview() {
+    const previewRoot = body.querySelector("#eg-preview-list");
+    const rootIds = selectedRoots.map((r) => r.id);
+    if (rootIds.length === 0) {
+      previewRoot.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">Add a task above to see what this group creates</span>`;
+      lastPreviewTaskIds = new Set();
+      return;
+    }
+    const seq = ++previewSeq;
+    previewRoot.innerHTML = `<div class="skeleton" style="height: 40px;"></div>`;
+    let items;
+    try {
+      items = await api.post(`${HB}/event-groups/preview`, {
+        root_task_ids: rootIds,
+        excluded_task_ids: [...excludedIds],
+      });
+    } catch {
+      if (seq === previewSeq) previewRoot.innerHTML = `<div class="empty-state">Couldn't load preview</div>`;
+      return;
+    }
+    if (seq !== previewSeq) return; // a newer request already landed — this one is stale
+    lastPreviewTaskIds = new Set(items.map((i) => i.task_id));
+    renderPreviewList(items);
+  }
+
+  const selectedScheduleWeekdays = new Set(group?.schedule_weekdays || []);
+
+  if (writable) {
+    const scheduleEnabledEl = body.querySelector("#eg-schedule-enabled");
+    const scheduleFieldsEl = body.querySelector("#eg-schedule-fields");
+    const scheduleRecurrenceEl = body.querySelector("#eg-schedule-recurrence");
+    const scheduleWeekdaysEl = body.querySelector("#eg-schedule-weekdays");
+
+    scheduleEnabledEl.addEventListener("change", () => {
+      scheduleFieldsEl.style.display = scheduleEnabledEl.checked ? "" : "none";
+    });
+    scheduleRecurrenceEl.addEventListener("change", () => {
+      scheduleWeekdaysEl.style.display = scheduleRecurrenceEl.value === "weekly" ? "" : "none";
+    });
+    scheduleWeekdaysEl.querySelectorAll(".weekday-pill").forEach((pill) => {
+      pill.addEventListener("click", () => {
+        const day = Number(pill.dataset.day);
+        if (selectedScheduleWeekdays.has(day)) selectedScheduleWeekdays.delete(day);
+        else selectedScheduleWeekdays.add(day);
+        pill.classList.toggle("on");
+      });
+    });
+
+    body.querySelector("#eg-add-root-btn").addEventListener("click", async () => {
+      await ensureTasksCache();
+      const takenIds = new Set([...selectedRoots, ...flaggedRoots].map((r) => r.id));
+      const eligible = tasksCache.filter((t) => t.active && !t.is_chain_child && !takenIds.has(t.id));
+      openTaskPickerModal({
+        tasks: eligible,
+        categories: categoriesCache,
+        title: "Add a task to this group",
+        emptyMessage: "No eligible tasks left to add",
+        onSelect: (task) => {
+          if (!task) return;
+          selectedRoots.push({ id: task.id, name: task.name });
+          renderRootChips();
+          refreshPreview();
+        },
+      });
+    });
+  }
+
+  renderRootChips();
+  await refreshPreview();
+
+  if (!writable) return;
+
+  body.querySelector("#eg-save").addEventListener("click", async () => {
+    const name = body.querySelector("#eg-name").value.trim();
+    if (!name) {
+      showToast("Name is required", "warning");
+      return;
+    }
+    if (selectedRoots.length === 0) {
+      showToast("Add at least one task to this group", "warning");
+      return;
+    }
+    const scheduleEnabled = body.querySelector("#eg-schedule-enabled").checked;
+    const scheduleRecurrence = scheduleEnabled ? body.querySelector("#eg-schedule-recurrence").value : null;
+    const scheduleWeekdays = scheduleRecurrence === "weekly" ? [...selectedScheduleWeekdays].sort((a, b) => a - b) : null;
+    if (scheduleRecurrence === "weekly" && scheduleWeekdays.length === 0) {
+      showToast("Pick at least one weekday for a weekly schedule", "warning");
+      return;
+    }
+    // Drop any exclusion the live preview didn't just confirm still
+    // exists (e.g. a chain link that's since been removed) — otherwise
+    // it could silently reappear if that task gets chained again later.
+    const excludedTaskIds = [...excludedIds].filter((id) => lastPreviewTaskIds.has(id));
+    const payload = {
+      name,
+      root_task_ids: selectedRoots.map((r) => r.id),
+      excluded_task_ids: excludedTaskIds,
+      schedule_recurrence: scheduleRecurrence,
+      schedule_weekdays: scheduleWeekdays,
+      schedule_hour: Number(body.querySelector("#eg-schedule-hour").value),
+    };
+    try {
+      if (group) {
+        await api.patch(`${HB}/event-groups/${group.id}`, payload);
+      } else {
+        await api.post(`${HB}/event-groups`, payload);
+      }
+      showToast("Event group saved", "success");
+      close();
+      loadEventGroups(container, writable);
+    } catch {
+      /* api.js already showed a toast */
+    }
+  });
+
+  if (group) {
+    body.querySelector("#eg-delete").addEventListener("click", async () => {
+      const ok = await showConfirmDialog({
+        title: "Delete event group",
+        message: `Delete "${group.name}"? Todos it already created stay on the board, just ungrouped.`,
+        confirmLabel: "Delete",
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        await api.del(`${HB}/event-groups/${group.id}`);
+        showToast("Event group deleted", "success");
+        close();
+        loadEventGroups(container, writable);
       } catch {
         /* api.js already showed a toast */
       }

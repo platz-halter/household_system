@@ -120,14 +120,25 @@ function openNotificationPanel() {
     }
   });
 
-  renderPanelList(overlay);
+  renderPanelList(overlay, { initial: true });
 }
 
-async function renderPanelList(overlay) {
+// `initial` only shows a loading skeleton for the very first render,
+// right after the panel's just been created with nothing in it yet.
+// Every other call (after mark-all-read, accept/decline, dismiss) is a
+// RE-render of an already-open panel, which already has real content
+// on screen — clearing it to a skeleton/blank first, then refilling
+// once the refetch lands, put a visible empty gap between the two,
+// which read as the whole panel flickering closed and reopening. Not
+// clearing anything upfront means the old content just sits there
+// unchanged until renderTakeoverSection/renderPlainSection swap it for
+// the new content in one go — no intermediate empty state to see.
+async function renderPanelList(overlay, { initial = false } = {}) {
   const takeoverRoot = overlay.querySelector("#notif-panel-takeover");
   const plainRoot = overlay.querySelector("#notif-panel-plain");
-  takeoverRoot.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
-  plainRoot.innerHTML = "";
+  if (initial) {
+    takeoverRoot.innerHTML = `<div class="skeleton" style="height: 64px;"></div>`;
+  }
 
   let incoming, notifications;
   try {

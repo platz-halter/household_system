@@ -268,6 +268,46 @@
   stroke-width: 2.2;
 }
 
+/* A second, smaller FAB stacked directly above the primary one — e.g.
+   Board/Tasks's "trigger"/"create an event group" action, previously a
+   buried modal-footer button or a small heading icon that user feedback
+   called hard to find. Same accent color as the primary FAB (not muted)
+   specifically so it reads as a real, equally-findable action, not an
+   afterthought. A page using this needs .page-dual-fab too, so its last
+   rows don't end up hidden under both. */
+.fab-secondary {
+  position: fixed;
+  /* .fab is 56px wide at the same `right`; at an equal `right` a
+     narrower 48px button's CENTER sits 4px to the right of .fab's
+     own center, not stacked on the same vertical axis (user feedback:
+     "not centered"). +4px here is half that 8px width difference, so
+     the two buttons' centers line up exactly. */
+  right: calc(var(--space-5) + 4px);
+  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px) + var(--space-4) + 68px);
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+  border: none;
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 40;
+}
+
+.fab-secondary .icon {
+  width: 22px;
+  height: 22px;
+  stroke-width: 2.2;
+}
+
+.page-dual-fab {
+  padding-bottom: 112px;
+}
+
 /* --- Modal --- */
 
 .modal-overlay {
@@ -686,6 +726,62 @@
   flex-shrink: 0;
 }
 
+/* --- Event group cluster header (Board, "group by event" on) --- */
+
+/* --- Event cards (Board, "group by event" on) — every todo sharing one
+   EventGroupRun lives inside one bordered card instead of just a plain
+   heading above a flat list, so it visually reads as "these belong
+   together" rather than a loose section break. --- */
+
+.event-card {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+
+.event-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.event-card-title-group {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.event-card-title {
+  font-weight: 700;
+  font-size: var(--font-size-sm);
+}
+
+.event-card-date {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+}
+
+/* --- Event group preview row (Tasks page create/edit modal) --- */
+
+.eg-preview-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+  font-size: var(--font-size-sm);
+}
+
+.eg-preview-row.eg-preview-descendant { padding-left: var(--space-5); }
+
+.eg-preview-row .eg-preview-title { flex: 1; min-width: 0; }
+
+.eg-preview-row + .eg-preview-row { border-top: 1px solid var(--color-border); }
+
 /* --- Weekday picker (Task schedule) --- */
 
 .weekday-picker {
@@ -958,4 +1054,9 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.cal-day-task-daily {
+  opacity: 0.6;
+  font-style: italic;
 }

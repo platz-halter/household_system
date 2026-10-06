@@ -164,25 +164,42 @@ Tracks physical items (cellar, pantry, etc.).
   same user always completes it alone (bonus amount configurable per
   task).
 - **Chained tasks**: a task can have one or more "chain tasks" attached
-  — when the task is completed, each chain task spawns a one-off board
-  todo for that specific occurrence (e.g. "Set the table" → "Clear the
-  table"; "Fill the dishwasher" → "Clean non-dishwasher cutlery").
-  Deliberately tied to actual completions, not an independent schedule
-  of its own — a chain task has no weekly/monthly recurrence and is
-  never sweep-assigned on a fixed calendar; it only ever exists because
-  its parent actually happened. This is the point: a day with only one
-  or two real instances of "set the table" spawns exactly that many
-  "clear the table" todos, not a fixed number regardless of how many
-  times the parent really occurred.
+  — a specific occurrence of the parent (a board todo posted "from
+  task," or an event group's own root) spawns one-off board todos for
+  each of its chain tasks **at the same time it's created**, not only
+  once the parent is actually completed (e.g. "Set the table" → "Clear
+  the table" both land on the board together; "Fill the dishwasher" →
+  "Clean non-dishwasher cutlery" too). Still tied to real occurrences of
+  the parent, not an independent schedule of its own — a chain task has
+  no weekly/monthly recurrence and is never sweep-assigned on a fixed
+  calendar, so a day with only one or two real instances of "set the
+  table" still only ever creates that many "clear the table" todos, not
+  a fixed number regardless of how many times the parent really
+  occurs — the timing just moved earlier, to the parent's creation
+  instead of its completion.
   - Per chain task, the creator chooses **same person** or **another
     person**:
-    - *Same person*: assigned directly to whoever completed the
-      parent — never enters the balancing tool at all.
+    - *Same person*: assigned directly to whoever the parent is
+      currently assigned to right now (or left unassigned if the
+      parent is) — never enters the balancing tool at all.
     - *Another person*: assigned immediately via the same fairness
       logic the balancing tool uses (currently-least-loaded eligible
-      user), explicitly excluding whoever completed the parent. If
-      nobody else is eligible, it's left open on the board rather than
-      forced onto the parent's completer.
+      user), excluding whoever the parent is currently assigned to, if
+      anyone. If nobody else is eligible, it's left open on the board.
+  - Reassigning, claiming, or taking over the parent afterward never
+    touches an already-spawned chain task — the two are only linked at
+    the moment both are created, not kept in sync afterward.
+  - Cancelling the parent deletes any of its still-open chain tasks
+    along with it (a confirmation names them first) — they only existed
+    because the parent was going to happen. A chain task someone's
+    already completed, or already cancelled on its own, is left alone;
+    only the still-open ones go.
+  - Posting a todo "from task" on the board can deactivate this for
+    that one todo specifically, when the picked task actually has a
+    chain task to skip — the chain task is then never created for it,
+    not even later if it's completed. Adding or removing which tasks
+    chain a given task at all is only ever done from the Tasks page,
+    never from the board.
   - A task can have multiple chain tasks, but chaining is capped at one
     level — a task that's already someone's chain task can't itself
     chain further tasks, and a task that's already chained can't be
@@ -196,6 +213,59 @@ Tracks physical items (cellar, pantry, etc.).
     points twice and the scheduler can't create duplicates of something
     only meant to exist as a chain reaction. Completing it directly
     anyway asks first, naming which task(s) chain it.
+- **Event Groups**: a named bundle of tasks (e.g. "Dinner": "Set the
+  table" and "Fill dishwasher") that posts all of them to the board at
+  once, in one tap, instead of one at a time. Deliberately reuses
+  chained tasks rather than inventing a second grouping mechanism — a
+  group only needs to name its **root** tasks; a root's own chain tasks
+  (e.g. "Fill dishwasher" → "Handwash non-dishwasher cutlery" and →
+  "Empty dishwasher") are covered automatically, keeping the chaining
+  system itself simple (a handful of chain links can cover a whole
+  event) while still letting a group represent something bigger than
+  its roots.
+  - Creating or editing a group shows a live preview of every task it
+    will cover right now — every root, plus each root's current chain
+    tasks — before the group is saved, and again, re-checked fresh,
+    right before it's actually triggered. Nothing is created without
+    seeing the full list first.
+  - The creator can deselect any individual chain task from counting as
+    part of the group's own identity, even though it's still created as
+    normal — e.g. "Empty dishwasher" still gets created alongside "Fill
+    dishwasher" when the group triggers, it just isn't shown or
+    clustered as part of "Dinner" specifically. A chain task not
+    explicitly deselected is part of the group by default, including
+    one chained in after the group was already created — the opt-out,
+    not the task list itself, is what's remembered.
+  - Triggering a group assigns its root tasks immediately via the same
+    fairness logic the balancing tool uses, rather than waiting for its
+    next scheduled sweep — an event like "hosting dinner" is happening
+    now, not on the balancer's usual cadence. Can be triggered manually
+    either from its own management screen or directly from the Board
+    (an alternative to posting a single custom item), not just left to
+    its schedule.
+  - A task that's already someone else's chain task can't be a group's
+    root — same "one source of instances" rule chain tasks already
+    follow (see above); chain it from one of the group's own roots
+    instead.
+  - The board can cluster everything one trigger of a group created
+    together into one clearly bounded card (e.g. "Dinner — Oct 6"), not
+    just a heading above a flat list — with a toggle to turn that
+    clustering off in favor of a flat list — either way, a task created
+    through a group is still visibly tagged with which group it came
+    from.
+  - A group can also be scheduled to trigger itself — every day, or on
+    specific weekdays, at a configured time — instead of needing
+    someone to tap it every time. Triggering it by hand on a day its
+    schedule would also fire doesn't produce a second batch; whichever
+    happens first (manual or scheduled) is the one that counts for that
+    day.
+  - A whole triggered occurrence of a group can be bulk-deleted from
+    the board in one action — e.g. you triggered "Dinner" by mistake,
+    or it's not happening after all — with a warning naming exactly
+    which tasks that removes before it happens. A task from that
+    occurrence someone's already completed is kept, not deleted — it
+    represents real work that already happened, regardless of what
+    happens to the rest of the event.
 - **Handing off an assigned task**: two ways, for two different
   situations.
   - *Takeover requests* (anyone): whoever currently holds a board todo
@@ -216,6 +286,11 @@ Tracks physical items (cellar, pantry, etc.).
   - A configurable week start (which weekday "this week" begins on) —
     applies everywhere points/goals are tracked by week: Home, Stats,
     the balancing tool, and weekly reports.
+  - A configurable timezone, so the weekly reminder's schedule and an
+    Event Group's own "trigger at" time mean what an admin actually
+    typed — e.g. "18" means 18:00 in the household's own timezone, not
+    UTC. Defaults to UTC, so an unconfigured household's existing
+    schedules keep behaving exactly as before.
   - A points-to-money (EUR) conversion rate, for admins to track payout
     amounts. Display/reference only — no connection to an actual
     payment or payout process.
@@ -237,6 +312,12 @@ Tracks physical items (cellar, pantry, etc.).
     service within about a minute, no restart needed — see
     `shared/auth.py` and `auth_service.main`'s `/authentik-config`
     routes.
+  - An optional automatic cleanup for overdue board items: once a todo
+    has been overdue for more than a configured number of days, it's
+    permanently deleted on its own, so the board (and the "All" filter)
+    doesn't keep accumulating stale clutter nobody's going to act on.
+    Off by default. Never touches anything already completed, no
+    matter how overdue it was before that.
 - **Break mode**: a user can mark themselves on break (vacation,
   sickness), which excludes them from the leaderboard, from new task
   assignments (automatic or manual — the balancer, posting/editing a
@@ -264,9 +345,13 @@ Tracks physical items (cellar, pantry, etc.).
   weekdays, with monthly tasks (which have no specific day of the
   month) called out separately — a quick overview of what's periodically
   scheduled without needing to read every task's own schedule text.
-  Daily tasks and chain-child tasks are left off — a daily task is on
-  every cell by definition, and a chain-child task has no schedule of
-  its own to show (see Chained tasks above).
+  Daily tasks show on every cell too, visually dimmed so a weekly
+  task's specific day still stands out. Chain-child tasks are the only
+  ones left off entirely — they have no schedule of their own to show
+  (see Chained tasks above). Below it, an Event Groups
+  section lists saved groups, each with an edit view (root tasks, live
+  preview with per-chain-task opt-out, an optional auto-trigger
+  schedule) and a one-tap manual trigger.
 - **User settings**: break mode toggle, profile picture.
 
 ## Non-functional
