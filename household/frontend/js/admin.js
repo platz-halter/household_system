@@ -2,11 +2,19 @@ import { CONFIG } from "./config.js";
 import { api } from "./api.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
-import { escapeHtml, escapeAttr, showSkeletonAfterDelay } from "./util.js";
+import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_NAMES } from "./util.js";
 import { showConfirmDialog } from "./confirmDialog.js";
+import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 const AUTH_BASE = CONFIG.AUTH_BASE;
+
+// Native self-name for each supported language, shown regardless of the
+// current UI language — same reasoning as settings.js's own language
+// switcher (an English-speaking admin picking a default for a German
+// household should see "Deutsch," not a translated "German"). NOT run
+// through t() for that reason.
+const LANGUAGE_NATIVE_NAMES = { en: "English", de: "Deutsch" };
 
 // This page is the one place in the app where "admin" means something
 // different from "user" (see PROJECT_SPEC.md). The router already redirects
@@ -16,110 +24,81 @@ const AUTH_BASE = CONFIG.AUTH_BASE;
 export async function renderAdmin(container) {
   container.innerHTML = `
     <div class="page">
-      <div class="section-heading"><h2>Admin panel</h2></div>
+      <div class="section-heading"><h2>${escapeHtml(t("admin.heading"))}</h2></div>
       <p class="muted" style="font-size: var(--font-size-sm);">
-        Settings only admins can change.
+        ${escapeHtml(t("admin.subtitle"))}
       </p>
 
       <div class="settings-section">
-        <h3>Week start</h3>
+        <h3>${escapeHtml(t("admin.week_start_heading"))}</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Which day "this week" starts on — everywhere points/goals/reports
-          are tracked by week (Home, Stats, the balancer, weekly reports).
+          ${escapeHtml(t("admin.week_start_desc"))}
         </p>
         <div id="week-start-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Weekly points goal</h3>
+        <h3>${escapeHtml(t("admin.weekly_goal_heading"))}</h3>
         <div id="goal-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Points &rarr; money conversion</h3>
+        <h3>${escapeHtml(t("admin.money_heading"))}</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Reference only — shown next to points, no real payout is connected.
+          ${escapeHtml(t("admin.money_desc"))}
         </p>
         <div id="money-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Timezone</h3>
-        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Which timezone "At ..." times below (the reminder schedule, and
-          each Event Group's own schedule on the Tasks page) are in. Changing
-          this changes what those existing schedules actually fire at in wall-
-          clock terms, not just their label. Nothing else in the app — due
-          dates, the weekly goal period, the balancer — is affected.
-        </p>
+        <h3>${escapeHtml(t("admin.timezone_heading"))}</h3>
         <div id="timezone-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Reminders</h3>
+        <h3>${escapeHtml(t("admin.default_language_heading"))}</h3>
+        <div id="default-language-root"></div>
+      </div>
+
+      <div class="settings-section">
+        <h3>${escapeHtml(t("admin.reminders_heading"))}</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Pushes anyone subscribed (Settings &rarr; Notifications) who's below
-          the weekly goal, or everyone if no goal is set — so it won't send
-          you anything once you've already hit it this week. To check push
-          delivery itself works regardless of points, use "Send test
-          notification" in Settings &rarr; Notifications instead.
+          ${escapeHtml(t("admin.reminders_desc"))}
         </p>
-        <button class="btn btn-block" id="nudge-btn" style="margin-bottom: var(--space-3);">${icons.checklist}<span>Send weekly reminder now</span></button>
+        <button class="btn btn-block" id="nudge-btn" style="margin-bottom: var(--space-3);">${icons.checklist}<span>${escapeHtml(t("admin.send_nudge_btn"))}</span></button>
         <div id="schedule-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Task balancing</h3>
+        <h3>${escapeHtml(t("admin.balancing_heading"))}</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Hands out unclaimed weekly/monthly tasks and unclaimed board todos to
-          whoever's currently carrying the least load, then pulls an unfinished
-          task away from anyone who's pulled well ahead and hands it to whoever's
-          behind — favoring anyone short of the weekly goal, never overloading
-          one person, and never touching a task someone's already started. Runs
-          automatically once a day; use this to run it right now instead of
-          waiting.
+          ${escapeHtml(t("admin.balancing_desc"))}
         </p>
-        <button class="btn btn-block" id="balance-btn">${icons.scale}<span>Run balancer now</span></button>
+        <button class="btn btn-block" id="balance-btn">${icons.scale}<span>${escapeHtml(t("admin.run_balancer_btn"))}</span></button>
         <div id="balance-result-root" style="margin-top: var(--space-3);"></div>
       </div>
 
       <div class="settings-section">
         <div class="row-between">
-          <h3 style="margin-bottom: 0;">Reports</h3>
-          <button class="btn btn-icon" id="new-report-btn" aria-label="Generate report">${icons.plus}</button>
+          <h3 style="margin-bottom: 0;">${escapeHtml(t("admin.reports_heading"))}</h3>
+          <button class="btn btn-icon" id="new-report-btn" aria-label="${escapeAttr(t("admin.generate_report_label"))}">${icons.plus}</button>
         </div>
         <div id="auto-report-root" style="margin-bottom: var(--space-3);"></div>
         <div id="reports-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Overdue tasks</h3>
+        <h3>${escapeHtml(t("admin.overdue_heading"))}</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Automatically removes a board todo once it's been overdue for
-          longer than this — a real delete, not a cancel, so it stops
-          cluttering every status filter including "All." A todo
-          someone's already completed is never touched by this,
-          regardless of how overdue it was before that.
+          ${escapeHtml(t("admin.overdue_desc"))}
         </p>
         <div id="overdue-cleanup-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Authentik connection</h3>
+        <h3>${escapeHtml(t("admin.authentik_heading"))}</h3>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">
-          Change the Authentik OIDC settings — including which Authentik
-          group grants which role — here instead of hand-editing
-          <code>.env</code> (and previously, for the group mapping, a
-          source-code edit) on the server. Every service picks up a
-          change within about a minute, no restart needed. Changing the
-          issuer, JWKS URL, or client ID will sign out anyone currently
-          logged in through Authentik (local accounts are unaffected);
-          renaming a group only affects the next token that group's
-          members present. Saving or resetting always requires your
-          LOCAL admin password below, even if you're signed in through
-          Authentik right now — whoever can repoint these values
-          controls who every service trusts as an admin, so a
-          currently-valid session alone isn't enough.
+          ${escapeHtml(t("admin.authentik_desc"))}
         </p>
         <div id="authentik-config-root"></div>
       </div>
@@ -132,7 +111,11 @@ export async function renderAdmin(container) {
     try {
       const result = await api.post(`${HB}/push/nudge`);
       showToast(
-        `Notified ${result.notified} · ${result.skipped_already_met_goal} already at goal · ${result.skipped_no_subscription} not subscribed/unreachable`,
+        t("admin.notified_summary", {
+          notified: result.notified,
+          skippedGoal: result.skipped_already_met_goal,
+          skippedSub: result.skipped_no_subscription,
+        }),
         "success"
       );
     } catch {
@@ -150,7 +133,7 @@ export async function renderAdmin(container) {
     try {
       const result = await api.post(`${HB}/balancing/run`);
       renderBalanceResult(container, result);
-      showToast("Balancing run complete", "success");
+      showToast(t("admin.balancing_complete_toast"), "success");
     } catch {
       /* api.js already showed a toast */
     } finally {
@@ -160,6 +143,7 @@ export async function renderAdmin(container) {
 
   await loadWeekStart(container);
   await loadTimezone(container);
+  await loadDefaultLanguage(container);
   await loadGoal(container);
   await loadMoneyRate(container);
   await loadSchedule(container);
@@ -176,25 +160,26 @@ async function loadWeekStart(container) {
   try {
     const settings = await api.get(`${HB}/settings`);
     cancelSkeleton();
+    const weekdayNames = WEEKDAY_NAMES();
     root.innerHTML = `
       <div class="row">
         <select class="select grow" id="week-start-select">
-          ${WEEKDAY_NAMES.map((name, i) => `<option value="${i}" ${settings.week_start_weekday === i ? "selected" : ""}>${name}</option>`).join("")}
+          ${weekdayNames.map((name, i) => `<option value="${i}" ${settings.week_start_weekday === i ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}
         </select>
-        <button class="btn btn-primary" id="week-start-save">Save</button>
+        <button class="btn btn-primary" id="week-start-save">${escapeHtml(t("common.save"))}</button>
       </div>
     `;
     root.querySelector("#week-start-save").addEventListener("click", async () => {
       try {
         await patchSettings({ week_start_weekday: Number(root.querySelector("#week-start-select").value) });
-        showToast('Saved — "this week" now starts on that day everywhere', "success");
+        showToast(t("admin.week_start_save_toast"), "success");
       } catch {
         /* api.js already showed a toast */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
   }
 }
 
@@ -231,22 +216,58 @@ async function loadTimezone(container) {
             ? `<select class="select grow" id="timezone-select">
                  ${zones.map((z) => `<option value="${escapeAttr(z)}" ${settings.timezone === z ? "selected" : ""}>${escapeHtml(z)}</option>`).join("")}
                </select>`
-            : `<input class="input grow" id="timezone-select" value="${escapeAttr(settings.timezone)}" placeholder="e.g. Europe/Berlin" />`
+            : `<input class="input grow" id="timezone-select" value="${escapeAttr(settings.timezone)}" placeholder="${escapeAttr(t("admin.timezone_placeholder"))}" />`
         }
-        <button class="btn btn-primary" id="timezone-save">Save</button>
+        <button class="btn btn-primary" id="timezone-save">${escapeHtml(t("common.save"))}</button>
       </div>
     `;
     root.querySelector("#timezone-save").addEventListener("click", async () => {
       try {
         await patchSettings({ timezone: root.querySelector("#timezone-select").value.trim() });
-        showToast("Saved", "success");
+        showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast (e.g. an unrecognized name typed into the fallback input) */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
+  }
+}
+
+// What a BRAND NEW HouseholdUser starts with (crud.get_or_create_
+// household_user copies this onto the new row at creation time) — not
+// retroactive, same as every other per-user default this page doesn't
+// otherwise touch. See HouseholdSettings.default_language's own model
+// docstring.
+async function loadDefaultLanguage(container) {
+  const root = container.querySelector("#default-language-root");
+  if (!root) return;
+  const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 56px;"></div>`);
+  try {
+    const settings = await api.get(`${HB}/settings`);
+    cancelSkeleton();
+    root.innerHTML = `
+      <div class="row">
+        <select class="select grow" id="default-language-select">
+          ${Object.entries(LANGUAGE_NATIVE_NAMES)
+            .map(([id, name]) => `<option value="${id}" ${settings.default_language === id ? "selected" : ""}>${escapeHtml(name)}</option>`)
+            .join("")}
+        </select>
+        <button class="btn btn-primary" id="default-language-save">${escapeHtml(t("common.save"))}</button>
+      </div>
+    `;
+    root.querySelector("#default-language-save").addEventListener("click", async () => {
+      try {
+        await patchSettings({ default_language: root.querySelector("#default-language-select").value });
+        showToast(t("common.saved_toast"), "success");
+      } catch {
+        /* api.js already showed a toast */
+      }
+    });
+  } catch {
+    cancelSkeleton();
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
   }
 }
 
@@ -259,10 +280,10 @@ async function loadGoal(container) {
     cancelSkeleton();
     root.innerHTML = `
       <div class="field">
-        <label for="goal-input">Points per week</label>
+        <label for="goal-input">${escapeHtml(t("admin.goal_label"))}</label>
         <div class="row">
-          <input class="input" type="number" min="0" id="goal-input" value="${settings.weekly_points_goal ?? ""}" placeholder="No goal set" />
-          <button class="btn btn-primary" id="goal-save">Save</button>
+          <input class="input" type="number" min="0" id="goal-input" value="${settings.weekly_points_goal ?? ""}" placeholder="${escapeAttr(t("admin.goal_placeholder"))}" />
+          <button class="btn btn-primary" id="goal-save">${escapeHtml(t("common.save"))}</button>
         </div>
       </div>
     `;
@@ -270,14 +291,14 @@ async function loadGoal(container) {
       const raw = root.querySelector("#goal-input").value;
       try {
         await patchSettings({ weekly_points_goal: raw === "" ? null : Number(raw) });
-        showToast("Saved", "success");
+        showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
   }
 }
 
@@ -296,17 +317,17 @@ async function loadMoneyRate(container) {
     root.innerHTML = `
       <div class="field-row">
         <div class="field">
-          <label for="currency-select">Currency</label>
+          <label for="currency-select">${escapeHtml(t("admin.currency_label"))}</label>
           <select class="select" id="currency-select">
             ${CURRENCIES.map((c) => `<option value="${c}" ${settings.currency === c ? "selected" : ""}>${c}</option>`).join("")}
           </select>
         </div>
         <div class="field">
-          <label for="rate-input">Per point</label>
-          <input class="input" type="number" min="0" step="0.01" id="rate-input" value="${settings.points_to_money_rate ?? ""}" placeholder="No rate set" />
+          <label for="rate-input">${escapeHtml(t("admin.per_point_label"))}</label>
+          <input class="input" type="number" min="0" step="0.01" id="rate-input" value="${settings.points_to_money_rate ?? ""}" placeholder="${escapeAttr(t("admin.no_rate_set"))}" />
         </div>
       </div>
-      <button class="btn btn-primary btn-block" id="money-save" style="margin-top: var(--space-2);">Save</button>
+      <button class="btn btn-primary btn-block" id="money-save" style="margin-top: var(--space-2);">${escapeHtml(t("common.save"))}</button>
     `;
     root.querySelector("#money-save").addEventListener("click", async () => {
       const raw = root.querySelector("#rate-input").value;
@@ -315,21 +336,23 @@ async function loadMoneyRate(container) {
           points_to_money_rate: raw === "" ? null : Number(raw),
           currency: root.querySelector("#currency-select").value,
         });
-        showToast("Saved", "success");
+        showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
   }
 }
 
-const WEEKDAY_NAMES = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
-
 // PUT /settings replaces the whole row, so merge with the current value of
-// every field this page isn't editing right now.
+// every field this page isn't editing right now. default_language had to
+// join this list the same way overdue_delete_after_days/timezone did
+// before it — forgetting a field here means every OTHER unrelated Save
+// (goal, nudge, overdue, ...) silently resets it to the schema's own
+// default the next time anyone saves anything on this page.
 async function patchSettings(partial) {
   const current = await api.get(`${HB}/settings`);
   await api.put(`${HB}/settings`, {
@@ -342,6 +365,7 @@ async function patchSettings(partial) {
     auto_report_enabled: current.auto_report_enabled,
     overdue_delete_after_days: current.overdue_delete_after_days,
     timezone: current.timezone,
+    default_language: current.default_language,
     ...partial,
   });
 }
@@ -353,31 +377,32 @@ async function loadSchedule(container) {
   try {
     const settings = await api.get(`${HB}/settings`);
     cancelSkeleton();
+    const weekdayNames = WEEKDAY_NAMES();
     const lastSent = settings.last_nudge_sent_week
-      ? `Last sent automatically: week of ${settings.last_nudge_sent_week}`
-      : "Hasn't run automatically yet";
+      ? t("admin.last_sent_auto", { date: settings.last_nudge_sent_week })
+      : t("admin.hasnt_run_yet");
 
     root.innerHTML = `
       <div class="field">
-        <label class="row"><input type="checkbox" id="schedule-enabled" ${settings.nudge_weekday !== null ? "checked" : ""} /> <span>Also send this automatically, every week</span></label>
+        <label class="row"><input type="checkbox" id="schedule-enabled" ${settings.nudge_weekday !== null ? "checked" : ""} /> <span>${escapeHtml(t("admin.also_send_automatically"))}</span></label>
       </div>
       <div class="field-row" id="schedule-fields" style="margin-top: var(--space-2); ${settings.nudge_weekday !== null ? "" : "display:none;"}">
         <div class="field">
-          <label for="schedule-weekday">On</label>
+          <label for="schedule-weekday">${escapeHtml(t("admin.on_label"))}</label>
           <select class="select" id="schedule-weekday">
-            ${WEEKDAY_NAMES.map((name, i) => `<option value="${i}" ${settings.nudge_weekday === i ? "selected" : ""}>${name}</option>`).join("")}
+            ${weekdayNames.map((name, i) => `<option value="${i}" ${settings.nudge_weekday === i ? "selected" : ""}>${escapeHtml(name)}</option>`).join("")}
           </select>
         </div>
         <div class="field">
-          <label for="schedule-hour">At (${escapeHtml(settings.timezone)})</label>
+          <label for="schedule-hour">${escapeHtml(t("common.at_tz_label", { tz: settings.timezone }))}</label>
           <select class="select" id="schedule-hour">
             ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${settings.nudge_hour === h ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("")}
           </select>
         </div>
       </div>
       <div class="row" style="margin-top: var(--space-2);">
-        <span class="muted" style="font-size: var(--font-size-xs); flex: 1;">${lastSent}</span>
-        <button class="btn btn-primary" id="schedule-save">Save</button>
+        <span class="muted" style="font-size: var(--font-size-xs); flex: 1;">${escapeHtml(lastSent)}</span>
+        <button class="btn btn-primary" id="schedule-save">${escapeHtml(t("common.save"))}</button>
       </div>
     `;
 
@@ -394,14 +419,14 @@ async function loadSchedule(container) {
           nudge_weekday: enabled ? Number(root.querySelector("#schedule-weekday").value) : null,
           nudge_hour: enabled ? Number(root.querySelector("#schedule-hour").value) : settings.nudge_hour,
         });
-        showToast("Saved", "success");
+        showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load the reminder schedule</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_schedule"))}</div>`;
   }
 }
 
@@ -416,15 +441,15 @@ async function loadOverdueCleanup(container) {
 
     root.innerHTML = `
       <div class="field">
-        <label class="row"><input type="checkbox" id="overdue-enabled" ${enabled ? "checked" : ""} /> <span>Automatically delete overdue todos</span></label>
+        <label class="row"><input type="checkbox" id="overdue-enabled" ${enabled ? "checked" : ""} /> <span>${escapeHtml(t("admin.automatically_delete_overdue"))}</span></label>
       </div>
       <div class="field" id="overdue-fields" style="margin-top: var(--space-2); ${enabled ? "" : "display:none;"}">
-        <label for="overdue-days">After this many days overdue</label>
+        <label for="overdue-days">${escapeHtml(t("admin.after_days_label"))}</label>
         <input class="input" type="number" min="1" id="overdue-days" value="${enabled ? settings.overdue_delete_after_days : 7}" />
       </div>
       <div class="row" style="margin-top: var(--space-2);">
         <span class="muted" style="font-size: var(--font-size-xs); flex: 1;"></span>
-        <button class="btn btn-primary" id="overdue-save">Save</button>
+        <button class="btn btn-primary" id="overdue-save">${escapeHtml(t("common.save"))}</button>
       </div>
     `;
 
@@ -438,21 +463,21 @@ async function loadOverdueCleanup(container) {
       const on = enabledCheckbox.checked;
       const days = Number(root.querySelector("#overdue-days").value || 0);
       if (on && days < 1) {
-        showToast("Enter at least 1 day", "warning");
+        showToast(t("admin.enter_at_least_1_day"), "warning");
         return;
       }
       try {
         await patchSettings({
           overdue_delete_after_days: on ? days : null,
         });
-        showToast("Saved", "success");
+        showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load this setting</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
   }
 }
 
@@ -461,15 +486,18 @@ function renderBalanceResult(container, result) {
   if (!root) return;
 
   if (result.by_user.length === 0 && result.reassignments.length === 0) {
-    root.innerHTML = `<div class="empty-state">Nothing to assign or rebalance — everything's already claimed or caught up</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("admin.nothing_to_assign"))}</div>`;
     return;
   }
 
   const rows = result.by_user
     .map((u) => {
-      const bits = [`${u.new_task_count} task${u.new_task_count === 1 ? "" : "s"}`, `${u.new_todo_count} todo${u.new_todo_count === 1 ? "" : "s"}`];
-      if (u.reassigned_in_count) bits.push(`+${u.reassigned_in_count} moved to them`);
-      if (u.reassigned_out_count) bits.push(`-${u.reassigned_out_count} moved away`);
+      const bits = [
+        t("common.task_count", { n: u.new_task_count, count: u.new_task_count }),
+        t("common.todo_count", { n: u.new_todo_count, count: u.new_todo_count }),
+      ];
+      if (u.reassigned_in_count) bits.push(t("admin.moved_to_them", { n: u.reassigned_in_count }));
+      if (u.reassigned_out_count) bits.push(t("admin.moved_away", { n: u.reassigned_out_count }));
       const netPoints = u.new_expected_points + u.reassigned_net_points;
       return `
       <div class="list-row" style="cursor:default;">
@@ -477,7 +505,7 @@ function renderBalanceResult(container, result) {
           <div class="list-row-title">${escapeHtml(u.household_user.display_name)}</div>
           <div class="list-row-meta"><span>${bits.join(" · ")}</span></div>
         </div>
-        <div class="list-row-points"><span>${netPoints >= 0 ? "+" : ""}${netPoints}</span><span class="muted">pts</span></div>
+        <div class="list-row-points"><span>${netPoints >= 0 ? "+" : ""}${netPoints}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
       </div>`;
     })
     .join("");
@@ -488,9 +516,9 @@ function renderBalanceResult(container, result) {
       <div class="list-row" style="cursor:default;">
         <div class="list-row-body">
           <div class="list-row-title">${escapeHtml(r.task_name)}</div>
-          <div class="list-row-meta"><span>${escapeHtml(r.from_user.display_name)} &rarr; ${escapeHtml(r.to_user.display_name)} — pulled away unfinished to even out the week</span></div>
+          <div class="list-row-meta"><span>${escapeHtml(t("admin.pulled_away_note", { from: r.from_user.display_name, to: r.to_user.display_name }))}</span></div>
         </div>
-        <div class="list-row-points"><span>${r.points}</span><span class="muted">pts</span></div>
+        <div class="list-row-points"><span>${r.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
       </div>`
     )
     .join("");
@@ -498,8 +526,7 @@ function renderBalanceResult(container, result) {
   const leftover =
     result.unassigned_task_count || result.unassigned_todo_count
       ? `<p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">
-           ${result.unassigned_task_count} task(s) and ${result.unassigned_todo_count} todo(s) left unassigned this
-           run — everyone eligible is already at the per-run cap.
+           ${escapeHtml(t("admin.leftover_note", { taskCount: result.unassigned_task_count, todoCount: result.unassigned_todo_count }))}
          </p>`
       : "";
 
@@ -507,7 +534,7 @@ function renderBalanceResult(container, result) {
     ${rows ? `<div class="stack">${rows}</div>` : ""}
     ${
       reassignmentRows
-        ? `<p class="muted" style="font-size: var(--font-size-xs); margin: var(--space-3) 0 4px;">Mid-week rebalancing</p><div class="stack">${reassignmentRows}</div>`
+        ? `<p class="muted" style="font-size: var(--font-size-xs); margin: var(--space-3) 0 4px;">${escapeHtml(t("admin.mid_week_rebalancing"))}</p><div class="stack">${reassignmentRows}</div>`
         : ""
     }
     ${leftover}
@@ -522,31 +549,31 @@ async function loadAutoReport(container) {
     const settings = await api.get(`${HB}/settings`);
     cancelSkeleton();
     const lastAuto = settings.last_auto_report_period
-      ? `Last auto-generated: week of ${settings.last_auto_report_period}`
-      : "Hasn't run automatically yet";
+      ? t("admin.last_auto_generated", { date: settings.last_auto_report_period })
+      : t("admin.hasnt_run_yet");
     root.innerHTML = `
       <div class="field">
         <label class="row">
           <input type="checkbox" id="auto-report-enabled" ${settings.auto_report_enabled ? "checked" : ""} />
-          <span>Auto-generate a report for each week once it ends</span>
+          <span>${escapeHtml(t("admin.auto_generate_label"))}</span>
         </label>
       </div>
       <div class="row" style="margin-top: var(--space-2);">
-        <span class="muted" style="font-size: var(--font-size-xs); flex: 1;">${lastAuto}</span>
-        <button class="btn btn-primary" id="auto-report-save">Save</button>
+        <span class="muted" style="font-size: var(--font-size-xs); flex: 1;">${escapeHtml(lastAuto)}</span>
+        <button class="btn btn-primary" id="auto-report-save">${escapeHtml(t("common.save"))}</button>
       </div>
     `;
     root.querySelector("#auto-report-save").addEventListener("click", async () => {
       try {
         await patchSettings({ auto_report_enabled: root.querySelector("#auto-report-enabled").checked });
-        showToast("Saved", "success");
+        showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast */
       }
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load settings</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_settings"))}</div>`;
   }
 }
 
@@ -558,7 +585,7 @@ async function loadReports(container) {
     const reports = await api.get(`${HB}/reports`);
     cancelSkeleton();
     if (reports.length === 0) {
-      root.innerHTML = `<div class="empty-state">No reports generated yet</div>`;
+      root.innerHTML = `<div class="empty-state">${escapeHtml(t("admin.no_reports_yet"))}</div>`;
       return;
     }
     // A plain div, not a <button> — it now holds two separate actions
@@ -571,18 +598,18 @@ async function loadReports(container) {
         <div class="list-row" data-report-id="${r.id}" data-period="${r.period_start}" data-paid="${paid}" style="${paid ? "opacity: 0.6;" : ""}">
           <div class="list-row-body">
             <div class="list-row-title">
-              ${r.period_type === "week" ? "Weekly" : "Monthly"} report
-              ${r.is_last_week ? `<span class="badge badge-info">Last week</span>` : ""}
-              <span class="badge badge-${paid ? "success" : "neutral"}">${paid ? "Paid" : "Unpaid"}</span>
+              ${r.period_type === "week" ? escapeHtml(t("admin.report_title_week")) : escapeHtml(t("admin.report_title_month"))}
+              ${r.is_last_week ? `<span class="badge badge-info">${escapeHtml(t("admin.last_week_badge"))}</span>` : ""}
+              <span class="badge badge-${paid ? "success" : "neutral"}">${paid ? escapeHtml(t("admin.paid_badge")) : escapeHtml(t("admin.unpaid_badge"))}</span>
             </div>
             <div class="list-row-meta">
               <span>${r.period_start} – ${r.period_end}</span>
-              ${r.generated_by ? "" : `<span class="muted">· auto</span>`}
+              ${r.generated_by ? "" : `<span class="muted">${escapeHtml(t("admin.auto_suffix"))}</span>`}
             </div>
           </div>
           <div class="list-row-actions">
-            <button class="btn btn-icon" data-action="toggle-paid" aria-label="${paid ? "Mark unpaid" : "Mark paid"}" title="${paid ? "Mark unpaid" : "Mark paid"}">${icons.check}</button>
-            <button class="btn btn-icon" data-action="download" aria-label="Download report">${icons.chevronRight}</button>
+            <button class="btn btn-icon" data-action="toggle-paid" aria-label="${paid ? escapeAttr(t("admin.mark_unpaid")) : escapeAttr(t("admin.mark_paid"))}" title="${paid ? escapeAttr(t("admin.mark_unpaid")) : escapeAttr(t("admin.mark_paid"))}">${icons.check}</button>
+            <button class="btn btn-icon" data-action="download" aria-label="${escapeAttr(t("admin.download_report_aria"))}">${icons.chevronRight}</button>
           </div>
         </div>`;
       })
@@ -605,7 +632,7 @@ async function loadReports(container) {
     });
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load reports</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_reports"))}</div>`;
   }
 }
 
@@ -637,24 +664,24 @@ function openReportModal(container) {
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2>Generate report</h2>
-        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="Close">${icons.close}</button>
+        <h2>${escapeHtml(t("admin.generate_report_title"))}</h2>
+        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeAttr(t("common.close"))}">${icons.close}</button>
       </div>
       <div class="stack">
         <div class="field">
-          <label for="r-period-type">Period</label>
+          <label for="r-period-type">${escapeHtml(t("admin.period_label"))}</label>
           <select class="select" id="r-period-type">
-            <option value="week">Week</option>
-            <option value="month">Month</option>
+            <option value="week">${escapeHtml(t("admin.period_week_option"))}</option>
+            <option value="month">${escapeHtml(t("admin.period_month_option"))}</option>
           </select>
         </div>
         <div class="field">
-          <label for="r-period-date">Any date within that period</label>
+          <label for="r-period-date">${escapeHtml(t("admin.any_date_label"))}</label>
           <input class="input" type="date" id="r-period-date" value="${new Date().toISOString().slice(0, 10)}" />
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-primary grow" id="r-generate">Generate</button>
+        <button class="btn btn-primary grow" id="r-generate">${escapeHtml(t("admin.generate_btn"))}</button>
       </div>
     </div>
   `;
@@ -672,7 +699,7 @@ function openReportModal(container) {
     };
     try {
       await api.post(`${HB}/reports`, payload);
-      showToast("Report generated", "success");
+      showToast(t("admin.report_generated_toast"), "success");
       close();
       loadReports(container);
     } catch {
@@ -682,22 +709,22 @@ function openReportModal(container) {
 }
 
 const AUTHENTIK_FIELDS = [
-  ["issuer", "Issuer"],
-  ["jwks_url", "JWKS URL"],
-  ["client_id", "Client ID"],
-  ["authorize_url", "Authorize URL"],
-  ["token_url", "Token URL"],
-  ["end_session_url", "End-session URL"],
-  ["scope", "Scope"],
+  ["issuer", () => t("admin.issuer_label")],
+  ["jwks_url", () => t("admin.jwks_label")],
+  ["client_id", () => t("admin.client_id_label")],
+  ["authorize_url", () => t("admin.authorize_url_label")],
+  ["token_url", () => t("admin.token_url_label")],
+  ["end_session_url", () => t("admin.end_session_url_label")],
+  ["scope", () => t("admin.scope_label")],
 ];
 
 // Separate from AUTHENTIK_FIELDS only so the render can put a divider/
 // heading between the two groups — saved together, same request, same
 // reauth.
 const GROUP_ROLE_FIELDS = [
-  ["admin_group", "Admin group"],
-  ["user_group", "User group"],
-  ["viewer_group", "Viewer group"],
+  ["admin_group", () => t("admin.admin_group_label")],
+  ["user_group", () => t("admin.user_group_label")],
+  ["viewer_group", () => t("admin.viewer_group_label")],
 ];
 
 async function loadAuthentikConfig(container) {
@@ -709,7 +736,7 @@ async function loadAuthentikConfig(container) {
     config = await api.get(`${AUTH_BASE}/authentik-config`);
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load the Authentik configuration</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("admin.couldnt_load_authentik"))}</div>`;
     return;
   }
   cancelSkeleton();
@@ -718,18 +745,17 @@ async function loadAuthentikConfig(container) {
     ${AUTHENTIK_FIELDS.map(
       ([key, label]) => `
       <div class="field">
-        <label for="ak-${key}">${label}</label>
+        <label for="ak-${key}">${escapeHtml(label())}</label>
         <input class="input" id="ak-${key}" value="${escapeAttr(config[key])}" />
       </div>`
     ).join("")}
     <p class="muted" style="font-size: var(--font-size-xs); margin: var(--space-3) 0 4px;">
-      Which Authentik group grants which role. Must all be different — reusing a name for two
-      roles makes the higher one unreachable, not shared.
+      ${escapeHtml(t("admin.group_role_note"))}
     </p>
     ${GROUP_ROLE_FIELDS.map(
       ([key, label]) => `
       <div class="field">
-        <label for="ak-${key}">${label}</label>
+        <label for="ak-${key}">${escapeHtml(label())}</label>
         <input class="input" id="ak-${key}" value="${escapeAttr(config[key])}" />
       </div>`
     ).join("")}
@@ -737,16 +763,16 @@ async function loadAuthentikConfig(container) {
       class="field"
       style="margin-top: var(--space-3); padding-top: var(--space-3); border-top: 1px solid var(--border-color);"
     >
-      <label for="ak-reauth-username">Confirm with your local admin username</label>
+      <label for="ak-reauth-username">${escapeHtml(t("admin.reauth_username_label"))}</label>
       <input class="input" id="ak-reauth-username" autocomplete="username" />
     </div>
     <div class="field">
-      <label for="ak-reauth-password">...and password</label>
+      <label for="ak-reauth-password">${escapeHtml(t("admin.reauth_password_label"))}</label>
       <input class="input" type="password" id="ak-reauth-password" autocomplete="current-password" />
     </div>
     <div class="row" style="margin-top: var(--space-2);">
-      <button class="btn" id="ak-reset">Reset to .env defaults</button>
-      <button class="btn btn-primary grow" id="ak-save">Save</button>
+      <button class="btn" id="ak-reset">${escapeHtml(t("admin.reset_defaults_btn"))}</button>
+      <button class="btn btn-primary grow" id="ak-save">${escapeHtml(t("common.save"))}</button>
     </div>
   `;
 
@@ -775,10 +801,10 @@ async function loadAuthentikConfig(container) {
       // message instead ("Re-authentication failed", or the issuer
       // validation failure) so the admin knows what actually went wrong.
       await api.put(`${AUTH_BASE}/authentik-config`, body, { silent: true });
-      showToast("Saved — can take up to a minute to reach every service", "success");
+      showToast(t("admin.authentik_save_toast"), "success");
       loadAuthentikConfig(container);
     } catch (err) {
-      showToast(err.message || "Couldn't save", "danger");
+      showToast(err.message || t("admin.couldnt_save"), "danger");
     } finally {
       btn.disabled = false;
     }
@@ -786,9 +812,9 @@ async function loadAuthentikConfig(container) {
 
   root.querySelector("#ak-reset").addEventListener("click", async () => {
     const ok = await showConfirmDialog({
-      title: "Reset Authentik settings?",
-      message: "This reverts every service to the .env defaults. Anyone currently logged in through Authentik will be signed out.",
-      confirmLabel: "Reset",
+      title: t("admin.reset_confirm_title"),
+      message: t("admin.reset_confirm_message"),
+      confirmLabel: t("admin.reset_btn"),
       danger: true,
     });
     if (!ok) return;
@@ -796,10 +822,10 @@ async function loadAuthentikConfig(container) {
     btn.disabled = true;
     try {
       await api.post(`${AUTH_BASE}/authentik-config/reset`, reauthBody(), { silent: true });
-      showToast("Reset to .env defaults", "success");
+      showToast(t("admin.reset_toast"), "success");
       loadAuthentikConfig(container);
     } catch (err) {
-      showToast(err.message || "Couldn't reset", "danger");
+      showToast(err.message || t("admin.couldnt_reset"), "danger");
     } finally {
       btn.disabled = false;
     }

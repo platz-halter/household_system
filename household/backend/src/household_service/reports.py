@@ -27,6 +27,8 @@ from reportlab.platypus import (
 )
 from reportlab.platypus.flowables import Flowable
 
+from household_service.i18n import Lang, t
+
 REPORTS_DIR = Path("/app/data/reports")
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -38,6 +40,28 @@ ACCENT_SUCCESS = colors.HexColor("#15803d")
 ACCENT_SUCCESS_BG = colors.HexColor("#e7f6ec")
 
 PAGE_MARGIN = 20 * mm
+
+
+def _fmt_date(d: date, lang: Lang) -> str:
+    # English keeps the "06 Oct 2026" month-abbreviation form; German
+    # uses the idiomatic numeric "06.10.2026" instead of transliterating
+    # month names, which would need a separate lookup table for no
+    # real benefit here.
+    return d.strftime("%d.%m.%Y") if lang == "de" else d.strftime("%d %b %Y")
+
+
+def _fmt_datetime(dt: datetime, lang: Lang) -> str:
+    return (
+        dt.strftime("%d.%m.%Y, %H:%M")
+        if lang == "de"
+        else dt.strftime("%d %b %Y, %H:%M")
+    )
+
+
+def _fmt_amount(value: float, lang: Lang) -> str:
+    # German number formatting uses a decimal comma, not a point.
+    text = f"{value:.2f}"
+    return text.replace(".", ",") if lang == "de" else text
 
 
 class _ShareBar(Flowable):
@@ -135,16 +159,20 @@ def _header_block(
     period_end: date,
     generated_by: str,
     generated_at: datetime,
+    lang: Lang,
 ):
-    period_label = (
-        f"{period_start.strftime('%d %b %Y')} – {period_end.strftime('%d %b %Y')}"
-    )
+    period_label = f"{_fmt_date(period_start, lang)} – {_fmt_date(period_end, lang)}"
     header_table = Table(
         [
             [
                 Paragraph("HOUSEHOLD SYSTEM", styles["eyebrow"]),
                 Paragraph(
-                    f"Generated {generated_at.strftime('%d %b %Y, %H:%M')}<br/>by {generated_by}",
+                    t(
+                        lang,
+                        "report_pdf.generated_by",
+                        date=_fmt_datetime(generated_at, lang),
+                        by=generated_by,
+                    ),
                     styles["meta_right"],
                 ),
             ]
@@ -153,9 +181,10 @@ def _header_block(
     )
     header_table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP")]))
 
+    title = t(lang, f"report_pdf.title.{period_type}")
     return [
         header_table,
-        Paragraph(f"{period_type.capitalize()} points report", styles["title"]),
+        Paragraph(title, styles["title"]),
         Paragraph(period_label, styles["subtitle"]),
         Spacer(1, 4 * mm),
         HRFlowable(width="100%", thickness=1.4, color=INK, spaceAfter=8 * mm),
@@ -170,21 +199,31 @@ def _stat_cell(value: str, label: str, styles) -> list:
 
 
 def _summary_row(
-    rows: list[tuple[str, int]], rate: float | None, currency: str, styles
+    rows: list[tuple[str, int]], rate: float | None, currency: str, styles, lang: Lang
 ):
     total_points = sum(points for _, points in rows)
     participants = len(rows)
     top_name = rows[0][0] if rows else "—"
 
     cells = [
-        _stat_cell(str(total_points), "Total points", styles),
-        _stat_cell(str(participants), "Participants", styles),
-        _stat_cell(top_name, "Top performer", styles),
+        _stat_cell(str(total_points), t(lang, "report_pdf.stat.total_points"), styles),
+        _stat_cell(str(participants), t(lang, "report_pdf.stat.participants"), styles),
+        _stat_cell(top_name, t(lang, "report_pdf.stat.top_performer"), styles),
     ]
     if rate:
-        cells.append(_stat_cell(f"{rate:.2f} {currency}", "Money per point", styles))
         cells.append(
-            _stat_cell(f"{total_points * rate:.2f} {currency}", "Total value", styles)
+            _stat_cell(
+                f"{_fmt_amount(rate, lang)} {currency}",
+                t(lang, "report_pdf.stat.money_per_point"),
+                styles,
+            )
+        )
+        cells.append(
+            _stat_cell(
+                f"{_fmt_amount(total_points * rate, lang)} {currency}",
+                t(lang, "report_pdf.stat.total_value"),
+                styles,
+            )
         )
 
     table = Table([cells], colWidths=[None] * len(cells))
@@ -206,20 +245,24 @@ def _summary_row(
 
 
 def _leaderboard_table(
-    rows: list[tuple[str, int]], rate: float | None, currency: str, styles
+    rows: list[tuple[str, int]], rate: float | None, currency: str, styles, lang: Lang
 ):
     max_points = max((points for _, points in rows), default=0)
 
-    header = ["#", "User", "Points"]
+    header = [
+        t(lang, "report_pdf.table.rank"),
+        t(lang, "report_pdf.table.user"),
+        t(lang, "report_pdf.table.points"),
+    ]
     if rate:
-        header.append(f"≈ {currency}")
-    header.append("Share")
+        header.append(t(lang, "report_pdf.table.approx_currency", currency=currency))
+    header.append(t(lang, "report_pdf.table.share"))
 
     data = [header]
     for i, (name, points) in enumerate(rows, start=1):
         row = [str(i), name, str(points)]
         if rate:
-            row.append(f"{points * rate:.2f} {currency}")
+            row.append(f"{_fmt_amount(points * rate, lang)} {currency}")
         row.append(_ShareBar(points / max_points if max_points else 0))
         data.append(row)
 
@@ -254,7 +297,7 @@ def _leaderboard_table(
     return table
 
 
-def _footer(generated_by: str):
+def _footer(generated_by: str, lang: Lang):
     def draw(canvas, doc):
         canvas.saveState()
         canvas.setStrokeColor(BORDER)
@@ -264,10 +307,14 @@ def _footer(generated_by: str):
         canvas.setFont("Helvetica", 8)
         canvas.setFillColor(MUTED)
         canvas.drawString(
-            PAGE_MARGIN, y - 10, f"Household System · generated by {generated_by}"
+            PAGE_MARGIN,
+            y - 10,
+            t(lang, "report_pdf.footer", by=generated_by),
         )
         canvas.drawRightString(
-            A4[0] - PAGE_MARGIN, y - 10, f"Page {canvas.getPageNumber()}"
+            A4[0] - PAGE_MARGIN,
+            y - 10,
+            t(lang, "report_pdf.page_number", n=canvas.getPageNumber()),
         )
         canvas.restoreState()
 
@@ -283,19 +330,26 @@ def generate_report_pdf(
     rows: list[tuple[str, int]],
     rate: float | None,
     currency: str = "EUR",
-    generated_by: str = "an admin",
+    generated_by: str | None = None,
     generated_at: datetime | None = None,
+    lang: Lang = "en",
 ) -> str:
-    """Writes the PDF to REPORTS_DIR and returns its filename."""
+    """Writes the PDF to REPORTS_DIR and returns its filename.
+
+    `lang` is the household's shared HouseholdSettings.default_language
+    (see household_service.i18n's module docstring) — a report is one
+    document, not per-viewer, so it can't follow each admin's own
+    preference the way a notification follows its one recipient."""
     filename = f"report-{report_id}-{period_start.isoformat()}.pdf"
     path = REPORTS_DIR / filename
     generated_at = generated_at or datetime.now(UTC)
+    generated_by_label = generated_by or t(lang, "report_pdf.automatic")
 
     styles = _styles()
     doc = SimpleDocTemplate(
         str(path),
         pagesize=A4,
-        title="Household points report",
+        title=t(lang, f"report_pdf.title.{period_type}"),
         leftMargin=PAGE_MARGIN,
         rightMargin=PAGE_MARGIN,
         topMargin=PAGE_MARGIN,
@@ -303,18 +357,22 @@ def generate_report_pdf(
     )
 
     story = _header_block(
-        styles, period_type, period_start, period_end, generated_by, generated_at
+        styles,
+        period_type,
+        period_start,
+        period_end,
+        generated_by_label,
+        generated_at,
+        lang,
     )
 
     if not rows:
-        story.append(
-            Paragraph("No points were logged in this period.", styles["empty"])
-        )
+        story.append(Paragraph(t(lang, "report_pdf.empty"), styles["empty"]))
     else:
-        story.append(_summary_row(rows, rate, currency, styles))
+        story.append(_summary_row(rows, rate, currency, styles, lang))
         story.append(Spacer(1, 8 * mm))
-        story.append(_leaderboard_table(rows, rate, currency, styles))
+        story.append(_leaderboard_table(rows, rate, currency, styles, lang))
 
-    footer = _footer(generated_by)
+    footer = _footer(generated_by_label, lang)
     doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return filename

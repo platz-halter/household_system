@@ -26,11 +26,27 @@ class HouseholdUserBrief(BaseModel):
 class HouseholdUserOut(HouseholdUserBrief):
     on_break: bool
     created_at: datetime
+    # Only on the full Out shape, not HouseholdUserBrief — this is a
+    # private preference of the account itself, not something relevant
+    # to showing who else a todo/assignment belongs to.
+    preferred_language: Literal["en", "de"]
+    # The same cached role hint crud._is_eligible_for_tasks already
+    # reads server-side (see HouseholdUser.role's own docstring) —
+    # exposed here (not on HouseholdUserBrief) so a picker over the
+    # full user list, like the Tasks page's pinned-owner select, can
+    # exclude viewers client-side the same way the backend already
+    # would reject one. Not secret: household members already know
+    # each other's roles, same as the Admin panel's own group mapping.
+    role: str | None = None
 
 
 class HouseholdUserUpdate(BaseModel):
     display_name: str | None = Field(default=None, min_length=1, max_length=200)
     on_break: bool | None = None
+
+
+class HouseholdUserLanguageUpdate(BaseModel):
+    preferred_language: Literal["en", "de"]
 
 
 # ---- Categories ---------------------------------------------------------
@@ -73,6 +89,9 @@ class TaskCreate(BaseModel):
     ramp_up_enabled: bool = False
     ramp_up_bonus_points: int = Field(default=0, ge=0)
     category_ids: list[int] = Field(default_factory=list)
+    # "Always assign to" owner — see Task.pinned_user_id's own docstring.
+    # Admin-only to set (crud.create_task), same as changing it later.
+    pinned_user_id: int | None = None
 
     @field_validator("weekdays")
     @classmethod
@@ -85,7 +104,7 @@ class TaskCreate(BaseModel):
             if not self.weekdays:
                 raise ValueError("a weekly task needs at least one weekday")
         else:
-            self.weekdays = None  # daily/monthly never carry a weekday list
+            self.weekdays = None  # only weekly carries a weekday list
         return self
 
 
@@ -93,7 +112,13 @@ class TaskUpdate(BaseModel):
     """All fields optional — PATCH semantics, only provided fields change.
     Cross-checking `recurrence` against `weekdays` needs the task's
     current state when only one of the two is in this particular PATCH,
-    so that validation lives in crud.update_task instead of here."""
+    so that validation lives in crud.update_task instead of here.
+    `pinned_user_id` needs the SAME "was it actually provided" distinction
+    for a different reason — explicit `null` must clear an existing pin,
+    while omitting the field must leave it alone, so crud.update_task
+    reads `"pinned_user_id" in data.model_fields_set` rather than the
+    `is not None` pattern every other field here uses (which can set a
+    value but can never explicitly clear one back to null)."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
@@ -105,6 +130,7 @@ class TaskUpdate(BaseModel):
     ramp_up_enabled: bool | None = None
     ramp_up_bonus_points: int | None = Field(default=None, ge=0)
     category_ids: list[int] | None = None
+    pinned_user_id: int | None = None
 
     @field_validator("weekdays")
     @classmethod
@@ -134,6 +160,9 @@ class TaskOut(BaseModel):
     # this to keep it out of the normal task list and the task picker
     # used when choosing a NEW chain link's child.
     is_chain_child: bool = False
+    # "Always assign to" owner — see Task.pinned_user_id's own docstring.
+    pinned_user_id: int | None = None
+    pinned_user: HouseholdUserBrief | None = None
 
     model_config = {"from_attributes": True}
 
@@ -154,6 +183,12 @@ class TaskOut(BaseModel):
             created_at=task.created_at,
             updated_at=task.updated_at,
             is_chain_child=is_chain_child,
+            pinned_user_id=task.pinned_user_id,
+            pinned_user=(
+                HouseholdUserBrief.model_validate(task.pinned_user)
+                if task.pinned_user
+                else None
+            ),
         )
 
 
@@ -625,6 +660,7 @@ class HouseholdSettingsOut(BaseModel):
     last_auto_report_period: date | None
     overdue_delete_after_days: int | None
     timezone: str
+    default_language: Literal["en", "de"]
     model_config = {"from_attributes": True}
 
 
@@ -641,6 +677,9 @@ class HouseholdSettingsUpdate(BaseModel):
     # IANA name — see HouseholdSettings' own docstring for exactly what
     # this does and doesn't affect.
     timezone: str = Field(default="UTC")
+    # What a BRAND NEW HouseholdUser starts with — not retroactive. See
+    # HouseholdSettings.default_language's own docstring.
+    default_language: Literal["en", "de"] = "en"
 
     @field_validator("currency")
     @classmethod

@@ -1,6 +1,7 @@
 // Small helpers shared across the page modules — kept here (rather than
 // duplicated per file, unlike storage/frontend's escapeHtml) because the
 // weekday/date math needs to agree exactly everywhere it's used.
+import { t, getLocale } from "./i18n.js";
 
 export function escapeHtml(str) {
   return String(str ?? "").replace(
@@ -11,8 +12,29 @@ export function escapeHtml(str) {
 
 export const escapeAttr = escapeHtml;
 
-// Mirrors Task.weekdays on the backend: 0=Monday .. 6=Sunday.
-export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+// Mirrors Task.weekdays on the backend: 0=Monday .. 6=Sunday. Built from
+// t() rather than stored as a literal array, so it tracks the current
+// language — anything that read these at module-load time under the old
+// plain-array design would need this file re-evaluated on a language
+// change anyway, which a full reload (see i18n.js's setLocale callers)
+// already guarantees.
+export function WEEKDAY_LABELS() {
+  return ["weekday.mon", "weekday.tue", "weekday.wed", "weekday.thu", "weekday.fri", "weekday.sat", "weekday.sun"].map(
+    (k) => t(k)
+  );
+}
+
+export function WEEKDAY_NAMES() {
+  return [
+    "weekday.monday",
+    "weekday.tuesday",
+    "weekday.wednesday",
+    "weekday.thursday",
+    "weekday.friday",
+    "weekday.saturday",
+    "weekday.sunday",
+  ].map((k) => t(k));
+}
 
 // Loading skeletons are meant for genuinely slow requests — showing one
 // for a request that resolves in 50ms just makes it flash in and back
@@ -55,20 +77,20 @@ export function dueBadge(dueDateStr) {
   const now = new Date();
   const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
   const diffDays = Math.round((due - today) / 86400000);
-  if (diffDays < 0) return { label: "Overdue", tone: "danger" };
-  if (diffDays === 0) return { label: "Due today", tone: "warning" };
-  if (diffDays === 1) return { label: "Due tomorrow", tone: "info" };
-  return { label: `Due ${dueDateStr}`, tone: "neutral" };
+  if (diffDays < 0) return { label: t("util.overdue"), tone: "danger" };
+  if (diffDays === 0) return { label: t("util.due_today"), tone: "warning" };
+  if (diffDays === 1) return { label: t("util.due_tomorrow"), tone: "info" };
+  return { label: t("util.due_on", { date: dueDateStr }), tone: "neutral" };
 }
 
 export function timeAgo(isoString) {
   const diffMs = Date.now() - new Date(isoString).getTime();
   const mins = Math.round(diffMs / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1) return t("util.just_now");
+  if (mins < 60) return t("util.minutes_ago", { m: mins });
   const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return t("util.hours_ago", { h: hours });
   const days = Math.round(hours / 24);
-  if (days < 7) return `${days}d ago`;
-  return new Date(isoString).toLocaleDateString();
+  if (days < 7) return t("util.days_ago", { d: days });
+  return new Date(isoString).toLocaleDateString(getLocale());
 }

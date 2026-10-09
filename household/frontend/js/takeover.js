@@ -11,6 +11,7 @@ import { CONFIG } from "./config.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
 import { escapeHtml, escapeAttr } from "./util.js";
+import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -32,13 +33,13 @@ export function takeoverControl({ requests, kind, id, label, onChange }) {
     wrap.className = "row";
     wrap.style.gap = "4px";
     wrap.innerHTML = `
-      <span class="badge badge-neutral">Asked ${escapeHtml(pending.target.display_name)}</span>
-      <button type="button" class="btn btn-icon btn-ghost" aria-label="Cancel request" title="Cancel the takeover request">${icons.close}</button>
+      <span class="badge badge-neutral">${escapeHtml(t("takeover.asked_badge", { name: pending.target.display_name }))}</span>
+      <button type="button" class="btn btn-icon btn-ghost" aria-label="${escapeHtml(t("takeover.cancel_request_label"))}" title="${escapeHtml(t("takeover.cancel_request_title"))}">${icons.close}</button>
     `;
     wrap.querySelector("button").addEventListener("click", async () => {
       try {
         await api.post(`${HB}/takeover-requests/${pending.id}/cancel`);
-        showToast("Request cancelled", "success");
+        showToast(t("takeover.request_cancelled_toast"), "success");
         onChange();
       } catch {
         /* api.js already showed a toast */
@@ -50,8 +51,8 @@ export function takeoverControl({ requests, kind, id, label, onChange }) {
   const btn = document.createElement("button");
   btn.type = "button";
   btn.className = "btn btn-icon";
-  btn.setAttribute("aria-label", "Ask someone to take over");
-  btn.title = "Ask someone to take over — they'll need to accept before it moves";
+  btn.setAttribute("aria-label", t("takeover.ask_aria"));
+  btn.title = t("takeover.ask_title");
   btn.innerHTML = icons.send;
   btn.addEventListener("click", () => openTakeoverRequestModal({ kind, id, label, onChange }));
   return btn;
@@ -71,26 +72,26 @@ async function openTakeoverRequestModal({ kind, id, label, onChange }) {
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2>Ask someone to take over</h2>
-        <button class="btn btn-icon btn-ghost" id="tko-close" aria-label="Close">${icons.close}</button>
+        <h2>${escapeHtml(t("takeover.modal_title"))}</h2>
+        <button class="btn btn-icon btn-ghost" id="tko-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
       </div>
       <div class="stack">
         <div class="field">
-          <label for="tko-target">"${escapeHtml(label)}" — who should take it?</label>
+          <label for="tko-target">${escapeHtml(t("takeover.who_label", { label }))}</label>
           <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
-            They'll get a notification and have to accept before it actually moves — this just asks.
+            ${escapeHtml(t("takeover.explain"))}
           </p>
           <select class="select" id="tko-target" ${users.length === 0 ? "disabled" : ""}>
             ${
               users.length === 0
-                ? `<option value="">No one else is available right now</option>`
+                ? `<option value="">${escapeHtml(t("takeover.no_one_available"))}</option>`
                 : users.map((u) => `<option value="${u.id}">${escapeAttr(u.display_name)}</option>`).join("")
             }
           </select>
         </div>
       </div>
       <div class="modal-footer">
-        <button class="btn btn-primary grow" id="tko-save" ${users.length === 0 ? "disabled" : ""}>Ask</button>
+        <button class="btn btn-primary grow" id="tko-save" ${users.length === 0 ? "disabled" : ""}>${escapeHtml(t("takeover.ask_button"))}</button>
       </div>
     </div>
   `;
@@ -106,7 +107,7 @@ async function openTakeoverRequestModal({ kind, id, label, onChange }) {
     const path = kind === "todo" ? `todos/${id}/takeover-requests` : `assignments/${id}/takeover-requests`;
     try {
       await api.post(`${HB}/${path}`, { target_id: targetId });
-      showToast("Takeover requested", "success");
+      showToast(t("takeover.requested_toast"), "success");
       close();
       onChange();
     } catch {

@@ -1955,6 +1955,10 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     cleaned up all test fixtures (the group, its task, both triggered
     todos) afterward.
 
+- ✅ **Always-assign (pinned) tasks.** `Task.pinned_user_id` (migration `141c12efdcbb`, named FK constraint `fk_tasks_pinned_user_id_household_users`, `ON DELETE SET NULL` — applied and round-tripped cleanly) — a standing household agreement ("Alex always does the bathroom"), opting a weekly/monthly task out of the auto-balancer's fairness pool entirely rather than merely biasing it. Implemented as pure functions in `balancing.py`, not a crud-level special case, specifically so `test_balancing.py` covers it the same way as everything else (11 new tests): `CandidateTask`/`CandidateTodo.pinned_user_id` makes `balance()` hand the item straight to its owner — bypassing both the fairness pick AND the per-run cap, since a pin was never a "new fairness-allocated item" to begin with — or leave it unassigned if they're not currently eligible (**deliberately** not handed to anyone else just because the pinned person is on break; that's the whole point of pinning, a decision explicitly flagged rather than silently made). `rebalance()` skips any `PullableAssignment` with `pinned=True` unconditionally. A third pure function, `correct_pins()`, handles an EXISTING assignment held by the wrong person (the pin was just set, or changed, after this period's sweep already ran) — moves it back, gated on `has_progress` and `already_reassigned` (the SAME `TaskAssignment.reassigned_at` column both `rebalance()`'s own pull AND `crud.accept_takeover_request`'s consent-based move stamp). `crud.run_balancing` runs `correct_pins()` first, then threads `pinned_user_id` through the normal `candidate_tasks`/`balance()` call for the sweep, then sets `pinned=` on every `PullableAssignment` for the rebalance pass. Also covers `run_balancing`'s unclaimed-board-todo sweep (`CandidateTodo.pinned_user_id` resolved from a todo's own `source_task_id` via one small targeted query) and `trigger_event_group`'s batch balance (resolved from each root's own task, paired back to its spawned todo via `zip()` since both lists are built in lockstep) — NOT `_assign_chain_todo_now` or `claim_todo` (deliberately out of scope; see CLAUDE.md's own entry for the full reasoning on both). Auto-cleared to `None` by `crud.update_task` the moment recurrence becomes `daily` (same pattern `weekdays` already gets); naturally inert (not auto-cleared, since chain-child status is dynamic, not a stored column) for a chain-child task, via the sweep's pre-existing `excluded_chain_child_ids` filter. **Admin-only to set or change** — `main.create_task`/`patch_task` check `"pinned_user_id" in data.model_fields_set` (not `is not None`, so explicit `null` can actually clear an existing pin — unlike every other `TaskUpdate` field) and the value actually changed before requiring `user.role == "admin"`; every other task field stays an ordinary `can_write` edit. `crud._validate_pinned_user` rejects an unknown or viewer-role pinned user (400) — a viewer can never complete anything, so pinning one would leave the task permanently stuck. `HouseholdUserOut` gained a `role` field (previously visible only for the CURRENT user via their own decoded JWT, never for anyone else) specifically so the frontend's pinned-owner picker can exclude viewers client-side the same way the backend already would reject one — not secret, household members already know each other's roles. Frontend: Tasks page's task-edit modal gained an "Always assign to" select (visible to everyone, enabled only for `isAdmin()`, hidden when recurrence is Daily or the task `is_chain_child`), and the task list row gained an `"Always: {name}"` badge. The save payload always includes `pinned_user_id` (explicit `null` for "No one"), since the PATCH route's clearing logic needs the field present in the request, not just non-null. **Live-verified end to end** (CDP-driven headless Chromium, three throwaway local accounts: one admin, two user-role): an admin-created task pinned to A landed on A via a real balancer run even though the fairness math alone would have picked differently; a non-admin's attempt to repin it got a 403, while the SAME non-admin editing an unrelated field with the pin left untouched succeeded normally; A requested a takeover to B, B accepted, and — the exact bug an advisor review caught before this was called done — running the balancer AGAIN afterward did **not** silently move it back to the pinned owner, confirming `already_reassigned`'s shared-column reasoning actually holds up live, not just in the unit tests; a second pinned task with its owner on break came back from a real balancer run correctly unassigned, not handed to the other eligible user; and a real Event Group trigger with that same task as its one root assigned the spawned todo straight to the pinned owner. Before this round's own fixtures were created, `HouseholdSettings.default_language` was found back at `"de"` despite being restored to `"en"` at the end of the i18n round above — cause not tracked down (not this round's own code; `Task.pinned_user_id` never touches it), just reset to `"en"` again before proceeding. All three throwaway accounts and every test task/event-group/run from this round were cleaned up afterward.
+- ✅ **Manual (non-repeating) tasks, and pinning extended to every recurrence.** `Recurrence.manual` — no automatic occurrence at all; the only way an instance is created is a deliberate action (an Event Group trigger, a chain spawn, or the Board's "From task" picker). `crud.complete_task` rejects completing one directly with a 409 and no `force` override (unlike the chain-child rejection beside it — no legacy data to accommodate, `manual` is brand new); always completed via whichever todo it was posted/spawned/triggered as instead. **`Task.recurrence` converted from a Postgres enum to a plain `String`** (migration `a74f9c9fa5ed`, hand-written — autogenerate omitted the `USING recurrence::text` cast and left a now-invalid enum-typed default in place; the generated file needed the default dropped first, the cast added, the default reset to plain `'daily'`, and the orphaned `task_recurrence` type dropped, in that order) — same precedent `EventGroup.schedule_recurrence` already set, trading one `ALTER TYPE ... ADD VALUE` migration now for never needing that dance again. `Recurrence` stayed a normal Python `(str, Enum)`, so no `crud.py` comparison code needed to change; empirically verified live (a scratch write through the real async ORM, not just reasoned about) that this doesn't hit the Python 3.11+ `str(enum_member)` formatting change some other mixed-in str enums fall into — the stored value really is `"weekly"`, never `"Recurrence.weekly"`. **Caught in review, not live**: the sweep's old `Task.recurrence != Recurrence.daily` filter would have let `manual` through, and `_task_period`'s weekly-or-else-monthly fallback would have then auto-swept a REAL `TaskAssignment` for every `manual` task once a month — exactly the "gets automatically created" behavior this recurrence exists to not have. Fixed with an explicit `Task.recurrence.in_([Recurrence.weekly, Recurrence.monthly])` allow-list. Pinning (see the entry above) was originally weekly/monthly-only, with `daily` auto-cleared — that restriction is now lifted on explicit request: a pin on a `daily`/`manual` task shows as a badge and still routes any todo CREATED from that task to the pinned person (the exact same `CandidateTodo.pinned_user_id` path a weekly/monthly task's own spawned todos already used — no new code needed for this half), but does not restrict who can tap "complete" on a `daily` task from Home; offered as a follow-up in this round's report rather than built. `home.js` filters `manual` tasks out of its own "All tasks" list CLIENT-side only — the Board/Event-Group-root/chain-link pickers all reuse the same `GET /tasks` endpoint and still need them. Board's New Todo form now prefills "Request from" with a picked task's pinned owner, if assignable — convenience only, since left on "Anyone" it still reaches them eventually via the sweep, just with a visible `CLAIM_WINDOW` delay that otherwise looks broken. **Live-verified end to end**: a manual task created via the API; still returned by `GET /tasks` (for the pickers) but absent from Home's rendered list and present on the Tasks page and the Board's "From task" picker (checked by reading actual rendered DOM text, not just the API response); direct completion returned 409; a real balancer run created no `TaskAssignment` for it; pinning it then triggering an Event Group with it as the one root assigned the spawned todo straight to the pinned person, and completing THAT todo (not the task) succeeded normally; a daily task created with a pin kept it through a daily→weekly→daily recurrence round-trip. Also this round: reworded the Tasks page's German "Event Groups" info box (the previous wording used "Ein Tipp," the noun for a piece of advice, where "Ein Antippen"/"tippen" — tapping — was meant; also corrected to a proper closing „…" quote instead of a plain `"` within that one string) and removed the now-redundant description paragraphs under the Admin panel's "Timezone" and "Default language for new users" headings (both self-explanatory from their own heading + control). **Flagged, not fixed**: the straight-`"`-as-closing-quote mismatch found in that one string is systemic across `de.js` and `household_service/i18n.py` — every other German string with embedded quotes has the same issue (proper „ opening, plain `"` instead of „…" closing) — left alone everywhere else since only the one string was actually asked to be reworded; a dedicated typography pass across both files is its own, separate task. Cleaned up all test fixtures afterward; `HouseholdSettings.default_language` checked again at the end and found unchanged (`"en"`, as left at the start of this round) — the mystery reset noted in the entry above has not recurred.
+- ✅ **Multi-language support (English/German), backend half.** `household_service/i18n.py` — a flat `dict[str, dict[Lang, str]]` plus `t(lang, key, **params) -> str`, English-fallback for a present-but-missing language, `KeyError` for a genuinely unknown key. Two call sites, each with its own "whose language" rule (documented in the module's own docstring): all 8 `crud._notify()` call sites (chain-task spawn, chore request, reassign, takeover requested/responded, weekly nudge, new report, scheduled-event-group creation) render in the RECIPIENT's `HouseholdUser.preferred_language`; `reports.py`'s PDF generation renders in the household's shared `HouseholdSettings.default_language` instead, including German-idiomatic date (`06.10.2026`) and decimal-comma (`12,50 EUR`) formatting via new `_fmt_date`/`_fmt_datetime`/`_fmt_amount` helpers — not just string lookups. `HouseholdUser.preferred_language` (`String(5)`, default `"en"`) and `HouseholdSettings.default_language` (same type/default) added via migration `59982065edd0` — both plain non-FK columns with `server_default`, applied and round-tripped (`upgrade` → `downgrade` → `upgrade` → `alembic check`) cleanly on the first attempt, no FK-naming fix-up needed this time. `crud.get_or_create_household_user` seeds a brand-new row's `preferred_language` from the admin-configured `default_language` at creation time only — changing the admin default afterward is deliberately **not retroactive** (same reasoning as every other per-user default this service has). New `PATCH /me/language` route, `can_read`-gated (not `can_write` like the broader `PATCH /me`) so a viewer can set their own language even though they can't touch `display_name`/`on_break`. `household/backend/tests/test_i18n.py` (5 tests): every key has both languages, no empty translations, `{param}` placeholders match between `en`/`de` for every key (a mistyped placeholder in just one language would otherwise only surface as a live `KeyError` for that language's recipients), substitution correctness, and the unknown-language fallback chain. Caught and fixed by an advisor review before this was called done: a `chain_task.body` German string that read as "parent already done" when chain children now spawn at the parent's CREATION, not completion (see "Chained tasks" above) — reworded to the same neutral "After: X" framing English already used. Smoke-tested `generate_report_pdf` directly (English, German, and the empty-rows/no-rate branch) against a scratch `REPORTS_DIR` outside the container, all three render without error. Live-verified end to end against the running backend+frontend together — see the frontend entry below for the full verification narrative (both halves were verified in the same pass, logged-in as real throwaway accounts, not just unit tests).
+
 ## Household service — frontend
 
 - ✅ Built on the same vanilla HTML/CSS/JS conventions as
@@ -2825,6 +2829,97 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
 - ✅ `MIGRATIONS.md` documents the day-to-day workflow and known gotchas
   (renames, NOT NULL additions, Postgres enum handling, pre-deploy
   backup via `pg_dumpall`).
+- ✅ **Multi-language support (English/German), frontend half.**
+  `js/i18n.js` — `en.js`/`de.js` (421 keys each, hand-verified for exact
+  key/placeholder parity with a one-off Node script, since nothing
+  enforces this automatically on the frontend the way the backend's
+  `test_i18n.py` does) are static ES-module imports, so a locale is
+  resolved (localStorage → `navigator.language` → `"en"`) and `<html
+  lang>` set before any other module's own top-level code runs. `t(key,
+  params)` falls back de → en → the raw key itself (never silently
+  blank); a value may be a plain string or a `{one, other}` plural form
+  picked via `Intl.PluralRules` against `params.count`.
+  `applyStaticTranslations()` handles index.html's own static chrome
+  (`data-i18n`/`data-i18n-attr` on the topbar/bottom-nav) once at boot,
+  since there's no in-place re-render system for a language change —
+  every change-of-language path (Settings' own switcher, and a stale-
+  cache mismatch found at boot or right after a local login) ends in
+  exactly one `window.location.reload()`, guarded by a `sessionStorage`
+  flag so a persistently-disagreeing value can't become a reload loop.
+  Every one of the ~17 JS files was swept (`main.js`, `login.js`,
+  `settings.js`, `home.js`, `board.js`, `tasks.js`, `stats.js`,
+  `admin.js`, `notifications.js`, `takeover.js`, `taskPicker.js`,
+  `eventGroups.js`, `confirmDialog.js`, `theme.js`, `push.js`,
+  `util.js`) — every `innerHTML`/`textContent` literal, `aria-label`/
+  `title`/`placeholder`, `showToast`/`showConfirmDialog` call, and
+  thrown `Error` message now goes through `t()`; `util.js`'s
+  `WEEKDAY_LABELS()`/`WEEKDAY_NAMES()` became functions (not static
+  arrays) returning the current language's weekday names/abbreviations
+  — German's natural 2-letter abbreviation (`Mo`, `Di`, ...) vs.
+  English's 3-letter one (`Mon`, `Tue`, ...) both flow through the
+  exact same `.slice(0, 2)` the heatmap's tight day-label row already
+  did, so no special-casing was needed there. One real bug an
+  independent audit subagent caught after the first sweep pass: a
+  leaderboard "money per point" stat that string-`.replace()`d a
+  pluralized task-count string into a todo-count one instead of using
+  its own plural key — harmless in English (`task`→`todo`) but would
+  have silently mangled German's `Aufgaben`/`Aufgabe` via a partial
+  substring match; fixed with its own `common.todo_count` plural key.
+  The same audit caught two leftover hardcoded English strings (an
+  Authentik-callback-failure toast in `main.js`, and the free-text
+  timezone fallback input's "e.g. Europe/Berlin" placeholder in
+  `admin.js`) before this was called done.
+  Settings gained a "Language" section (native self-names "English"/
+  "Deutsch", never run through `t()` — they name the language itself,
+  not UI text) that `PATCH /me/language`s then reloads; Admin gained a
+  "Default language for new users" block, and `admin.js`'s
+  `patchSettings` had to gain `default_language: current.default_
+  language` in its spread-defaults — the same gap `timezone`/
+  `overdue_delete_after_days` each had their own round before.
+  **Live-verified end to end** against the real running stack (CDP-
+  driven headless Chromium, not just unit tests): created three
+  throwaway local accounts (admin, viewer, user role) via direct SQL
+  insert (passlib/bcrypt hash generated inside the real `auth`
+  container, so it matches its exact hashing config) since no password
+  was known for the pre-existing dev fixtures, logged in as each for
+  real. Confirmed: every route (Home, Board, Stats, Tasks, Settings,
+  Admin) renders with zero raw/untranslated `t()` keys visible on
+  screen in either language (a text-node walk flagging anything
+  matching a bare dotted-key pattern); switching language in Settings
+  persists server-side (`GET /me` reflects it after reload) and updates
+  `<html lang>`; a brand-new account's first `/me` correctly inherited
+  the admin-configured `default_language`; saving an unrelated Admin
+  setting (the weekly goal) does **not** reset `default_language`
+  (the exact `patchSettings` bug class fixed above, regression-tested
+  live); a viewer successfully called the `can_read`-gated `PATCH /me/
+  language`; and a real chore-request notification created by one
+  throwaway account for another rendered in the recipient's own
+  German preference end to end (`"Neue Aufgabenanfrage" / "{name}
+  bittet dich darum: ..."`), confirming the backend and frontend halves
+  agree all the way through a real request. German money/date
+  formatting confirmed correct too (`38,00 €` vs. `€38.00`,
+  `06.10.2026` vs. `06 Oct 2026`). All three throwaway accounts, the
+  one test todo created, and the admin-default-language change were
+  deleted/reverted afterward — confirmed the household/auth databases
+  match their exact pre-test row counts and values.
+  **Two deliberate, documented gaps**, flagged rather than silently
+  decided: backend `ValueError`/`HTTPException` `detail` messages stay
+  English-only (would need real error codes to translate, a
+  meaningfully bigger change than this round); and the storage frontend
+  was left untouched entirely — it has no admin/settings concept to
+  hook a default-language setting into (see CLAUDE.md's "Storage has
+  no admin/user distinction at all"), so a German-preferring storage
+  user still gets English there. Also not done: translating
+  `manifest.json`'s `name`/`short_name`/`description` (PWA install-time
+  metadata, not something this app re-serves per-viewer) or
+  `sw.js` (its push notification title/body already arrive pre-
+  translated from the backend; its own hardcoded `"Household"` fallback
+  title is an untranslated last-resort for a malformed push payload,
+  not a real-world code path). German translations use the informal
+  "du" register throughout (matching `household_service/i18n.py`'s own
+  choice on the backend side) — a deliberate choice for a household
+  chores app used by people who already know each other, not a formal
+  business tool; stated here rather than left silent.
 
 ## Authentication & permissions (cross-cutting)
 

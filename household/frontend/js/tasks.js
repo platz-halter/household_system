@@ -7,6 +7,7 @@ import { showConfirmDialog } from "./confirmDialog.js";
 import { openTaskPickerModal } from "./taskPicker.js";
 import { openTriggerConfirmModal } from "./eventGroups.js";
 import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
+import { t, getLocale } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -15,8 +16,14 @@ function canWrite() {
   return info && (info.role === "admin" || info.role === "user");
 }
 
+function isAdmin() {
+  const info = getCurrentUserInfo();
+  return Boolean(info && info.role === "admin");
+}
+
 let categoriesCache = [];
 let tasksCache = [];
+let usersCache = [];
 let eventGroupsCache = [];
 // Used only to LABEL an event group's "At ..." hour (both the schedule
 // badge on its list row and the create/edit modal's own picker) — the
@@ -38,33 +45,32 @@ export async function renderTasks(container) {
   container.innerHTML = `
     <div class="page${writable ? " page-dual-fab" : ""}">
       <div class="section-heading">
-        <h2>Categories</h2>
-        ${writable ? `<button class="btn btn-icon" id="add-category-btn" aria-label="New category">${icons.plus}</button>` : ""}
+        <h2>${escapeHtml(t("tasks.categories_heading"))}</h2>
+        ${writable ? `<button class="btn btn-icon" id="add-category-btn" aria-label="${escapeAttr(t("tasks.new_category_label"))}">${icons.plus}</button>` : ""}
       </div>
       <div class="chip-row" id="category-list" style="margin-bottom: var(--space-2);"></div>
 
       <div class="section-heading">
-        <h2>Event Groups</h2>
+        <h2>${escapeHtml(t("tasks.event_groups_heading"))}</h2>
       </div>
       <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
-        One tap creates several tasks at once — "Dinner" can post "Set the table" and "Fill
-        dishwasher" together, chain tasks included.
+        ${escapeHtml(t("tasks.event_groups_desc"))}
       </p>
       <div id="event-group-list" class="stack" style="margin-bottom: var(--space-2);"></div>
 
       <div class="section-heading">
-        <h2>Tasks</h2>
+        <h2>${escapeHtml(t("tasks.tasks_heading"))}</h2>
         <div class="chip-row" id="task-view-toggle">
-          <span class="chip${taskViewState.view === "list" ? " chip-active" : ""}" data-view="list">List</span>
-          <span class="chip${taskViewState.view === "calendar" ? " chip-active" : ""}" data-view="calendar">Calendar</span>
+          <span class="chip${taskViewState.view === "list" ? " chip-active" : ""}" data-view="list">${escapeHtml(t("tasks.view_list"))}</span>
+          <span class="chip${taskViewState.view === "calendar" ? " chip-active" : ""}" data-view="calendar">${escapeHtml(t("tasks.view_calendar"))}</span>
         </div>
       </div>
       <div id="task-view-root"></div>
     </div>
     ${
       writable
-        ? `<button class="fab-secondary" id="add-event-group-fab" aria-label="New event group" title="New event group">${icons.calendar}</button>
-           <button class="fab" id="add-task-fab" aria-label="New task">${icons.plus}</button>`
+        ? `<button class="fab-secondary" id="add-event-group-fab" aria-label="${escapeAttr(t("tasks.new_event_group_label"))}" title="${escapeAttr(t("tasks.new_event_group_label"))}">${icons.calendar}</button>
+           <button class="fab" id="add-task-fab" aria-label="${escapeAttr(t("tasks.new_task_label"))}">${icons.plus}</button>`
         : ""
     }
   `;
@@ -112,6 +118,34 @@ async function ensureTasksCache() {
   return tasksCache;
 }
 
+// `force` re-fetches even if cached — called right before opening the
+// task modal (same reasoning as board.js's own loadUsers(true) before
+// its reassign picker), since on_break/role can change between page
+// load and the moment someone opens the "always assign to" picker.
+async function loadUsers(force = false) {
+  if (!usersCache.length || force) {
+    try {
+      usersCache = await api.get(`${HB}/users`);
+    } catch {
+      usersCache = usersCache || [];
+    }
+  }
+  return usersCache;
+}
+
+// Who the "always assign to" picker offers — a viewer can never
+// complete anything (can_write-gated), same reasoning as every other
+// assignment path's own viewer exclusion (see CLAUDE.md's "On-break AND
+// viewer exclusion from assignment"). Deliberately NOT filtered by
+// on_break, unlike board.js's assignableUsers() — a pin is a standing
+// agreement that should stay visible (and keep showing as selected)
+// even while its owner is temporarily on break; the backend already
+// leaves a pinned task unassigned rather than handing it to someone
+// else for exactly that case.
+function pinnableUsers(users) {
+  return users.filter((u) => u.role !== "viewer");
+}
+
 async function renderTaskView(container, writable) {
   const root = container.querySelector("#task-view-root");
   if (!root) return;
@@ -119,9 +153,9 @@ async function renderTaskView(container, writable) {
   if (taskViewState.view === "calendar") {
     root.innerHTML = `
       <div class="row-between" style="margin-bottom: var(--space-3);">
-        <button class="btn btn-icon" id="cal-prev" aria-label="Previous month">${icons.chevronLeft}</button>
+        <button class="btn btn-icon" id="cal-prev" aria-label="${escapeAttr(t("tasks.prev_month"))}">${icons.chevronLeft}</button>
         <h3 id="cal-month-label" style="margin: 0;"></h3>
-        <button class="btn btn-icon" id="cal-next" aria-label="Next month">${icons.chevronRight}</button>
+        <button class="btn btn-icon" id="cal-next" aria-label="${escapeAttr(t("tasks.next_month"))}">${icons.chevronRight}</button>
       </div>
       <div id="cal-monthly-list" style="margin-bottom: var(--space-3);"></div>
       <div class="cal-daylabels" id="cal-daylabels"></div>
@@ -164,7 +198,7 @@ async function renderCalendar(root) {
   const gridRoot = root.querySelector("#cal-grid");
   if (!gridRoot) return;
 
-  labelEl.textContent = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" }).format(calendarMonth);
+  labelEl.textContent = new Intl.DateTimeFormat(getLocale(), { month: "long", year: "numeric" }).format(calendarMonth);
 
   let weekStart = 0;
   try {
@@ -173,27 +207,29 @@ async function renderCalendar(root) {
   } catch {
     weekStart = 0;
   }
-  dayLabelsRoot.innerHTML = WEEKDAY_LABELS.slice(weekStart)
-    .concat(WEEKDAY_LABELS.slice(0, weekStart))
-    .map((l) => `<span>${l}</span>`)
+  const weekdayLabels = WEEKDAY_LABELS();
+  dayLabelsRoot.innerHTML = weekdayLabels
+    .slice(weekStart)
+    .concat(weekdayLabels.slice(0, weekStart))
+    .map((l) => `<span>${escapeHtml(l)}</span>`)
     .join("");
 
   let tasks;
   try {
     tasks = await api.get(`${HB}/tasks?active=true`);
   } catch {
-    gridRoot.innerHTML = `<div class="empty-state">Couldn't load tasks</div>`;
+    gridRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_tasks"))}</div>`;
     return;
   }
 
-  const dailyTasks = tasks.filter((t) => t.recurrence === "daily" && !t.is_chain_child);
-  const weeklyTasks = tasks.filter((t) => t.recurrence === "weekly" && !t.is_chain_child);
-  const monthlyTasks = tasks.filter((t) => t.recurrence === "monthly" && !t.is_chain_child);
+  const dailyTasks = tasks.filter((task) => task.recurrence === "daily" && !task.is_chain_child);
+  const weeklyTasks = tasks.filter((task) => task.recurrence === "weekly" && !task.is_chain_child);
+  const monthlyTasks = tasks.filter((task) => task.recurrence === "monthly" && !task.is_chain_child);
 
   monthlyRoot.innerHTML = monthlyTasks.length
     ? `<div class="list-row-meta" style="flex-wrap: wrap;">
-         <span class="muted" style="font-size: var(--font-size-xs);">This month:</span>
-         ${monthlyTasks.map((t) => `<span class="badge badge-neutral">${escapeHtml(t.name)}</span>`).join("")}
+         <span class="muted" style="font-size: var(--font-size-xs);">${escapeHtml(t("tasks.this_month_label"))}</span>
+         ${monthlyTasks.map((task) => `<span class="badge badge-neutral">${escapeHtml(task.name)}</span>`).join("")}
        </div>`
     : "";
 
@@ -214,12 +250,12 @@ async function renderCalendar(root) {
       if (d === null) return `<div class="cal-day cal-day-empty"></div>`;
       const dateObj = new Date(year, month, d);
       const weekday = (dateObj.getDay() + 6) % 7; // 0=Mon..6=Sun, matches Task.weekdays
-      const weeklyDayTasks = weeklyTasks.filter((t) => (t.weekdays || []).includes(weekday));
+      const weeklyDayTasks = weeklyTasks.filter((task) => (task.weekdays || []).includes(weekday));
       return `
         <div class="cal-day${isSameLocalDay(dateObj, today) ? " cal-day-today" : ""}">
           <div class="cal-day-number">${d}</div>
-          ${weeklyDayTasks.map((t) => `<div class="cal-day-task" title="${escapeAttr(t.name)} (${t.points} pts)">${escapeHtml(t.name)}</div>`).join("")}
-          ${dailyTasks.map((t) => `<div class="cal-day-task cal-day-task-daily" title="${escapeAttr(t.name)} (${t.points} pts) — every day">${escapeHtml(t.name)}</div>`).join("")}
+          ${weeklyDayTasks.map((task) => `<div class="cal-day-task" title="${escapeAttr(task.name)} (${task.points} ${escapeAttr(t("common.pts"))})">${escapeHtml(task.name)}</div>`).join("")}
+          ${dailyTasks.map((task) => `<div class="cal-day-task cal-day-task-daily" title="${escapeAttr(task.name)} (${task.points} ${escapeAttr(t("common.pts"))}) — ${escapeAttr(t("common.recurrence_daily"))}">${escapeHtml(task.name)}</div>`).join("")}
         </div>
       `;
     })
@@ -236,7 +272,7 @@ async function loadCategories(container, writable) {
   }
 
   if (categoriesCache.length === 0) {
-    root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">No categories yet</span>`;
+    root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.no_categories_yet"))}</span>`;
     return;
   }
   root.innerHTML = categoriesCache
@@ -263,13 +299,13 @@ async function loadTasks(container, writable) {
     tasks = await api.get(`${HB}/tasks`);
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load tasks</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_tasks"))}</div>`;
     return;
   }
   cancelSkeleton();
 
   if (tasks.length === 0) {
-    root.innerHTML = `<div class="empty-state">No tasks yet${writable ? " — add one below" : ""}</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(writable ? t("tasks.no_tasks_yet_add") : t("tasks.no_tasks_yet"))}</div>`;
     return;
   }
 
@@ -279,11 +315,13 @@ async function loadTasks(container, writable) {
 }
 
 function scheduleLabel(task) {
+  const weekdayLabels = WEEKDAY_LABELS();
   if (task.recurrence === "weekly") {
-    return task.weekdays && task.weekdays.length ? task.weekdays.map((w) => WEEKDAY_LABELS[w]).join(" ") : "Weekly";
+    return task.weekdays && task.weekdays.length ? task.weekdays.map((w) => weekdayLabels[w]).join(" ") : t("common.recurrence_weekly");
   }
-  if (task.recurrence === "monthly") return "Monthly";
-  return "Every day";
+  if (task.recurrence === "monthly") return t("common.recurrence_monthly");
+  if (task.recurrence === "manual") return t("tasks.manual_option");
+  return t("common.recurrence_daily");
 }
 
 async function loadEventGroups(container, writable) {
@@ -294,7 +332,7 @@ async function loadEventGroups(container, writable) {
   try {
     groups = await api.get(`${HB}/event-groups`);
   } catch {
-    root.innerHTML = `<div class="empty-state">Couldn't load event groups</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.couldnt_load_event_groups"))}</div>`;
     return;
   }
   eventGroupsCache = groups;
@@ -302,10 +340,10 @@ async function loadEventGroups(container, writable) {
   if (groups.length === 0) {
     root.innerHTML = writable
       ? `<div class="empty-state">
-           <p style="margin: 0 0 var(--space-3);">No event groups yet</p>
-           <button type="button" class="btn btn-primary" id="event-group-empty-cta">${icons.plus}<span>Create your first one</span></button>
+           <p style="margin: 0 0 var(--space-3);">${escapeHtml(t("tasks.no_event_groups_yet"))}</p>
+           <button type="button" class="btn btn-primary" id="event-group-empty-cta">${icons.plus}<span>${escapeHtml(t("tasks.create_first_one"))}</span></button>
          </div>`
-      : `<div class="empty-state"><p style="margin:0;">No event groups yet</p></div>`;
+      : `<div class="empty-state"><p style="margin:0;">${escapeHtml(t("tasks.no_event_groups_yet"))}</p></div>`;
     if (writable) {
       root.querySelector("#event-group-empty-cta").addEventListener("click", () => openEventGroupModal(container, writable));
     }
@@ -317,10 +355,11 @@ async function loadEventGroups(container, writable) {
 
 function scheduleSummary(group) {
   if (!group.schedule_recurrence) return null;
+  const weekdayLabels = WEEKDAY_LABELS();
   const when =
     group.schedule_recurrence === "daily"
-      ? "Every day"
-      : (group.schedule_weekdays || []).map((d) => WEEKDAY_LABELS[d]).join(" ");
+      ? t("common.recurrence_daily")
+      : (group.schedule_weekdays || []).map((d) => weekdayLabels[d]).join(" ");
   return `${when} · ${String(group.schedule_hour).padStart(2, "0")}:00 ${timezoneCache}`;
 }
 
@@ -332,11 +371,11 @@ function eventGroupRow(group, container, writable) {
     <div class="list-row-body">
       <div class="list-row-title">${escapeHtml(group.name)}</div>
       <div class="list-row-meta">
-        <span>${group.roots.length} task${group.roots.length === 1 ? "" : "s"}</span>
+        <span>${escapeHtml(t("common.task_count", { n: group.roots.length, count: group.roots.length }))}</span>
         ${schedule ? `<span class="badge badge-info">${escapeHtml(schedule)}</span>` : ""}
       </div>
     </div>
-    ${writable ? `<button type="button" class="btn btn-icon btn-primary" data-action="trigger" aria-label="Create today's tasks for ${escapeAttr(group.name)}" title="Create today's tasks">${icons.send}</button>` : ""}
+    ${writable ? `<button type="button" class="btn btn-icon btn-primary" data-action="trigger" aria-label="${escapeAttr(t("tasks.create_label", { name: group.name }))}" title="${escapeAttr(t("tasks.create_title"))}">${icons.send}</button>` : ""}
   `;
 
   if (writable) {
@@ -359,14 +398,15 @@ function taskRow(task, container, writable) {
 
   row.innerHTML = `
     <div class="list-row-body">
-      <div class="list-row-title">${escapeHtml(task.name)} ${!task.active ? `<span class="badge badge-neutral">Inactive</span>` : ""} ${task.is_chain_child ? `<span class="badge badge-neutral">Chained</span>` : ""}</div>
+      <div class="list-row-title">${escapeHtml(task.name)} ${!task.active ? `<span class="badge badge-neutral">${escapeHtml(t("tasks.inactive_badge"))}</span>` : ""} ${task.is_chain_child ? `<span class="badge badge-neutral">${escapeHtml(t("common.chained_badge"))}</span>` : ""}</div>
       <div class="list-row-meta">
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
-        <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${task.times_per_day}×/day` : ""}</span>
-        ${task.ramp_up_enabled ? `<span class="badge badge-info">+${task.ramp_up_bonus_points} bonus</span>` : ""}
+        <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${escapeHtml(t("common.times_per_day", { n: task.times_per_day }))}` : ""}</span>
+        ${task.ramp_up_enabled ? `<span class="badge badge-info">${escapeHtml(t("common.bonus_badge", { n: task.ramp_up_bonus_points }))}</span>` : ""}
+        ${task.pinned_user ? `<span class="badge badge-info">${escapeHtml(t("tasks.pinned_badge", { name: task.pinned_user.display_name }))}</span>` : ""}
       </div>
     </div>
-    <div class="list-row-points"><span>${task.points}</span><span class="muted">pts</span></div>
+    <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
   `;
 
   if (writable) {
@@ -384,7 +424,7 @@ function openModalShell(titleText) {
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2>${escapeHtml(titleText)}</h2>
-        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="Close">${icons.close}</button>
+        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeAttr(t("common.close"))}">${icons.close}</button>
       </div>
       <div id="modal-body"></div>
     </div>
@@ -399,29 +439,29 @@ function openModalShell(titleText) {
 }
 
 function openCategoryModal(container, writable, category = null) {
-  const { body, close } = openModalShell(category ? "Edit category" : "New category");
+  const { body, close } = openModalShell(category ? t("tasks.edit_category_title") : t("tasks.new_category_title"));
 
   body.innerHTML = `
     <div class="stack">
       <div class="field">
-        <label for="c-name">Name</label>
+        <label for="c-name">${escapeHtml(t("tasks.name_label"))}</label>
         <input class="input" id="c-name" value="${escapeAttr(category?.name || "")}" required />
       </div>
       <div class="field">
-        <label for="c-icon">Icon (emoji, optional)</label>
+        <label for="c-icon">${escapeHtml(t("tasks.icon_label"))}</label>
         <input class="input" id="c-icon" maxlength="4" value="${escapeAttr(category?.icon || "")}" placeholder="🧹" />
       </div>
     </div>
     <div class="modal-footer">
       ${category ? `<button class="btn btn-danger" id="c-delete">${icons.trash}</button>` : ""}
-      <button class="btn btn-primary grow" id="c-save">Save</button>
+      <button class="btn btn-primary grow" id="c-save">${escapeHtml(t("common.save"))}</button>
     </div>
   `;
 
   body.querySelector("#c-save").addEventListener("click", async () => {
     const name = body.querySelector("#c-name").value.trim();
     if (!name) {
-      showToast("Name is required", "warning");
+      showToast(t("common.name_required"), "warning");
       return;
     }
     const payload = { name, icon: body.querySelector("#c-icon").value.trim() || null };
@@ -431,7 +471,7 @@ function openCategoryModal(container, writable, category = null) {
       } else {
         await api.post(`${HB}/categories`, payload);
       }
-      showToast("Category saved", "success");
+      showToast(t("tasks.category_saved"), "success");
       close();
       loadCategories(container, writable);
       loadTasks(container, writable);
@@ -443,15 +483,15 @@ function openCategoryModal(container, writable, category = null) {
   if (category) {
     body.querySelector("#c-delete").addEventListener("click", async () => {
       const ok = await showConfirmDialog({
-        title: "Delete category",
-        message: `Delete "${category.name}"? Tasks keep their other categories.`,
-        confirmLabel: "Delete",
+        title: t("tasks.delete_category_title"),
+        message: t("tasks.delete_category_message", { name: category.name }),
+        confirmLabel: t("common.delete"),
         danger: true,
       });
       if (!ok) return;
       try {
         await api.del(`${HB}/categories/${category.id}`);
-        showToast("Category deleted", "success");
+        showToast(t("tasks.category_deleted"), "success");
         close();
         loadCategories(container, writable);
         loadTasks(container, writable);
@@ -469,6 +509,7 @@ function openCategoryModal(container, writable, category = null) {
 async function openEventGroupModal(container, writable, group = null) {
   await ensureTasksCache();
   const timezone = timezoneCache;
+  const weekdayLabels = WEEKDAY_LABELS();
 
   // A saved root can go stale (deactivated, or chained under another
   // task) since the group was last saved — split those out as
@@ -479,7 +520,7 @@ async function openEventGroupModal(container, writable, group = null) {
   let flaggedRoots = [];
   if (group) {
     for (const r of group.roots) {
-      const task = tasksCache.find((t) => t.id === r.task_id);
+      const task = tasksCache.find((task2) => task2.id === r.task_id);
       if (task && task.active && !task.is_chain_child) {
         selectedRoots.push({ id: r.task_id, name: r.task_name });
       } else {
@@ -494,71 +535,66 @@ async function openEventGroupModal(container, writable, group = null) {
   let lastPreviewTaskIds = new Set();
   let previewSeq = 0;
 
-  const { body, close } = openModalShell(group ? "Edit event group" : "New event group");
+  const { body, close } = openModalShell(group ? t("tasks.edit_event_group_title") : t("tasks.new_event_group_title"));
 
   body.innerHTML = `
     <div class="stack">
       <div class="field">
-        <label for="eg-name">Name</label>
+        <label for="eg-name">${escapeHtml(t("tasks.name_label"))}</label>
         <input class="input" id="eg-name" value="${escapeAttr(group?.name || "")}" required />
       </div>
       <div class="field">
-        <label>Tasks in this group</label>
+        <label>${escapeHtml(t("tasks.eg_tasks_in_group_label"))}</label>
         <div class="chip-row" id="eg-roots" style="margin-bottom: var(--space-2);"></div>
         ${
           writable
             ? `<button type="button" class="btn btn-ghost btn-block" id="eg-add-root-btn" style="justify-content: center;">
-                 ${icons.plus}<span>Add a task…</span>
+                 ${icons.plus}<span>${escapeHtml(t("tasks.eg_add_task_btn"))}</span>
                </button>`
             : ""
         }
       </div>
       <div class="field">
-        <label>Preview</label>
+        <label>${escapeHtml(t("tasks.eg_preview_label"))}</label>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
-          Everything below is created when this group is triggered: each task above, right away,
-          plus any task already chained from it. Uncheck a chained task to leave it out of this
-          group — it still gets created, just without this group's tag.
+          ${escapeHtml(t("tasks.eg_preview_desc"))}
         </p>
         <div id="eg-preview-list" class="stack"></div>
       </div>
       <div class="field">
         <label class="row">
           <input type="checkbox" id="eg-schedule-enabled" ${group?.schedule_recurrence ? "checked" : ""} ${writable ? "" : "disabled"} />
-          <span>Also trigger this automatically</span>
+          <span>${escapeHtml(t("tasks.eg_auto_trigger_label"))}</span>
         </label>
         <div id="eg-schedule-fields" style="margin-top: var(--space-2); ${group?.schedule_recurrence ? "" : "display:none;"}">
-          <label for="eg-schedule-recurrence">Repeats</label>
+          <label for="eg-schedule-recurrence">${escapeHtml(t("tasks.eg_repeats_label"))}</label>
           <select class="select" id="eg-schedule-recurrence" ${writable ? "" : "disabled"}>
-            <option value="daily" ${(group?.schedule_recurrence ?? "daily") === "daily" ? "selected" : ""}>Every day</option>
-            <option value="weekly" ${group?.schedule_recurrence === "weekly" ? "selected" : ""}>Specific weekdays</option>
+            <option value="daily" ${(group?.schedule_recurrence ?? "daily") === "daily" ? "selected" : ""}>${escapeHtml(t("common.recurrence_daily"))}</option>
+            <option value="weekly" ${group?.schedule_recurrence === "weekly" ? "selected" : ""}>${escapeHtml(t("tasks.eg_specific_weekdays"))}</option>
           </select>
           <div class="weekday-picker" id="eg-schedule-weekdays" style="margin-top: var(--space-2); ${group?.schedule_recurrence === "weekly" ? "" : "display:none;"}">
-            ${WEEKDAY_LABELS.map((label, i) => `<div class="weekday-pill${(group?.schedule_weekdays || []).includes(i) ? " on" : ""}" data-day="${i}">${label}</div>`).join("")}
+            ${weekdayLabels.map((label, i) => `<div class="weekday-pill${(group?.schedule_weekdays || []).includes(i) ? " on" : ""}" data-day="${i}">${escapeHtml(label)}</div>`).join("")}
           </div>
-          <label for="eg-schedule-hour" style="margin-top: var(--space-2); display: block;">At (${escapeHtml(timezone)})</label>
+          <label for="eg-schedule-hour" style="margin-top: var(--space-2); display: block;">${escapeHtml(t("common.at_tz_label", { tz: timezone }))}</label>
           <select class="select" id="eg-schedule-hour" ${writable ? "" : "disabled"}>
             ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${(group?.schedule_hour ?? 18) === h ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("")}
           </select>
           <p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">
-            ${escapeHtml(timezone)}, same as the weekly nudge's schedule on the Admin panel — change
-            the timezone itself there, not here. Already triggering it by hand today counts, too —
-            the automatic trigger skips a day it's already run on, whether that run was manual or
-            scheduled.
+            ${escapeHtml(t("tasks.eg_schedule_note", { tz: timezone }))}
           </p>
         </div>
       </div>
     </div>
     <div class="modal-footer">
       ${group && writable ? `<button class="btn btn-danger" id="eg-delete">${icons.trash}</button>` : ""}
-      ${writable ? `<button class="btn btn-primary grow" id="eg-save">Save</button>` : ""}
+      ${writable ? `<button class="btn btn-primary grow" id="eg-save">${escapeHtml(t("common.save"))}</button>` : ""}
     </div>
   `;
 
   function renderRootChips() {
     const root = body.querySelector("#eg-roots");
     if (selectedRoots.length === 0 && flaggedRoots.length === 0) {
-      root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">No tasks yet — add one below</span>`;
+      root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.no_tasks_yet_add"))}</span>`;
       return;
     }
     root.innerHTML = [
@@ -566,14 +602,14 @@ async function openEventGroupModal(container, writable, group = null) {
         (r) => `
         <span class="chip chip-active" data-id="${r.id}">
           ${escapeHtml(r.name)}
-          ${writable ? `<button type="button" aria-label="Remove ${escapeAttr(r.name)}" data-remove="${r.id}">&times;</button>` : ""}
+          ${writable ? `<button type="button" aria-label="${escapeAttr(t("tasks.remove_aria", { name: r.name }))}" data-remove="${r.id}">&times;</button>` : ""}
         </span>`
       ),
       ...flaggedRoots.map(
         (r) => `
-        <span class="chip" data-id="${r.id}" title="No longer eligible — will be removed when you save" style="opacity: 0.6;">
+        <span class="chip" data-id="${r.id}" title="${escapeAttr(t("tasks.not_eligible_title"))}" style="opacity: 0.6;">
           ${escapeHtml(r.name)} ⚠
-          ${writable ? `<button type="button" aria-label="Remove ${escapeAttr(r.name)}" data-remove="${r.id}">&times;</button>` : ""}
+          ${writable ? `<button type="button" aria-label="${escapeAttr(t("tasks.remove_aria", { name: r.name }))}" data-remove="${r.id}">&times;</button>` : ""}
         </span>`
       ),
     ].join("");
@@ -592,7 +628,7 @@ async function openEventGroupModal(container, writable, group = null) {
   function renderPreviewList(items) {
     const previewRoot = body.querySelector("#eg-preview-list");
     if (items.length === 0) {
-      previewRoot.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">Nothing to preview</span>`;
+      previewRoot.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.nothing_to_preview"))}</span>`;
       return;
     }
     previewRoot.innerHTML = items
@@ -601,7 +637,7 @@ async function openEventGroupModal(container, writable, group = null) {
           return `
           <div class="eg-preview-row">
             <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
-            <span class="badge badge-success">Created now</span>
+            <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
           </div>`;
         }
         const checked = !excludedIds.has(item.task_id);
@@ -611,8 +647,8 @@ async function openEventGroupModal(container, writable, group = null) {
               <input type="checkbox" data-task-id="${item.task_id}" ${checked ? "checked" : ""} ${writable ? "" : "disabled"} />
               <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
             </label>
-            <span class="badge badge-success">Created now</span>
-            <span class="badge badge-neutral">Chained from: ${escapeHtml(item.parent_task_name)}</span>
+            <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
+            <span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
           </div>`;
       })
       .join("");
@@ -638,7 +674,7 @@ async function openEventGroupModal(container, writable, group = null) {
     const previewRoot = body.querySelector("#eg-preview-list");
     const rootIds = selectedRoots.map((r) => r.id);
     if (rootIds.length === 0) {
-      previewRoot.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">Add a task above to see what this group creates</span>`;
+      previewRoot.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.add_task_above"))}</span>`;
       lastPreviewTaskIds = new Set();
       return;
     }
@@ -651,7 +687,7 @@ async function openEventGroupModal(container, writable, group = null) {
         excluded_task_ids: [...excludedIds],
       });
     } catch {
-      if (seq === previewSeq) previewRoot.innerHTML = `<div class="empty-state">Couldn't load preview</div>`;
+      if (seq === previewSeq) previewRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.couldnt_load_preview"))}</div>`;
       return;
     }
     if (seq !== previewSeq) return; // a newer request already landed — this one is stale
@@ -685,12 +721,12 @@ async function openEventGroupModal(container, writable, group = null) {
     body.querySelector("#eg-add-root-btn").addEventListener("click", async () => {
       await ensureTasksCache();
       const takenIds = new Set([...selectedRoots, ...flaggedRoots].map((r) => r.id));
-      const eligible = tasksCache.filter((t) => t.active && !t.is_chain_child && !takenIds.has(t.id));
+      const eligible = tasksCache.filter((task) => task.active && !task.is_chain_child && !takenIds.has(task.id));
       openTaskPickerModal({
         tasks: eligible,
         categories: categoriesCache,
-        title: "Add a task to this group",
-        emptyMessage: "No eligible tasks left to add",
+        title: t("tasks.add_task_to_group_title"),
+        emptyMessage: t("tasks.no_eligible_tasks_left"),
         onSelect: (task) => {
           if (!task) return;
           selectedRoots.push({ id: task.id, name: task.name });
@@ -709,18 +745,18 @@ async function openEventGroupModal(container, writable, group = null) {
   body.querySelector("#eg-save").addEventListener("click", async () => {
     const name = body.querySelector("#eg-name").value.trim();
     if (!name) {
-      showToast("Name is required", "warning");
+      showToast(t("common.name_required"), "warning");
       return;
     }
     if (selectedRoots.length === 0) {
-      showToast("Add at least one task to this group", "warning");
+      showToast(t("tasks.add_at_least_one_task"), "warning");
       return;
     }
     const scheduleEnabled = body.querySelector("#eg-schedule-enabled").checked;
     const scheduleRecurrence = scheduleEnabled ? body.querySelector("#eg-schedule-recurrence").value : null;
     const scheduleWeekdays = scheduleRecurrence === "weekly" ? [...selectedScheduleWeekdays].sort((a, b) => a - b) : null;
     if (scheduleRecurrence === "weekly" && scheduleWeekdays.length === 0) {
-      showToast("Pick at least one weekday for a weekly schedule", "warning");
+      showToast(t("tasks.pick_weekday_weekly"), "warning");
       return;
     }
     // Drop any exclusion the live preview didn't just confirm still
@@ -741,7 +777,7 @@ async function openEventGroupModal(container, writable, group = null) {
       } else {
         await api.post(`${HB}/event-groups`, payload);
       }
-      showToast("Event group saved", "success");
+      showToast(t("tasks.event_group_saved"), "success");
       close();
       loadEventGroups(container, writable);
     } catch {
@@ -752,15 +788,15 @@ async function openEventGroupModal(container, writable, group = null) {
   if (group) {
     body.querySelector("#eg-delete").addEventListener("click", async () => {
       const ok = await showConfirmDialog({
-        title: "Delete event group",
-        message: `Delete "${group.name}"? Todos it already created stay on the board, just ungrouped.`,
-        confirmLabel: "Delete",
+        title: t("tasks.delete_event_group_title"),
+        message: t("tasks.delete_event_group_message", { name: group.name }),
+        confirmLabel: t("common.delete"),
         danger: true,
       });
       if (!ok) return;
       try {
         await api.del(`${HB}/event-groups/${group.id}`);
-        showToast("Event group deleted", "success");
+        showToast(t("tasks.event_group_deleted"), "success");
         close();
         loadEventGroups(container, writable);
       } catch {
@@ -792,7 +828,7 @@ async function initChainLinksSection(body, task, writable) {
         child_task_id: childTask.id,
         same_user: sameUserEl.value === "true",
       });
-      showToast("Chain task added", "success");
+      showToast(t("tasks.chain_task_added"), "success");
       await refresh();
     } catch {
       /* api.js already showed a toast */
@@ -831,8 +867,8 @@ async function initChainLinksSection(body, task, writable) {
     }
     const names = parents.map((p) => p.parent_task_name).join(", ");
     notice.textContent = names
-      ? `"${task.name}" is already chained from: ${names}. A chained task can't chain further tasks itself.`
-      : `"${task.name}" is already chained from another task and can't chain further tasks itself.`;
+      ? t("tasks.already_chained_from", { name: task.name, parents: names })
+      : t("tasks.already_chained_from_other", { name: task.name });
   }
 
   async function refresh() {
@@ -840,7 +876,7 @@ async function initChainLinksSection(body, task, writable) {
     try {
       links = await api.get(`${HB}/tasks/${task.id}/chain-links`);
     } catch {
-      listEl.innerHTML = `<div class="empty-state">Couldn't load chain tasks</div>`;
+      listEl.innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.couldnt_load_preview"))}</div>`;
       return;
     }
 
@@ -851,13 +887,13 @@ async function initChainLinksSection(body, task, writable) {
         <div class="list-row" data-link-id="${link.id}">
           <div class="list-row-body">
             <div class="list-row-title">${escapeHtml(link.child_task_name)}</div>
-            <div class="list-row-meta"><span>${link.same_user ? "Same person" : "Different person"}</span></div>
+            <div class="list-row-meta"><span>${link.same_user ? escapeHtml(t("tasks.same_person")) : escapeHtml(t("tasks.different_person"))}</span></div>
           </div>
-          ${writable ? `<button class="btn btn-icon btn-ghost chain-remove-btn" aria-label="Remove">${icons.trash}</button>` : ""}
+          ${writable ? `<button class="btn btn-icon btn-ghost chain-remove-btn" aria-label="${escapeAttr(t("tasks.remove_label"))}">${icons.trash}</button>` : ""}
         </div>`
           )
           .join("")
-      : `<span class="muted" style="font-size: var(--font-size-sm);">No chained tasks yet</span>`;
+      : `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.no_chained_tasks_yet"))}</span>`;
 
     if (writable) {
       listEl.querySelectorAll(".chain-remove-btn").forEach((btn) => {
@@ -866,7 +902,7 @@ async function initChainLinksSection(body, task, writable) {
           const linkId = row.dataset.linkId;
           try {
             await api.del(`${HB}/tasks/${task.id}/chain-links/${linkId}`);
-            showToast("Chain task removed", "success");
+            showToast(t("tasks.chain_task_removed"), "success");
             await refresh();
           } catch {
             /* api.js already showed a toast */
@@ -886,13 +922,13 @@ async function initChainLinksSection(body, task, writable) {
     // already a chain child can't be picked as a child here either.
     const linkedChildIds = new Set(links.map((l) => l.child_task_id));
     eligibleChildren = tasksCache.filter(
-      (t) => t.id !== task.id && !linkedChildIds.has(t.id) && !t.is_chain_child
+      (task2) => task2.id !== task.id && !linkedChildIds.has(task2.id) && !task2.is_chain_child
     );
     childBtn.disabled = !writable || eligibleChildren.length === 0;
     childBtn.innerHTML =
       eligibleChildren.length === 0
-        ? `<span>No eligible tasks</span>`
-        : `${icons.plus}<span>Add a chain task…</span>`;
+        ? `<span>${escapeHtml(t("tasks.no_eligible_tasks"))}</span>`
+        : `${icons.plus}<span>${escapeHtml(t("tasks.add_chain_task_btn"))}</span>`;
   }
 
   if (writable && !task.is_chain_child) {
@@ -900,8 +936,8 @@ async function initChainLinksSection(body, task, writable) {
       openTaskPickerModal({
         tasks: eligibleChildren,
         categories: categoriesCache,
-        title: "Choose a chain task",
-        emptyMessage: "No eligible tasks match",
+        title: t("tasks.choose_chain_task_title"),
+        emptyMessage: t("tasks.no_eligible_tasks_match"),
         onSelect: addChainLink,
       });
     });
@@ -913,52 +949,81 @@ async function initChainLinksSection(body, task, writable) {
   await refresh();
 }
 
-function openTaskModal(container, writable, task = null) {
+async function openTaskModal(container, writable, task = null) {
   const selectedCats = new Set((task?.categories || []).map((c) => c.id));
   const selectedWeekdays = new Set(task?.weekdays || []);
   const recurrence = task?.recurrence || "daily";
+  const weekdayLabels = WEEKDAY_LABELS();
+  const pinnable = pinnableUsers(await loadUsers(true));
+  const canEditPin = isAdmin();
+  // Meaningful for every recurrence except a chain-child task — even
+  // daily/manual get a pin now (an informational badge, plus routing
+  // any todo actually created from the task to the pinned person; see
+  // Task.pinned_user_id's own docstring for the full "what a pin does
+  // per recurrence" breakdown). Chain-child status alone stays hidden,
+  // since such a task's only instances come from its own chain spawn,
+  // which already goes to whoever completed the parent (same_user) or
+  // the balancer's own pick (different_user) — a pin on the CHILD task
+  // itself would have nothing to attach to.
+  const pinEligible = !task?.is_chain_child;
 
-  const { body, close } = openModalShell(task ? "Edit task" : "New task");
+  const { body, close } = openModalShell(task ? t("tasks.edit_task_title") : t("tasks.new_task_title"));
 
   body.innerHTML = `
     <div class="stack">
       <div class="field">
-        <label for="f-name">Name</label>
+        <label for="f-name">${escapeHtml(t("tasks.name_label"))}</label>
         <input class="input" id="f-name" value="${escapeAttr(task?.name || "")}" required />
       </div>
       <div class="field">
-        <label for="f-description">Description</label>
+        <label for="f-description">${escapeHtml(t("common.description_label"))}</label>
         <textarea class="input" id="f-description" rows="2">${escapeHtml(task?.description || "")}</textarea>
       </div>
       <div class="field-row">
         <div class="field">
-          <label for="f-points">Points</label>
+          <label for="f-points">${escapeHtml(t("common.points_label"))}</label>
           <input class="input" type="number" min="0" id="f-points" value="${task?.points ?? 1}" />
         </div>
         <div class="field">
-          <label for="f-times">Times per day</label>
+          <label for="f-times">${escapeHtml(t("tasks.times_per_day_label"))}</label>
           <input class="input" type="number" min="1" id="f-times" value="${task?.times_per_day ?? 1}" />
         </div>
       </div>
 
       <div class="field">
-        <label for="f-recurrence">Repeats</label>
+        <label for="f-recurrence">${escapeHtml(t("tasks.eg_repeats_label"))}</label>
         <select class="select" id="f-recurrence">
-          <option value="daily" ${recurrence === "daily" ? "selected" : ""}>Daily — a standing chore, every day</option>
-          <option value="weekly" ${recurrence === "weekly" ? "selected" : ""}>Weekly — specific weekdays</option>
-          <option value="monthly" ${recurrence === "monthly" ? "selected" : ""}>Monthly</option>
+          <option value="daily" ${recurrence === "daily" ? "selected" : ""}>${escapeHtml(t("tasks.daily_option"))}</option>
+          <option value="weekly" ${recurrence === "weekly" ? "selected" : ""}>${escapeHtml(t("tasks.weekly_option"))}</option>
+          <option value="monthly" ${recurrence === "monthly" ? "selected" : ""}>${escapeHtml(t("common.recurrence_monthly"))}</option>
+          <option value="manual" ${recurrence === "manual" ? "selected" : ""}>${escapeHtml(t("tasks.manual_option"))}</option>
         </select>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
-          Only weekly/monthly tasks are handed out by the balancing tool (Admin panel) — a
-          daily task stays a standing chore anyone can log any day.
+          ${escapeHtml(t("tasks.balancer_note"))}
         </p>
         <div class="weekday-picker" id="f-weekdays" style="margin-top: var(--space-2); ${recurrence === "weekly" ? "" : "display:none;"}">
-          ${WEEKDAY_LABELS.map((label, i) => `<div class="weekday-pill${selectedWeekdays.has(i) ? " on" : ""}" data-day="${i}">${label}</div>`).join("")}
+          ${weekdayLabels.map((label, i) => `<div class="weekday-pill${selectedWeekdays.has(i) ? " on" : ""}" data-day="${i}">${escapeHtml(label)}</div>`).join("")}
         </div>
       </div>
 
+      <div class="field" id="f-pinned-field" style="${pinEligible ? "" : "display:none;"}">
+        <label for="f-pinned-user">${escapeHtml(t("tasks.pinned_label"))}</label>
+        <select class="select" id="f-pinned-user" ${canEditPin ? "" : "disabled"}>
+          <option value="">${escapeHtml(t("tasks.pinned_none"))}</option>
+          ${pinnable
+            .map(
+              (u) =>
+                `<option value="${u.id}" ${task?.pinned_user_id === u.id ? "selected" : ""}>${escapeAttr(u.display_name)}</option>`
+            )
+            .join("")}
+        </select>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
+          ${escapeHtml(t("tasks.pinned_desc"))}${!canEditPin ? ` ${escapeHtml(t("tasks.pinned_admin_only_note"))}` : ""}
+        </p>
+      </div>
+
       <div class="field">
-        <label>Categories</label>
+        <label>${escapeHtml(t("tasks.categories_label"))}</label>
         <div class="chip-row" id="f-categories">
           ${
             categoriesCache.length
@@ -968,41 +1033,38 @@ function openTaskModal(container, writable, task = null) {
                       `<span class="chip${selectedCats.has(c.id) ? " chip-active" : ""}" data-id="${c.id}">${c.icon ? escapeHtml(c.icon) + " " : ""}${escapeHtml(c.name)}</span>`
                   )
                   .join("")
-              : `<span class="muted" style="font-size: var(--font-size-sm);">None yet — add one above</span>`
+              : `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.none_yet_add_above"))}</span>`
           }
         </div>
       </div>
 
       <div class="field">
-        <label class="row"><input type="checkbox" id="f-ramp-up" ${task?.ramp_up_enabled ? "checked" : ""} /> <span>Ramp-up bonus for a solo streak</span></label>
+        <label class="row"><input type="checkbox" id="f-ramp-up" ${task?.ramp_up_enabled ? "checked" : ""} /> <span>${escapeHtml(t("tasks.ramp_up_label"))}</span></label>
         <div class="field" id="f-ramp-up-points" style="margin-top: var(--space-2); ${task?.ramp_up_enabled ? "" : "display:none;"}">
-          <label for="f-bonus">Bonus points</label>
+          <label for="f-bonus">${escapeHtml(t("tasks.bonus_points_label"))}</label>
           <input class="input" type="number" min="0" id="f-bonus" value="${task?.ramp_up_bonus_points ?? 0}" />
         </div>
       </div>
 
       <div class="field">
-        <label class="row"><input type="checkbox" id="f-active" ${task?.active !== false ? "checked" : ""} /> <span>Active</span></label>
+        <label class="row"><input type="checkbox" id="f-active" ${task?.active !== false ? "checked" : ""} /> <span>${escapeHtml(t("tasks.active_label"))}</span></label>
       </div>
 
       ${
         task
           ? `<div class="field">
-        <label>Chain tasks</label>
+        <label>${escapeHtml(t("tasks.chain_tasks_label"))}</label>
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
-          When "${escapeHtml(task.name)}" is completed, each chained task below is spawned onto
-          the board as a one-off. "Same person" assigns it directly to whoever just completed this
-          one; "different person" hands it to whoever the balancer says is fairest, never the
-          completer. Picking a task below adds it right away — there's no separate save step.
+          ${escapeHtml(t("tasks.chain_tasks_desc", { name: task.name }))}
         </p>
         <div class="stack" id="chain-link-list" style="margin-top: var(--space-2);"></div>
         <div class="stack" style="margin-top: var(--space-2); gap: var(--space-2);">
           <select class="select" id="chain-same-user-select">
-            <option value="false">Different person</option>
-            <option value="true">Same person</option>
+            <option value="false">${escapeHtml(t("tasks.different_person"))}</option>
+            <option value="true">${escapeHtml(t("tasks.same_person"))}</option>
           </select>
           <button type="button" class="btn btn-ghost btn-block" id="chain-child-btn" style="justify-content: center;">
-            ${icons.plus}<span>Add a chain task…</span>
+            ${icons.plus}<span>${escapeHtml(t("tasks.add_chain_task_btn"))}</span>
           </button>
         </div>
       </div>`
@@ -1011,13 +1073,17 @@ function openTaskModal(container, writable, task = null) {
     </div>
     <div class="modal-footer">
       ${task ? `<button class="btn btn-danger" id="f-delete">${icons.trash}</button>` : ""}
-      <button class="btn btn-primary grow" id="f-save">Save</button>
+      <button class="btn btn-primary grow" id="f-save">${escapeHtml(t("common.save"))}</button>
     </div>
   `;
 
   const weekdayPicker = body.querySelector("#f-weekdays");
   body.querySelector("#f-recurrence").addEventListener("change", (e) => {
     weekdayPicker.style.display = e.target.value === "weekly" ? "" : "none";
+    // The pinned-owner field (#f-pinned-field) deliberately does NOT
+    // toggle here — unlike weekdays, a pin now applies to every
+    // recurrence (see Task.pinned_user_id's own docstring), so it
+    // never needs hiding on a recurrence change.
   });
 
   body.querySelectorAll(".weekday-pill").forEach((pill) => {
@@ -1051,15 +1117,17 @@ function openTaskModal(container, writable, task = null) {
   body.querySelector("#f-save").addEventListener("click", async () => {
     const name = body.querySelector("#f-name").value.trim();
     if (!name) {
-      showToast("Name is required", "warning");
+      showToast(t("common.name_required"), "warning");
       return;
     }
     const newRecurrence = body.querySelector("#f-recurrence").value;
     const weekdays = newRecurrence === "weekly" ? [...selectedWeekdays].sort((a, b) => a - b) : null;
     if (newRecurrence === "weekly" && weekdays.length === 0) {
-      showToast("Pick at least one weekday for a weekly task", "warning");
+      showToast(t("tasks.pick_weekday_weekly_task"), "warning");
       return;
     }
+
+    const pinnedRaw = body.querySelector("#f-pinned-user").value;
 
     const payload = {
       name,
@@ -1072,6 +1140,12 @@ function openTaskModal(container, writable, task = null) {
       ramp_up_enabled: rampCheckbox.checked,
       ramp_up_bonus_points: Number(body.querySelector("#f-bonus").value || 0),
       category_ids: [...selectedCats],
+      // Always included, explicit null when "No one" is picked — the
+      // PATCH route's own clearing logic depends on this field being
+      // PRESENT in the request (see TaskUpdate's own docstring), not
+      // just non-null; omitting it here would make un-pinning
+      // impossible.
+      pinned_user_id: pinnedRaw ? Number(pinnedRaw) : null,
     };
 
     try {
@@ -1080,7 +1154,7 @@ function openTaskModal(container, writable, task = null) {
       } else {
         await api.post(`${HB}/tasks`, payload);
       }
-      showToast("Task saved", "success");
+      showToast(t("tasks.task_saved"), "success");
       close();
       loadTasks(container, writable);
     } catch {
@@ -1091,15 +1165,15 @@ function openTaskModal(container, writable, task = null) {
   if (task) {
     body.querySelector("#f-delete").addEventListener("click", async () => {
       const ok = await showConfirmDialog({
-        title: "Delete task",
-        message: `Delete "${task.name}"? Past points earned from it are kept.`,
-        confirmLabel: "Delete",
+        title: t("tasks.delete_task_title"),
+        message: t("tasks.delete_task_message", { name: task.name }),
+        confirmLabel: t("common.delete"),
         danger: true,
       });
       if (!ok) return;
       try {
         await api.del(`${HB}/tasks/${task.id}`);
-        showToast("Task deleted", "success");
+        showToast(t("tasks.task_deleted"), "success");
         close();
         loadTasks(container, writable);
       } catch {

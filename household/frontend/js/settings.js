@@ -8,8 +8,17 @@ import { showConfirmDialog } from "./confirmDialog.js";
 import { escapeHtml, showSkeletonAfterDelay } from "./util.js";
 import { isPushSupported, getPushSubscription, subscribeToPush, unsubscribeFromPush } from "./push.js";
 import { APP_VERSION } from "./version.js";
+import { t, getLocale, setLocale, supportedLocales } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
+
+// Each language's own name for itself, shown regardless of the current
+// UI language — the convention almost every app's language switcher
+// uses (an English speaker looking for German should see "Deutsch," not
+// a translated "German" they might not recognize as the same word).
+// Deliberately NOT run through t(): these name the language itself, not
+// UI text to translate.
+const LOCALE_NATIVE_NAMES = { en: "English", de: "Deutsch" };
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -31,50 +40,50 @@ export async function renderSettings(container) {
   container.innerHTML = `
     <div class="page">
       <div class="settings-section">
-        <h3>Account</h3>
+        <h3>${escapeHtml(t("settings.account"))}</h3>
         <div class="user-info-card">
           <div class="user-avatar" id="account-avatar">${escapeHtml(initial)}</div>
           <div>
-            <div style="font-weight:600;">${escapeHtml(user.subject || "Unknown user")}</div>
+            <div style="font-weight:600;">${escapeHtml(user.subject || t("settings.unknown_user"))}</div>
             <div class="muted" style="font-size: var(--font-size-sm); text-transform: capitalize;">
-              ${escapeHtml(user.role || "unknown role")} · ${escapeHtml(user.source || "")}
+              ${escapeHtml(user.role || t("settings.unknown_role"))} · ${escapeHtml(user.source || "")}
             </div>
           </div>
         </div>
         ${
           writable
             ? `<div class="row" style="margin-top: var(--space-3);">
-                 <label class="btn" for="avatar-file-input" style="cursor: pointer;">${icons.camera}<span>Change photo</span></label>
+                 <label class="btn" for="avatar-file-input" style="cursor: pointer;">${icons.camera}<span>${escapeHtml(t("settings.change_photo"))}</span></label>
                  <input type="file" id="avatar-file-input" accept="image/png,image/jpeg,image/webp" class="sr-only" />
-                 <button class="btn" id="avatar-remove-btn">Remove photo</button>
+                 <button class="btn" id="avatar-remove-btn">${escapeHtml(t("settings.remove_photo"))}</button>
                </div>`
             : ""
         }
       </div>
 
       <div class="settings-section">
-        <h3>Break mode</h3>
+        <h3>${escapeHtml(t("settings.break_mode"))}</h3>
         <div id="break-mode-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Notifications</h3>
+        <h3>${escapeHtml(t("settings.notifications"))}</h3>
         <div id="push-root"></div>
       </div>
 
       <div class="settings-section">
-        <h3>Household</h3>
+        <h3>${escapeHtml(t("settings.household"))}</h3>
         <div id="household-settings-root"></div>
       </div>
 
       ${
         admin
           ? `<div class="settings-section">
-               <h3>Admin</h3>
+               <h3>${escapeHtml(t("settings.admin"))}</h3>
                <a href="/admin" class="list-row">
                  <div class="list-row-body">
-                   <div class="list-row-title">Admin panel</div>
-                   <div class="list-row-meta"><span>Settings only admins can change</span></div>
+                   <div class="list-row-title">${escapeHtml(t("settings.admin_panel"))}</div>
+                   <div class="list-row-meta"><span>${escapeHtml(t("settings.admin_panel_desc"))}</span></div>
                  </div>
                  ${icons.chevronRight}
                </a>
@@ -83,20 +92,26 @@ export async function renderSettings(container) {
       }
 
       <div class="settings-section">
-        <h3>Theme</h3>
+        <h3>${escapeHtml(t("settings.theme"))}</h3>
         <div id="theme-options"></div>
       </div>
 
       <div class="settings-section">
-        <button class="btn btn-block" id="logout-btn">${icons.logout}<span>Log out</span></button>
+        <h3>${escapeHtml(t("settings.language"))}</h3>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: -4px;">${escapeHtml(t("settings.language_desc"))}</p>
+        <div id="language-root"></div>
       </div>
 
-      <p class="muted" style="font-size: var(--font-size-xs); text-align: center;">Household v${escapeHtml(APP_VERSION)}</p>
+      <div class="settings-section">
+        <button class="btn btn-block" id="logout-btn">${icons.logout}<span>${escapeHtml(t("settings.logout"))}</span></button>
+      </div>
+
+      <p class="muted" style="font-size: var(--font-size-xs); text-align: center;">${escapeHtml(t("settings.version", { version: APP_VERSION }))}</p>
     </div>
   `;
 
   const themeRoot = container.querySelector("#theme-options");
-  THEMES.forEach((theme) => {
+  THEMES().forEach((theme) => {
     const option = document.createElement("div");
     option.className = "theme-option";
     option.setAttribute("role", "radio");
@@ -120,14 +135,56 @@ export async function renderSettings(container) {
   });
 
   container.querySelector("#logout-btn").addEventListener("click", async () => {
-    const ok = await showConfirmDialog({ title: "Log out", message: "Are you sure you want to log out?", confirmLabel: "Log out" });
+    const ok = await showConfirmDialog({
+      title: t("settings.logout_confirm_title"),
+      message: t("settings.logout_confirm_message"),
+      confirmLabel: t("settings.logout"),
+    });
     if (ok) logout();
   });
 
+  renderLanguageSection(container, writable);
   await loadAvatar(container, writable);
   await loadBreakMode(container, writable);
   await loadPushSection(container, writable);
   await loadHouseholdSettings(container);
+}
+
+// Read-only for a viewer — see main.PATCH /me/language's own docstring
+// for why this is still can_read-gated rather than folded into the
+// broader can_write-gated PATCH /me: a viewer has no business touching
+// display_name/on_break, but switching their own UI language is
+// harmless either way.
+function renderLanguageSection(container, writable) {
+  const root = container.querySelector("#language-root");
+  if (!root) return;
+  const current = getLocale();
+  root.innerHTML = `
+    <select class="select" id="language-select" ${writable ? "" : "disabled"}>
+      ${supportedLocales()
+        .map((id) => `<option value="${id}" ${id === current ? "selected" : ""}>${escapeHtml(LOCALE_NATIVE_NAMES[id] || id)}</option>`)
+        .join("")}
+    </select>
+  `;
+  if (!writable) return;
+
+  root.querySelector("#language-select").addEventListener("change", async (e) => {
+    const next = e.target.value;
+    if (next === current) return;
+    try {
+      await api.patch(`${HB}/me/language`, { preferred_language: next });
+    } catch {
+      e.target.value = current; // api.js already showed a toast
+      return;
+    }
+    // A full reload, same as every other language-change path (see
+    // i18n.js's setLocale callers) — there's no in-place re-render
+    // system for a locale switch, so this is consistent with how a
+    // mismatch discovered at boot also just reloads once.
+    setLocale(next);
+    showToast(t("settings.language_saved"), "success");
+    window.location.reload();
+  });
 }
 
 async function loadAvatar(container, writable) {
@@ -161,7 +218,7 @@ async function loadAvatar(container, writable) {
       me = await api.postForm(`${HB}/me/photo`, fd);
       invalidateImageUrl(photoUrl);
       await applyPhoto();
-      showToast("Photo updated", "success");
+      showToast(t("settings.photo_updated"), "success");
     } catch {
       /* api.js already showed a toast */
     } finally {
@@ -174,7 +231,7 @@ async function loadAvatar(container, writable) {
       me = await api.del(`${HB}/me/photo`);
       invalidateImageUrl(photoUrl);
       avatarEl.innerHTML = escapeHtml((getCurrentUserInfo()?.subject || "?").slice(0, 1).toUpperCase());
-      showToast("Photo removed", "success");
+      showToast(t("settings.photo_removed"), "success");
     } catch {
       /* api.js already showed a toast */
     }
@@ -191,8 +248,8 @@ async function loadBreakMode(container, writable) {
     root.innerHTML = `
       <div class="switch-row">
         <div class="switch-row-text">
-          <span>I'm on a break</span>
-          <span class="muted">Hides you from the leaderboard and task assignments</span>
+          <span>${escapeHtml(t("settings.on_break_label"))}</span>
+          <span class="muted">${escapeHtml(t("settings.on_break_desc"))}</span>
         </div>
         <button class="switch${me.on_break ? " on" : ""}" id="break-switch" role="switch" aria-checked="${me.on_break}" ${writable ? "" : "disabled"}></button>
       </div>
@@ -204,14 +261,14 @@ async function loadBreakMode(container, writable) {
         const ok = await showConfirmDialog(
           next
             ? {
-                title: "Go on break?",
-                message: "You'll be hidden from the leaderboard and new task assignments until you turn this off again.",
-                confirmLabel: "Go on break",
+                title: t("settings.go_on_break_title"),
+                message: t("settings.go_on_break_message"),
+                confirmLabel: t("settings.go_on_break_confirm"),
               }
             : {
-                title: "End your break?",
-                message: "You'll reappear on the leaderboard and be eligible for task assignments again.",
-                confirmLabel: "End break",
+                title: t("settings.end_break_title"),
+                message: t("settings.end_break_message"),
+                confirmLabel: t("settings.end_break_confirm"),
               }
         );
         if (!ok) return;
@@ -219,7 +276,7 @@ async function loadBreakMode(container, writable) {
           await api.patch(`${HB}/me`, { on_break: next });
           btn.classList.toggle("on", next);
           btn.setAttribute("aria-checked", String(next));
-          showToast(next ? "You're now on break" : "Welcome back", "success");
+          showToast(next ? t("settings.on_break_toast") : t("settings.end_break_toast"), "success");
         } catch {
           /* api.js already showed a toast */
         }
@@ -227,7 +284,7 @@ async function loadBreakMode(container, writable) {
     }
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load break status</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("settings.couldnt_load_break"))}</div>`;
   }
 }
 
@@ -238,7 +295,7 @@ async function loadPushSection(container, writable) {
 
   if (!isPushSupported()) {
     cancelSkeleton();
-    root.innerHTML = `<div class="muted" style="font-size: var(--font-size-sm);">Not supported in this browser</div>`;
+    root.innerHTML = `<div class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("settings.push_not_supported"))}</div>`;
     return;
   }
 
@@ -247,14 +304,14 @@ async function loadPushSection(container, writable) {
   root.innerHTML = `
     <div class="switch-row">
       <div class="switch-row-text">
-        <span>Push notifications on this device</span>
-        <span class="muted">Chore requests addressed to you, and weekly reminders</span>
+        <span>${escapeHtml(t("settings.push_label"))}</span>
+        <span class="muted">${escapeHtml(t("settings.push_desc"))}</span>
       </div>
       <button class="switch${subscription ? " on" : ""}" id="push-switch" role="switch" aria-checked="${Boolean(subscription)}" ${writable ? "" : "disabled"}></button>
     </div>
     ${
       subscription && writable
-        ? `<button class="btn" id="push-test-btn" style="margin-top: var(--space-2);">Send test notification</button>`
+        ? `<button class="btn" id="push-test-btn" style="margin-top: var(--space-2);">${escapeHtml(t("settings.push_test_btn"))}</button>`
         : ""
     }
   `;
@@ -271,10 +328,10 @@ async function loadPushSection(container, writable) {
       } else {
         await unsubscribeFromPush();
       }
-      showToast(turningOn ? "Notifications on" : "Notifications off", "success");
+      showToast(turningOn ? t("settings.push_on_toast") : t("settings.push_off_toast"), "success");
       await loadPushSection(container, writable); // re-render: the test button only shows while subscribed
     } catch (err) {
-      showToast(err.message || "Couldn't change notification settings", "danger");
+      showToast(err.message || t("settings.push_error"), "danger");
     } finally {
       btn.disabled = false;
     }
@@ -287,9 +344,9 @@ async function loadPushSection(container, writable) {
       try {
         const result = await api.post(`${HB}/push/test`);
         if (result.sent > 0) {
-          showToast(`Sent — check this device for a notification`, "success");
+          showToast(t("settings.push_test_sent"), "success");
         } else {
-          showToast("Nothing was delivered — the subscription may be stale; try turning notifications off and on again", "warning");
+          showToast(t("settings.push_test_failed"), "warning");
         }
       } catch {
         /* api.js already showed a toast */
@@ -311,12 +368,12 @@ async function loadHouseholdSettings(container) {
     cancelSkeleton();
     root.innerHTML = `
       <div class="row-between">
-        <span class="muted">Weekly points goal</span>
-        <span>${settings.weekly_points_goal ?? "Not set"}</span>
+        <span class="muted">${escapeHtml(t("settings.weekly_goal_label"))}</span>
+        <span>${settings.weekly_points_goal ?? escapeHtml(t("settings.not_set"))}</span>
       </div>
     `;
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load household settings</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("settings.couldnt_load_household"))}</div>`;
   }
 }

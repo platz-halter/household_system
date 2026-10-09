@@ -1,6 +1,7 @@
 import { CONFIG } from "./config.js";
 import { api, fetchImageUrl } from "./api.js";
 import { escapeHtml, initials, timeAgo, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
+import { t, getLocale } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -20,28 +21,28 @@ async function getSettings() {
 }
 
 function formatMoney(points, rate, currency) {
-  return (points * rate).toLocaleString(undefined, { style: "currency", currency });
+  return (points * rate).toLocaleString(getLocale(), { style: "currency", currency });
 }
 
 export async function renderStats(container) {
   container.innerHTML = `
     <div class="page">
       <div class="section-heading">
-        <h2>Leaderboard</h2>
+        <h2>${escapeHtml(t("stats.leaderboard_heading"))}</h2>
         <div class="segmented" id="period-segmented">
-          <button data-period="all">All time</button>
-          <button data-period="week" class="active">This week</button>
-          <button data-period="lastweek">Last week</button>
-          <button data-period="month">Month</button>
+          <button data-period="all">${escapeHtml(t("stats.period_all"))}</button>
+          <button data-period="week" class="active">${escapeHtml(t("stats.period_week"))}</button>
+          <button data-period="lastweek">${escapeHtml(t("stats.period_lastweek"))}</button>
+          <button data-period="month">${escapeHtml(t("stats.period_month"))}</button>
         </div>
       </div>
       <div id="leaderboard-list"></div>
 
       <div class="section-heading">
-        <h2>Activity</h2>
+        <h2>${escapeHtml(t("stats.activity_heading"))}</h2>
         <div class="segmented" id="scope-segmented">
-          <button data-scope="household">Household</button>
-          <button data-scope="me" class="active">Just me</button>
+          <button data-scope="household">${escapeHtml(t("stats.scope_household"))}</button>
+          <button data-scope="me" class="active">${escapeHtml(t("stats.scope_me"))}</button>
         </div>
       </div>
       <div class="heatmap-wrap">
@@ -55,16 +56,16 @@ export async function renderStats(container) {
         </div>
       </div>
       <div class="heatmap-legend">
-        <span>Less</span>
+        <span>${escapeHtml(t("stats.legend_less"))}</span>
         <span class="heatmap-cell"></span>
         <span class="heatmap-cell heat-1"></span>
         <span class="heatmap-cell heat-2"></span>
         <span class="heatmap-cell heat-3"></span>
         <span class="heatmap-cell heat-4"></span>
-        <span>More</span>
+        <span>${escapeHtml(t("stats.legend_more"))}</span>
       </div>
 
-      <div class="section-heading"><h2>Recent activity</h2></div>
+      <div class="section-heading"><h2>${escapeHtml(t("stats.recent_activity_heading"))}</h2></div>
       <div id="recent-list" class="stack"></div>
     </div>
   `;
@@ -107,7 +108,7 @@ async function loadLeaderboard(container) {
     const rows = await api.get(`${HB}/points/leaderboard?period=${PERIOD_PARAM[state.period]}`);
     cancelSkeleton();
     if (rows.length === 0) {
-      root.innerHTML = `<div class="empty-state">No one on the leaderboard yet</div>`;
+      root.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.no_one_yet"))}</div>`;
       return;
     }
     const { points_to_money_rate, currency } = await getSettings();
@@ -118,14 +119,14 @@ async function loadLeaderboard(container) {
           <span class="leaderboard-rank">${i + 1}</span>
           <div class="user-avatar"${row.user.image_path ? ` data-avatar-user-id="${row.user.id}"` : ""}>${escapeHtml(initials(row.user.display_name))}</div>
           <span class="leaderboard-name">${escapeHtml(row.user.display_name)}</span>
-          <span class="leaderboard-points">${row.total_points} pts${points_to_money_rate ? ` <span class="muted" style="font-weight: 500;">(${formatMoney(row.total_points, points_to_money_rate, currency)})</span>` : ""}</span>
+          <span class="leaderboard-points">${row.total_points} ${escapeHtml(t("common.pts"))}${points_to_money_rate ? ` <span class="muted" style="font-weight: 500;">(${formatMoney(row.total_points, points_to_money_rate, currency)})</span>` : ""}</span>
         </div>`
       )
       .join("");
     hydrateAvatars(root);
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load the leaderboard</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.couldnt_load_leaderboard"))}</div>`;
   }
 }
 
@@ -152,27 +153,27 @@ async function loadRecent(container) {
     const entries = await api.get(`${HB}/points/recent?limit=20`);
     cancelSkeleton();
     if (entries.length === 0) {
-      root.innerHTML = `<div class="empty-state">No activity yet</div>`;
+      root.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.no_activity_yet"))}</div>`;
       return;
     }
     root.innerHTML = entries
       .map((e) => {
-        const label = e.task_name || e.todo_title || (e.source === "task" ? "a deleted task" : "a deleted todo");
+        const label = e.task_name || e.todo_title || (e.source === "task" ? t("stats.deleted_task") : t("stats.deleted_todo"));
         return `
           <div class="list-row" style="cursor: default;">
             <div class="avatar-sm"${e.household_user.image_path ? ` data-avatar-user-id="${e.household_user.id}"` : ""}>${escapeHtml(initials(e.household_user.display_name))}</div>
             <div class="list-row-body">
-              <div class="list-row-title">${escapeHtml(e.household_user.display_name)} completed ${escapeHtml(label)}</div>
+              <div class="list-row-title">${escapeHtml(t("stats.completed_label", { name: e.household_user.display_name, label }))}</div>
               <div class="list-row-meta"><span>${timeAgo(e.earned_at)}</span></div>
             </div>
-            <div class="list-row-points"><span>+${e.points}</span><span class="muted">pts</span></div>
+            <div class="list-row-points"><span>+${e.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
           </div>`;
       })
       .join("");
     hydrateAvatars(root);
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load recent activity</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.couldnt_load_recent"))}</div>`;
   }
 }
 
@@ -205,11 +206,12 @@ function buildWeeks(days, weekStart) {
 }
 
 /** Same Mon..Sun labels as elsewhere in this app (`util.js`'s
- * WEEKDAY_LABELS, trimmed to 2 letters), rotated so the configured
+ * WEEKDAY_LABELS(), 2-3 letter abbreviations depending on language —
+ * sliced to 2 here for this tight-space row), rotated so the configured
  * week-start weekday comes first — keeps the label row above the grid
  * in sync with how buildWeeks() above actually lays out columns. */
 function dayLabels(weekStart) {
-  const monFirst = WEEKDAY_LABELS.map((l) => l.slice(0, 2));
+  const monFirst = WEEKDAY_LABELS().map((l) => l.slice(0, 2));
   return monFirst.slice(weekStart).concat(monFirst.slice(0, weekStart));
 }
 
@@ -236,7 +238,7 @@ async function loadHeatmap(container) {
   const weekStart = week_start_weekday ?? 0;
   if (dayLabelsRoot) {
     dayLabelsRoot.innerHTML = dayLabels(weekStart)
-      .map((label) => `<span>${label}</span>`)
+      .map((label) => `<span>${escapeHtml(label)}</span>`)
       .join("");
   }
 
@@ -252,7 +254,7 @@ async function loadHeatmap(container) {
     const qs = householdUserId ? `?household_user_id=${householdUserId}` : "";
     days = await api.get(`${HB}/points/activity${qs}`);
   } catch {
-    gridRoot.innerHTML = `<div class="empty-state">Couldn't load activity</div>`;
+    gridRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.couldnt_load_activity"))}</div>`;
     return;
   }
 
@@ -266,7 +268,7 @@ async function loadHeatmap(container) {
     if (firstReal) {
       const month = new Date(`${firstReal.date}T00:00:00`).getMonth();
       if (month !== lastMonth) {
-        monthLabel.textContent = new Date(`${firstReal.date}T00:00:00`).toLocaleDateString(undefined, {
+        monthLabel.textContent = new Date(`${firstReal.date}T00:00:00`).toLocaleDateString(getLocale(), {
           month: "short",
         });
         lastMonth = month;
@@ -280,7 +282,7 @@ async function loadHeatmap(container) {
       if (day) {
         const bucket = heatBucket(day.points, max);
         if (bucket > 0) cell.classList.add(`heat-${bucket}`);
-        cell.title = `${day.date}: ${day.points} pt${day.points === 1 ? "" : "s"}`;
+        cell.title = `${day.date}: ${day.points} ${t("common.pts")}`;
       } else {
         cell.style.visibility = "hidden";
       }

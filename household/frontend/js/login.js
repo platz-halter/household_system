@@ -3,28 +3,30 @@ import { showToast } from "./toast.js";
 import { icons } from "./icons.js";
 import { navigate } from "./router.js";
 import { refreshNotificationBadge } from "./notifications.js";
+import { t, syncLocaleFromServer } from "./i18n.js";
+import { escapeHtml } from "./util.js";
 
 export function renderLogin(container) {
   container.innerHTML = `
     <div class="container-narrow center" style="min-height: 100vh; flex-direction: column;">
       <div style="margin-bottom: var(--space-6);">${icons.checklist}</div>
 
-      <button class="btn btn-primary btn-block" id="authentik-login-btn">Log in with Authentik</button>
+      <button class="btn btn-primary btn-block" id="authentik-login-btn">${escapeHtml(t("login.with_authentik"))}</button>
 
       <button class="btn btn-ghost" id="toggle-local-login" style="margin-top: var(--space-4);">
-        Use a local account instead
+        ${escapeHtml(t("login.use_local"))}
       </button>
 
       <form id="login-form" class="stack hidden" style="width: 100%; margin-top: var(--space-4);">
         <div class="field">
-          <label for="login-username">Username</label>
+          <label for="login-username">${escapeHtml(t("login.username"))}</label>
           <input class="input" id="login-username" autocomplete="username" required />
         </div>
         <div class="field">
-          <label for="login-password">Password</label>
+          <label for="login-password">${escapeHtml(t("login.password"))}</label>
           <input class="input" id="login-password" type="password" autocomplete="current-password" required />
         </div>
-        <button class="btn btn-block" type="submit" id="login-submit">Log in</button>
+        <button class="btn btn-block" type="submit" id="login-submit">${escapeHtml(t("login.submit"))}</button>
       </form>
     </div>
   `;
@@ -37,7 +39,7 @@ export function renderLogin(container) {
     try {
       await loginWithAuthentik();
     } catch {
-      showToast("Authentik isn't reachable right now — try a local account instead", "danger");
+      showToast(t("login.authentik_unreachable"), "danger");
     }
   });
 
@@ -45,7 +47,7 @@ export function renderLogin(container) {
   const toggleBtn = container.querySelector("#toggle-local-login");
   toggleBtn.addEventListener("click", () => {
     const nowShown = form.classList.toggle("hidden") === false;
-    toggleBtn.textContent = nowShown ? "Use Authentik instead" : "Use a local account instead";
+    toggleBtn.textContent = nowShown ? t("login.use_authentik_instead") : t("login.use_local");
   });
 
   form.addEventListener("submit", async (e) => {
@@ -55,7 +57,7 @@ export function renderLogin(container) {
     const password = container.querySelector("#login-password").value;
 
     submitBtn.disabled = true;
-    submitBtn.textContent = "Logging in…";
+    submitBtn.textContent = t("login.submitting");
     try {
       await login(username, password);
       navigate("/home");
@@ -64,10 +66,17 @@ export function renderLogin(container) {
       // until its next poll — nudge it now instead of waiting up to
       // POLL_INTERVAL_MS for it to notice this session is logged in.
       refreshNotificationBadge();
+      // Same reasoning, for the viewer's own language: boot()'s own
+      // sync only ever runs once, at the page's original load — a local
+      // login never re-triggers it, so without this a fresh local login
+      // on a device whose cached locale disagrees with this account's
+      // HouseholdUser.preferred_language would silently stay wrong
+      // until the next real page load.
+      syncLocaleFromServer();
     } catch (err) {
-      showToast(err.message || "Login failed", "danger");
+      showToast(err.message || t("login.failed"), "danger");
       submitBtn.disabled = false;
-      submitBtn.textContent = "Log in";
+      submitBtn.textContent = t("login.submit");
     }
   });
 }

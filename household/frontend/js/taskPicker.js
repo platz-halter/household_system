@@ -1,5 +1,6 @@
 import { icons } from "./icons.js";
 import { escapeHtml, escapeAttr } from "./util.js";
+import { t } from "./i18n.js";
 
 // A full-screen popup for picking a task, stacked on top of whatever
 // modal opened it (same nested-overlay pattern confirmDialog.js already
@@ -12,9 +13,9 @@ export function openTaskPickerModal({
   tasks,
   categories,
   onSelect,
-  title = "Choose a task",
+  title = t("taskPicker.default_title"),
   customOption = null, // { label } to show an extra "none of these" row, or null to omit it
-  emptyMessage = "No tasks match",
+  emptyMessage = t("common.no_tasks_match"),
 }) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
@@ -22,11 +23,11 @@ export function openTaskPickerModal({
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2>${escapeHtml(title)}</h2>
-        <button class="btn btn-icon btn-ghost" id="tp-close" aria-label="Close">${icons.close}</button>
+        <button class="btn btn-icon btn-ghost" id="tp-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
       </div>
       <div class="search-bar" style="margin-bottom: var(--space-3);">
         ${icons.search}
-        <input type="search" id="tp-search" placeholder="Search tasks…" />
+        <input type="search" id="tp-search" placeholder="${escapeAttr(t("common.search_tasks_placeholder"))}" />
       </div>
       <div class="chip-row" id="tp-categories" style="margin-bottom: var(--space-3);"></div>
       <div id="tp-list" class="stack" style="max-height: 55vh; overflow-y: auto;"></div>
@@ -44,7 +45,7 @@ export function openTaskPickerModal({
 
   const catRoot = overlay.querySelector("#tp-categories");
   const chips = [
-    { id: "", label: "All" },
+    { id: "", label: t("common.all") },
     ...categories.map((c) => ({ id: String(c.id), label: c.icon ? `${c.icon} ${c.name}` : c.name })),
   ];
   catRoot.innerHTML = chips
@@ -73,9 +74,9 @@ export function openTaskPickerModal({
   function renderList() {
     const listRoot = overlay.querySelector("#tp-list");
     let filtered = tasks;
-    if (pickerState.q) filtered = filtered.filter((t) => t.name.toLowerCase().includes(pickerState.q));
+    if (pickerState.q) filtered = filtered.filter((task) => task.name.toLowerCase().includes(pickerState.q));
     if (pickerState.categoryId) {
-      filtered = filtered.filter((t) => t.categories.some((c) => String(c.id) === pickerState.categoryId));
+      filtered = filtered.filter((task) => task.categories.some((c) => String(c.id) === pickerState.categoryId));
     }
 
     listRoot.innerHTML = "";
@@ -100,20 +101,25 @@ export function openTaskPickerModal({
       return;
     }
 
-    filtered.forEach((t) => {
+    // Captured before the forEach below shadows the module-level `t`
+    // (translate) import with its own per-row task variable of the same
+    // name — a pre-existing naming collision this file already had with
+    // "task," just newly relevant now that `t` also means something.
+    const ptsLabel = t("common.pts");
+    filtered.forEach((task) => {
       const row = document.createElement("button");
       row.type = "button";
       row.className = "list-row";
-      const catLabel = t.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
+      const catLabel = task.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
       row.innerHTML = `
         <div class="list-row-body">
-          <div class="list-row-title">${escapeHtml(t.name)}</div>
+          <div class="list-row-title">${escapeHtml(task.name)}</div>
           ${catLabel ? `<div class="list-row-meta"><span>${escapeHtml(catLabel)}</span></div>` : ""}
         </div>
-        <div class="list-row-points"><span>${t.points}</span><span class="muted">pts</span></div>
+        <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(ptsLabel)}</span></div>
       `;
       row.addEventListener("click", () => {
-        onSelect(t);
+        onSelect(task);
         close();
       });
       listRoot.appendChild(row);

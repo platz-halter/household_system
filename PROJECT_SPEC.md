@@ -337,10 +337,26 @@ Tracks physical items (cellar, pantry, etc.).
 - **Home**: the signed-in user's own points, today's assigned tasks, a
   multi-select "complete tasks" action, task search, category filters.
 - **Stats**: points leaderboard, recently completed tasks.
-- **Admin panel**: generate/view reports, set the weekly points goal.
+- **Admin panel**: generate/view reports, set the weekly points goal,
+  set the default UI language for new accounts.
 - **Task management panel**: categories (with icons; a task can belong
   to more than one), per-task point values, weekday/frequency scheduling
-  per task, chain-task editing. A calendar view (List/Calendar toggle)
+  per task, chain-task editing. A task's recurrence can also be
+  **Manual** — no automatic occurrence of its own at all; it only ever
+  exists when posted from the Board, chained from another task, or
+  triggered as an Event Group root, which is the point: a task that's
+  really only meaningful as one of those shouldn't also sit in
+  everyone's ad-hoc daily list or get auto-swept by the balancer on top
+  of whatever the group/chain already does. An admin can pin ANY task
+  (any recurrence except a chain-child one) to always go to one
+  specific person — a standing household agreement ("Alex always does
+  the bathroom"), not a fairness choice. For a weekly/monthly task this
+  opts it out of the auto-balancer's fairness pool entirely; for a
+  daily or manual task, where the balancer never runs at all, it's an
+  informational badge that still routes any todo actually created from
+  that task to the pinned person. See CLAUDE.md's "Always-assign
+  (pinned) tasks" and "Manual (non-repeating) tasks" for the full
+  design. A calendar view (List/Calendar toggle)
   gives a month-at-a-glance of weekly tasks placed on their scheduled
   weekdays, with monthly tasks (which have no specific day of the
   month) called out separately — a quick overview of what's periodically
@@ -352,7 +368,28 @@ Tracks physical items (cellar, pantry, etc.).
   section lists saved groups, each with an edit view (root tasks, live
   preview with per-chain-task opt-out, an optional auto-trigger
   schedule) and a one-tap manual trigger.
-- **User settings**: break mode toggle, profile picture.
+- **User settings**: break mode toggle, profile picture, UI language.
+
+### Multi-language support
+
+- English and German, chosen per the household rather than hardcoded.
+  Every signed-in user picks their own UI language from Settings
+  (`HouseholdUser.preferred_language`); an admin sets which language a
+  **brand new** account starts with (`HouseholdSettings.default_language`)
+  — not retroactive, so changing the admin default never silently
+  switches anyone already using the app.
+- A notification's title/body renders in its RECIPIENT's own language —
+  each person reads their own inbox in their own language, regardless of
+  who triggered it or what the household's shared default is.
+- A PDF report renders in the household's shared default language
+  instead — it's one document, not per-viewer, so it can't follow each
+  admin's own preference the way a notification follows its one
+  recipient.
+- Deliberately out of scope for this round: translating backend
+  `ValueError`/`HTTPException` `detail` messages (needs real error
+  codes, a bigger change) and the storage frontend (no admin/settings
+  concept to hook a default language into — see CLAUDE.md's "Storage
+  has no admin/user distinction at all").
 
 ## Non-functional
 

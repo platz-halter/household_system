@@ -11,6 +11,7 @@ import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
 import { navigate } from "./router.js";
 import { escapeHtml } from "./util.js";
+import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -21,7 +22,7 @@ function openOverlay(titleText) {
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2>${escapeHtml(titleText)}</h2>
-        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="Close">${icons.close}</button>
+        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
       </div>
       <div id="modal-body"></div>
     </div>
@@ -41,7 +42,7 @@ function openOverlay(titleText) {
 // EventGroupOut; the picker closes itself either way (picking, or the
 // empty/error state's "close" works the normal way via the X/backdrop).
 export function openEventGroupPickerModal({ onSelect }) {
-  const { body, close } = openOverlay("Trigger an event group");
+  const { body, close } = openOverlay(t("eg.trigger_modal_title"));
   body.innerHTML = `<div id="egp-list" class="stack"><div class="skeleton" style="height: 56px;"></div></div>`;
 
   (async () => {
@@ -49,15 +50,15 @@ export function openEventGroupPickerModal({ onSelect }) {
     try {
       groups = await api.get(`${HB}/event-groups`);
     } catch {
-      body.querySelector("#egp-list").innerHTML = `<div class="empty-state">Couldn't load event groups</div>`;
+      body.querySelector("#egp-list").innerHTML = `<div class="empty-state">${escapeHtml(t("eg.couldnt_load"))}</div>`;
       return;
     }
     const listRoot = body.querySelector("#egp-list");
     if (groups.length === 0) {
       listRoot.innerHTML = `
         <div class="empty-state">
-          <p style="margin: 0 0 var(--space-3);">No event groups yet</p>
-          <button type="button" class="btn btn-primary" id="egp-go-to-tasks">Create one on the Tasks page</button>
+          <p style="margin: 0 0 var(--space-3);">${escapeHtml(t("eg.no_groups_yet"))}</p>
+          <button type="button" class="btn btn-primary" id="egp-go-to-tasks">${escapeHtml(t("eg.create_on_tasks_page"))}</button>
         </div>`;
       listRoot.querySelector("#egp-go-to-tasks").addEventListener("click", () => {
         close();
@@ -73,7 +74,7 @@ export function openEventGroupPickerModal({ onSelect }) {
       row.innerHTML = `
         <div class="list-row-body">
           <div class="list-row-title">${escapeHtml(group.name)}</div>
-          <div class="list-row-meta"><span>${group.roots.length} task${group.roots.length === 1 ? "" : "s"}</span></div>
+          <div class="list-row-meta"><span>${escapeHtml(t("common.task_count", { n: group.roots.length, count: group.roots.length }))}</span></div>
         </div>
       `;
       row.addEventListener("click", () => {
@@ -99,12 +100,12 @@ export function openEventGroupPickerModal({ onSelect }) {
 // Tasks page's own event-group list doesn't change on a trigger, so it
 // has nothing to pass here.
 export function openTriggerConfirmModal(group, { onTriggered } = {}) {
-  const { body, close } = openOverlay(`Trigger "${group.name}"`);
+  const { body, close } = openOverlay(t("eg.trigger_title", { name: group.name }));
   body.innerHTML = `
-    <p class="muted" style="font-size: var(--font-size-sm); margin-top: 0;">This creates:</p>
+    <p class="muted" style="font-size: var(--font-size-sm); margin-top: 0;">${escapeHtml(t("eg.this_creates"))}</p>
     <div id="eg-trigger-preview" class="stack"><div class="skeleton" style="height: 40px;"></div></div>
     <div class="modal-footer">
-      <button class="btn btn-primary grow" id="eg-trigger-confirm" disabled>Create tasks</button>
+      <button class="btn btn-primary grow" id="eg-trigger-confirm" disabled>${escapeHtml(t("eg.create_tasks_btn"))}</button>
     </div>
   `;
 
@@ -116,7 +117,7 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
         excluded_task_ids: group.excluded_task_ids,
       });
     } catch {
-      body.querySelector("#eg-trigger-preview").innerHTML = `<div class="empty-state">Couldn't load preview</div>`;
+      body.querySelector("#eg-trigger-preview").innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.couldnt_load_preview"))}</div>`;
       return;
     }
 
@@ -131,17 +132,17 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
             (item) => `
         <div class="eg-preview-row${item.is_root ? "" : " eg-preview-descendant"}">
           <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
-          <span class="badge badge-success">Created now</span>
+          <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
           ${
             item.is_root
               ? ""
-              : `<span class="badge badge-neutral">Chained from: ${escapeHtml(item.parent_task_name)}</span>
-                 <span class="badge ${item.excluded ? "badge-neutral" : "badge-info"}">${item.excluded ? "Not grouped" : "Grouped"}</span>`
+              : `<span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
+                 <span class="badge ${item.excluded ? "badge-neutral" : "badge-info"}">${item.excluded ? escapeHtml(t("eg.not_grouped")) : escapeHtml(t("eg.grouped"))}</span>`
           }
         </div>`
           )
           .join("")
-      : `<span class="muted" style="font-size: var(--font-size-sm);">Nothing to create</span>`;
+      : `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("eg.nothing_to_create"))}</span>`;
 
     const confirmBtn = body.querySelector("#eg-trigger-confirm");
     confirmBtn.disabled = items.filter((i) => i.is_root).length === 0;
@@ -151,7 +152,7 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
       try {
         const result = await api.post(`${HB}/event-groups/${group.id}/trigger`);
         const count = result.todos.length;
-        showToast(`Created ${count} task${count === 1 ? "" : "s"} for "${group.name}"`, "success");
+        showToast(t("eg.created_toast", { n: count, count, name: group.name }), "success");
         close();
         onTriggered?.(result);
       } catch {

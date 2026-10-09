@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from household_service import balancing, push
 from household_service import reports as reports_pdf
+from household_service.i18n import t
 
 logger = logging.getLogger(__name__)
 from household_service.models import (
@@ -60,7 +61,15 @@ async def get_or_create_household_user(db: AsyncSession, subject: str) -> Househ
     user = result.scalar_one_or_none()
     if user:
         return user
-    user = HouseholdUser(subject=subject, display_name=subject)
+    # The admin-configured default at the moment this person is first
+    # seen — not retroactive, so changing it later never affects anyone
+    # already in the table (see HouseholdSettings.default_language).
+    settings = await get_settings_row(db)
+    user = HouseholdUser(
+        subject=subject,
+        display_name=subject,
+        preferred_language=settings.default_language,
+    )
     db.add(user)
     await db.commit()
     await db.refresh(user)
@@ -88,6 +97,19 @@ async def update_household_user(
         user.on_break = data.on_break
     if going_on_break:
         await _release_user_assignments(db, user)
+    await db.commit()
+    await db.refresh(user)
+    return user
+
+
+async def update_my_language(
+    db: AsyncSession, user: HouseholdUser, language: str
+) -> HouseholdUser:
+    """Separate from update_household_user/PATCH /me on purpose — this
+    one is can_read-gated (see main.update_my_language) so a viewer can
+    switch their own UI language too, unlike display_name/on_break,
+    which have no legitimate reason for a read-only account to touch."""
+    user.preferred_language = language
     await db.commit()
     await db.refresh(user)
     return user
@@ -204,7 +226,9 @@ async def delete_category(db: AsyncSession, category: Category) -> None:
 
 
 def _task_query():
-    return select(Task).options(selectinload(Task.categories))
+    return select(Task).options(
+        selectinload(Task.categories), selectinload(Task.pinned_user)
+    )
 
 
 async def get_task(db: AsyncSession, task_id: int) -> Task | None:
@@ -237,8 +261,23 @@ async def _resolve_categories(
     return found
 
 
+async def _validate_pinned_user(db: AsyncSession, pinned_user_id: int | None) -> None:
+    """A task's "always assign to" owner must be a real, non-viewer
+    household user — a viewer can never complete anything (can_write-
+    gated), so pinning one would leave the task permanently stuck, same
+    reasoning as _is_eligible_for_tasks' own viewer exclusion."""
+    if pinned_user_id is None:
+        return
+    pinned_user = await db.get(HouseholdUser, pinned_user_id)
+    if pinned_user is None:
+        raise ValueError(f"Unknown pinned user id: {pinned_user_id}")
+    if pinned_user.role == "viewer":
+        raise ValueError("a viewer can't be pinned to a task — they can never complete it")
+
+
 async def create_task(db: AsyncSession, data: TaskCreate) -> Task:
     categories = await _resolve_categories(db, data.category_ids)
+    await _validate_pinned_user(db, data.pinned_user_id)
     task = Task(
         name=data.name,
         description=data.description,
@@ -249,11 +288,14 @@ async def create_task(db: AsyncSession, data: TaskCreate) -> Task:
         times_per_day=data.times_per_day,
         ramp_up_enabled=data.ramp_up_enabled,
         ramp_up_bonus_points=data.ramp_up_bonus_points,
+        pinned_user_id=data.pinned_user_id,
         categories=categories,
     )
     db.add(task)
     await db.commit()
-    await db.refresh(task, attribute_names=["categories", "created_at", "updated_at"])
+    await db.refresh(
+        task, attribute_names=["categories", "pinned_user", "created_at", "updated_at"]
+    )
     return task
 
 
@@ -282,8 +324,15 @@ async def update_task(db: AsyncSession, task: Task, data: TaskUpdate) -> Task:
         task.ramp_up_bonus_points = data.ramp_up_bonus_points
     if data.category_ids is not None:
         task.categories = await _resolve_categories(db, data.category_ids)
+    # "pinned_user_id" in model_fields_set, not `is not None` — unlike
+    # every other field here, explicit null has to be distinguishable
+    # from "not included in this PATCH," since clearing an existing pin
+    # is a real, expected action (see TaskUpdate's own docstring).
+    if "pinned_user_id" in data.model_fields_set:
+        await _validate_pinned_user(db, data.pinned_user_id)
+        task.pinned_user_id = data.pinned_user_id
     await db.commit()
-    await db.refresh(task, attribute_names=["categories", "updated_at"])
+    await db.refresh(task, attribute_names=["categories", "pinned_user", "updated_at"])
     return task
 
 
@@ -687,11 +736,21 @@ async def trigger_event_group(
         # daily ration, so nobody should be skipped just for already
         # holding something.
         max_new_items_per_user = max(load_count.values(), default=0) + len(created)
+        # `created` and `group.roots` were built in lockstep above (one
+        # todo per root, same order) — zip pairs each todo back to the
+        # root task it might be pinned through. A root's OWN pin, if
+        # any — not to be confused with its chain children, which can
+        # never themselves be pinned (see Task.pinned_user_id).
         result = balancing.balance(
             users=balancing_users,
             tasks=[],
             todos=[
-                balancing.CandidateTodo(todo_id=t.id, points=t.points) for t in created
+                balancing.CandidateTodo(
+                    todo_id=todo.id,
+                    points=todo.points,
+                    pinned_user_id=root.task.pinned_user_id,
+                )
+                for todo, root in zip(created, group.roots)
             ],
             max_new_items_per_user=max_new_items_per_user,
         )
@@ -730,12 +789,15 @@ async def trigger_event_group(
         else:
             # notify_todo_assigned's "X asked you to" wording needs a
             # requester — a scheduled trigger has none, so this gets its
-            # own body naming the group instead.
+            # own body naming the group instead. todo.assigned_to is
+            # already eager-loaded via _todo_query() (fresh_todos came
+            # from there), so no extra fetch for the language either.
+            lang = todo.assigned_to.preferred_language
             await _notify(
                 db,
                 todo.assigned_to_id,
-                title="New scheduled task",
-                body=f'"{group.name}" created: {todo.title}',
+                title=t(lang, "scheduled_task.title"),
+                body=t(lang, "scheduled_task.body", group=group.name, todo=todo.title),
                 url="/board",
             )
     for root_todo, children in spawned:
@@ -913,7 +975,20 @@ async def complete_task(
     — completing both would double-count that occurrence, but that's
     the same kind of judgment call `times_per_day` already leaves to
     the person tapping complete, not something this function can
-    second-guess."""
+    second-guess.
+
+    Also rejects a `Recurrence.manual` task outright, with no `force`
+    override — unlike a chain-child task, there's no legacy data this
+    needs to stay permissive for (manual is a brand new recurrence);
+    it's always completed via whichever todo it was actually posted/
+    spawned/triggered as instead (`complete_todo`, which stamps the
+    represented task onto the PointsEntry independently of this
+    function and never calls it)."""
+    if task.recurrence == Recurrence.manual:
+        raise ValueError(
+            f'"{task.name}" has no automatic occurrence of its own — complete '
+            "it from the todo it was posted/triggered as instead"
+        )
     if await is_chain_child(db, task.id) and not force:
         raise ValueError(
             f'"{task.name}" is a chained task — complete it from the todo '
@@ -1808,11 +1883,12 @@ async def notify_chain_child_spawned(
     time (_spawn_chain_children_on_creation) — distinct wording from
     notify_todo_assigned's "X asked you to," since nobody asked for
     this, it's an automatic side effect of the parent now existing."""
+    lang = await _recipient_language(db, child.assigned_to_id)
     await _notify(
         db,
         child.assigned_to_id,
-        title="New chain task",
-        body=f'After "{parent_title}": {child.title}',
+        title=t(lang, "chain_task.title"),
+        body=t(lang, "chain_task.body", parent=parent_title, child=child.title),
         url="/board",
     )
 
@@ -1882,6 +1958,58 @@ async def run_balancing(
     ) = await _gather_balancer_load(db, eligible, as_of, week_start)
     assignment_by_id = {a.id: a for a in current_assignments}
 
+    # Collects moves from BOTH pin correction (below) and the rebalance
+    # pass (further down) — same (row, from_uid, to_uid, points) shape,
+    # so the one block that applies tallies/push summaries/pending-
+    # takeover-request cancellation further down handles either kind
+    # identically; a pin correction cancelling a stale pending request
+    # on the assignment it just moved is exactly as correct as
+    # rebalance's own pull doing the same.
+    reassignments: list[tuple[TaskAssignment, int, int, int]] = []
+    now = datetime.now(UTC)
+
+    # ---- pin correction: tasks with an "always assign to" owner --------
+    # Moves an EXISTING assignment back to its pinned owner when it's
+    # currently held by someone else — e.g. the pin was just set, or
+    # changed, after this period's assignment was already made. Runs
+    # before the sweep so a freshly-corrected pin's load is reflected
+    # before anything else is decided this run. Not itself a fairness
+    # computation (see balancing.correct_pins's own docstring) — a
+    # pinned task that's ALREADY correctly held, or has no pin at all,
+    # never shows up here.
+    pinned_candidates = [
+        balancing.PinnedAssignment(
+            assignment_id=a.id,
+            holder_id=a.household_user_id,
+            pinned_user_id=a.task.pinned_user_id,
+            remaining_points=remaining_by_assignment[a.id],
+            has_progress=(
+                await _completed_instance_count(
+                    db, a.task_id, a.period_start, a.period_end
+                )
+                > 0
+            ),
+            already_reassigned=a.reassigned_at is not None,
+        )
+        for a in current_assignments
+        if a.task.pinned_user_id is not None
+        and a.task.pinned_user_id != a.household_user_id
+    ]
+    pin_moves = balancing.correct_pins(
+        assignments=pinned_candidates, eligible_user_ids=set(eligible_by_id)
+    )
+    for assignment_id, from_uid, to_uid in pin_moves:
+        row = assignment_by_id[assignment_id]
+        pts = remaining_by_assignment[assignment_id]
+        row.household_user_id = to_uid
+        row.reassigned_at = now
+        reassignments.append((row, from_uid, to_uid, pts))
+        if from_uid in load_points:
+            load_points[from_uid] -= pts
+            load_count[from_uid] -= 1
+        load_points[to_uid] += pts
+        load_count[to_uid] += 1
+
     def _balancing_users() -> list[balancing.EligibleUser]:
         # Re-read load_points/load_count each call — both passes below
         # share and mutate this same running state.
@@ -1900,7 +2028,17 @@ async def run_balancing(
     task_period_map: dict[int, tuple[date, date]] = {}
     task_by_id: dict[int, Task] = {}
     tasks_result = await db.execute(
-        select(Task).where(Task.active.is_(True), Task.recurrence != Recurrence.daily)
+        select(Task).where(
+            Task.active.is_(True),
+            # Explicit allow-list, not `!= daily` — a `manual` task
+            # (Recurrence.manual) must never reach the sweep either;
+            # `!= daily` alone would let it through, and `_task_period`'s
+            # own weekly-or-else-monthly logic would then wrongly treat
+            # it as monthly and hand it a real TaskAssignment every
+            # month, exactly the "automatically created" behavior
+            # Recurrence.manual exists to NOT have.
+            Task.recurrence.in_([Recurrence.weekly, Recurrence.monthly]),
+        )
     )
     already_assigned_task_ids = {a.task_id for a in current_assignments}
     excluded_chain_child_ids = await chain_child_task_ids(db)
@@ -1918,15 +2056,22 @@ async def run_balancing(
         expected = _expected_points(task)
         if expected <= 0:
             continue
-        history_result = await db.execute(
-            select(TaskAssignment.household_user_id)
-            .where(
-                TaskAssignment.task_id == task.id, TaskAssignment.period_start < p_start
+        # A pinned task never reaches balance()'s ramp-up-stickiness/
+        # rotation branch at all (see balancing.balance's pinned
+        # bypass) — skip the otherwise-wasted assignment-history query
+        # for it.
+        history = []
+        if task.pinned_user_id is None:
+            history_result = await db.execute(
+                select(TaskAssignment.household_user_id)
+                .where(
+                    TaskAssignment.task_id == task.id,
+                    TaskAssignment.period_start < p_start,
+                )
+                .order_by(TaskAssignment.period_start.desc())
+                .limit(2)
             )
-            .order_by(TaskAssignment.period_start.desc())
-            .limit(2)
-        )
-        history = [row[0] for row in history_result.all()]
+            history = [row[0] for row in history_result.all()]
         candidate_tasks.append(
             balancing.CandidateTask(
                 task_id=task.id,
@@ -1934,6 +2079,7 @@ async def run_balancing(
                 ramp_up_enabled=task.ramp_up_enabled,
                 last_assignee_id=history[0] if history else None,
                 recent_assignee_ids=frozenset(history),
+                pinned_user_id=task.pinned_user_id,
             )
         )
         task_period_map[task.id] = (p_start, p_end)
@@ -1947,9 +2093,34 @@ async def run_balancing(
         )
     )
     unclaimed_todos = {t.id: t for t in unclaimed_result.scalars().all()}
+    # An unclaimed todo has no pin of its own — only the Task it was
+    # posted from might (picked via the "From task" selector on the
+    # New Todo form, or an event group root re-triggered another way).
+    # A separate, targeted lookup rather than reusing task_by_id above,
+    # since that dict only has ACTIVE non-daily tasks — a todo can
+    # reference a task that's since gone inactive or daily, and this
+    # only needs the one column, not the whole row.
+    source_task_ids = {
+        t.source_task_id for t in unclaimed_todos.values() if t.source_task_id
+    }
+    pinned_by_source_task: dict[int, int] = {}
+    if source_task_ids:
+        pin_rows = await db.execute(
+            select(Task.id, Task.pinned_user_id).where(
+                Task.id.in_(source_task_ids), Task.pinned_user_id.isnot(None)
+            )
+        )
+        pinned_by_source_task = dict(pin_rows.all())
     candidate_todos = [
         balancing.CandidateTodo(
-            todo_id=t.id, points=t.points, excluded_user_id=t.exclude_user_id
+            todo_id=t.id,
+            points=t.points,
+            excluded_user_id=t.exclude_user_id,
+            pinned_user_id=(
+                pinned_by_source_task.get(t.source_task_id)
+                if t.source_task_id
+                else None
+            ),
         )
         for t in unclaimed_todos.values()
     ]
@@ -2010,6 +2181,11 @@ async def run_balancing(
                 has_progress=done_count > 0,
                 already_reassigned=a.reassigned_at is not None,
                 assigned_today=a.created_at.astimezone(UTC).date() >= as_of,
+                # Whether it's correctly held or just got moved there by
+                # the pin-correction pass above, a pinned task is never
+                # a fairness pull target — see balancing.rebalance's own
+                # `not a.pinned` gate.
+                pinned=a.task.pinned_user_id is not None,
             )
         )
 
@@ -2020,8 +2196,6 @@ async def run_balancing(
         max_new_items_per_user=max_new_items_per_user,
     )
 
-    reassignments: list[tuple[TaskAssignment, int, int, int]] = []
-    now = datetime.now(UTC)
     for assignment_id, from_uid, to_uid in moves:
         row = assignment_by_id[assignment_id]
         pts = remaining_by_assignment[assignment_id]
@@ -2341,11 +2515,17 @@ async def notify_takeover_requested(db: AsyncSession, req: TakeoverRequest) -> N
     _notify commits internally too, so calling it mid-transaction would
     split one logical write into several (see _spawn_chain_children's
     own note)."""
+    lang = await _recipient_language(db, req.target_id)
     await _notify(
         db,
         req.target_id,
-        title="Takeover request",
-        body=f"{req.requester.display_name} asked you to take over: {_takeover_item_label(req)}",
+        title=t(lang, "takeover_requested.title"),
+        body=t(
+            lang,
+            "takeover_requested.body",
+            requester=req.requester.display_name,
+            item=_takeover_item_label(req),
+        ),
         url="/home",
     )
 
@@ -2353,12 +2533,22 @@ async def notify_takeover_requested(db: AsyncSession, req: TakeoverRequest) -> N
 async def notify_takeover_responded(db: AsyncSession, req: TakeoverRequest) -> None:
     """Notifies the requester once the target answers. Same after-commit
     timing as notify_takeover_requested."""
-    verb = "accepted" if req.status == TakeoverStatus.accepted else "declined"
+    lang = await _recipient_language(db, req.requester_id)
+    verb_key = (
+        "verb.accepted" if req.status == TakeoverStatus.accepted else "verb.declined"
+    )
+    verb = t(lang, verb_key)
     await _notify(
         db,
         req.requester_id,
-        title=f"Takeover request {verb}",
-        body=f"{req.target.display_name} {verb} your request for: {_takeover_item_label(req)}",
+        title=t(lang, "takeover_responded.title", verb=verb),
+        body=t(
+            lang,
+            "takeover_responded.body",
+            target=req.target.display_name,
+            verb=verb,
+            item=_takeover_item_label(req),
+        ),
         url="/home",
     )
 
@@ -2545,6 +2735,7 @@ async def update_settings(
     settings.auto_report_enabled = data.auto_report_enabled
     settings.overdue_delete_after_days = data.overdue_delete_after_days
     settings.timezone = data.timezone
+    settings.default_language = data.default_language
     await db.commit()
     await db.refresh(settings)
     return settings
@@ -2595,6 +2786,19 @@ async def get_subscriptions_for_user(
 
 
 # ---- Notification inbox --------------------------------------------------
+
+
+async def _recipient_language(db: AsyncSession, household_user_id: int) -> str:
+    """A notification's title/body is rendered in ITS RECIPIENT's own
+    language, not the sender's or the household's — an extra by-
+    primary-key fetch (cheap, and this is a low-frequency path, not a
+    hot one) rather than trusting that whatever relationship happened
+    to already be loaded on some caller's object graph includes this
+    particular field. "en" if the user's somehow gone (shouldn't
+    happen — notifying a deleted user isn't a real case) rather than
+    raising on something this unrelated to the actual notification."""
+    recipient = await get_household_user(db, household_user_id)
+    return recipient.preferred_language if recipient else "en"
 
 
 async def _notify(
@@ -2678,11 +2882,17 @@ async def notify_todo_assigned(
     push best-effort (see _notify)."""
     if todo.assigned_to_id is None:
         return
+    lang = await _recipient_language(db, todo.assigned_to_id)
     await _notify(
         db,
         todo.assigned_to_id,
-        title="New chore request",
-        body=f"{requested_by.display_name} asked you to: {todo.title}",
+        title=t(lang, "chore_request.title"),
+        body=t(
+            lang,
+            "chore_request.body",
+            requester=requested_by.display_name,
+            todo=todo.title,
+        ),
         url="/board",
     )
 
@@ -2696,11 +2906,14 @@ async def notify_todo_reassigned(
     respond to."""
     if todo.assigned_to_id is None:
         return
+    lang = await _recipient_language(db, todo.assigned_to_id)
     await _notify(
         db,
         todo.assigned_to_id,
-        title="Task reassigned to you",
-        body=f'{reassigned_by.display_name} reassigned "{todo.title}" to you',
+        title=t(lang, "reassigned.title"),
+        body=t(
+            lang, "reassigned.body", admin=reassigned_by.display_name, todo=todo.title
+        ),
         url="/board",
     )
 
@@ -2740,11 +2953,16 @@ async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int, int]:
         ):
             already_met_goal += 1
             continue
+        lang = user.preferred_language
         body = (
-            f"You're at {points}/{settings.weekly_points_goal} points this week — "
-            "don't forget your chores!"
+            t(
+                lang,
+                "nudge.body_with_goal",
+                points=points,
+                goal=settings.weekly_points_goal,
+            )
             if settings.weekly_points_goal is not None
-            else "Don't forget to log your points this week!"
+            else t(lang, "nudge.body_no_goal")
         )
         # Always creates the in-app notification (see _notify), even
         # with no push subscription — `no_subscription` below still
@@ -2752,7 +2970,7 @@ async def send_weekly_nudge(db: AsyncSession) -> tuple[int, int, int]:
         # "sent: N, skipped: N" summary, not whether the nudge is
         # visible at all.
         sent = await _notify(
-            db, user.id, title="Weekly reminder", body=body, url="/home"
+            db, user.id, title=t(lang, "nudge.title"), body=body, url="/home"
         )
         if sent:
             notified += 1
@@ -2877,8 +3095,9 @@ async def create_report(
         rows=[(user.display_name, total) for user, total in rows],
         rate=settings.points_to_money_rate,
         currency=settings.currency,
-        generated_by=generated_by.display_name if generated_by else "Automatic",
+        generated_by=generated_by.display_name if generated_by else None,
         generated_at=datetime.now(UTC),
+        lang=settings.default_language,
     )
     report.file_path = filename
 
@@ -2975,8 +3194,15 @@ async def notify_new_report(
     admins = [u for u in users if u.role == "admin" and u.id != exclude_user_id]
     if not admins:
         return
-    body = f"{report.period_type.value.capitalize()} report ready: {report.period_start} – {report.period_end}"
     for admin in admins:
+        lang = admin.preferred_language
+        body = t(
+            lang,
+            "report_ready.body",
+            period=t(lang, f"period.{report.period_type.value}"),
+            start=report.period_start,
+            end=report.period_end,
+        )
         await _notify(
-            db, admin.id, title="New report generated", body=body, url="/admin"
+            db, admin.id, title=t(lang, "report_ready.title"), body=body, url="/admin"
         )

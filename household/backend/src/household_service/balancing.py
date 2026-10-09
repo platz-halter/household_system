@@ -19,6 +19,19 @@ picture is least skewed, which is what keeps one person from quietly
 absorbing a string of small items before a big one comes up. Ties always
 break on the lower user id, so a run is exactly reproducible given the
 same inputs — no shuffling.
+
+`CandidateTask`/`CandidateTodo.pinned_user_id` ("always assign to" — see
+Task.pinned_user_id) is the one exception to all of the above: a pinned
+item skips the fairness pick entirely, in `balance()`, and is never a
+candidate for `rebalance()`'s pull either — it's a standing household
+agreement, not a fairness decision, though it still counts toward the
+pinned person's own load for everything else being distributed.
+`correct_pins()` is the third, separate operation this module offers:
+moving an EXISTING assignment that's held by the wrong person back to
+its pinned owner (e.g. the pin was just set, or changed) — not a
+fairness computation either, just the same "don't disrupt real
+work"/"don't undo an accepted takeover" gates `rebalance()` already
+uses.
 """
 
 from dataclasses import dataclass, field
@@ -52,6 +65,12 @@ class CandidateTask:
     # Up to the last 2 assignees, for non-ramp-up rotation (skip them if
     # another eligible candidate exists).
     recent_assignee_ids: frozenset[int] = field(default_factory=frozenset)
+    # "Always assign to" owner (Task.pinned_user_id) — bypasses the
+    # fairness pick (and the per-run cap) entirely in balance() below,
+    # straight to this user if they're currently eligible, or left
+    # unassigned otherwise. Never reaches the ramp-up-stickiness branch,
+    # so the two never actually interact despite both being "sticky."
+    pinned_user_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -64,6 +83,11 @@ class CandidateTodo:
     # (not removed from `users` entirely — they can still receive OTHER
     # items in the same run).
     excluded_user_id: int | None = None
+    # Same meaning as CandidateTask.pinned_user_id — a todo has no pin
+    # of its own, only the Task it was posted from (or an event group
+    # root) might; the caller resolves that and passes it through here
+    # (crud.run_balancing / crud.trigger_event_group).
+    pinned_user_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +122,68 @@ class PullableAssignment:
     # Never pull something assigned today — give the original holder at
     # least a day before it's up for grabs again.
     assigned_today: bool = False
+    # True for a task with an "always assign to" owner — rebalance()
+    # below skips these unconditionally. A pin isn't a fairness
+    # decision, so none of this dataclass's other gating fields apply
+    # to it (see correct_pins() instead, which is what moves a pinned
+    # assignment held by the wrong person back to its rightful owner).
+    pinned: bool = False
+
+
+@dataclass(frozen=True)
+class PinnedAssignment:
+    """An existing TaskAssignment whose task has an "always assign to"
+    owner (Task.pinned_user_id) who ISN'T who currently holds it — a
+    candidate for correct_pins() to move back. Built straight from DB
+    state, not a fairness computation — correcting a pin has no load/
+    count bookkeeping of its own the way rebalance()'s moves do."""
+
+    assignment_id: int
+    holder_id: int
+    pinned_user_id: int
+    remaining_points: int
+    # Same "don't disrupt real work" reasoning as PullableAssignment's
+    # own has_progress — never move a task someone's partway through,
+    # pinned or not.
+    has_progress: bool = False
+    # Sourced from the SAME TaskAssignment.reassigned_at column
+    # PullableAssignment's own already_reassigned reads — it's stamped
+    # by rebalance()'s own pull AND by crud.accept_takeover_request's
+    # consent-based move. A pin must never silently undo a holder's own
+    # accepted takeover; there's no way to tell the two apart from this
+    # column alone, so both are treated the same: once moved this
+    # period, a pin correction leaves it alone too.
+    already_reassigned: bool = False
+
+
+def correct_pins(
+    *, assignments: list[PinnedAssignment], eligible_user_ids: set[int]
+) -> list[tuple[int, int, int]]:
+    """Moves a mis-held pinned assignment back to its rightful owner —
+    e.g. the pin was just set, or changed, after this period's sweep
+    already ran. Returns (assignment_id, from_user_id, to_user_id) for
+    each move, same shape as rebalance()'s own moves, so the caller can
+    apply both through identical code (including cancelling any pending
+    takeover request on a moved assignment).
+
+    Deliberately does NOT gate on "assigned today," unlike
+    PullableAssignment's rebalance() sibling — that gate exists to give
+    a FAIRNESS pick at least a day before it's up for grabs again; a pin
+    is not a fairness pick, and the whole point of setting one is an
+    immediate, deterministic correction, not a day's grace period.
+    `has_progress`/`already_reassigned` are what actually protect real
+    work and an accepted takeover, and those still apply."""
+    moves: list[tuple[int, int, int]] = []
+    for a in assignments:
+        if (
+            a.has_progress
+            or a.already_reassigned
+            or a.remaining_points <= 0
+            or a.pinned_user_id not in eligible_user_ids
+        ):
+            continue
+        moves.append((a.assignment_id, a.holder_id, a.pinned_user_id))
+    return moves
 
 
 @dataclass
@@ -109,6 +195,7 @@ class _Item:
     last_assignee_id: int | None = None
     recent_assignee_ids: frozenset[int] = field(default_factory=frozenset)
     excluded_user_id: int | None = None
+    pinned_user_id: int | None = None
 
 
 def balance(
@@ -138,6 +225,7 @@ def balance(
             ramp_up_enabled=t.ramp_up_enabled,
             last_assignee_id=t.last_assignee_id,
             recent_assignee_ids=t.recent_assignee_ids,
+            pinned_user_id=t.pinned_user_id,
         )
         for t in tasks
     ] + [
@@ -146,6 +234,7 @@ def balance(
             item_id=t.todo_id,
             points=t.points,
             excluded_user_id=t.excluded_user_id,
+            pinned_user_id=t.pinned_user_id,
         )
         for t in todos
     ]
@@ -158,6 +247,31 @@ def balance(
     unassigned_todo_ids: list[int] = []
 
     for item in items:
+        if item.pinned_user_id is not None:
+            # A standing assignment, not a fairness decision — goes
+            # straight to its pinned owner (bypassing both the
+            # fairness pick AND the per-run cap, since this was never a
+            # candidate for redistribution in the first place), or is
+            # left unassigned if they're not currently eligible (on
+            # break, or no longer in this household) — never handed to
+            # anyone else just because the pinned person is
+            # unavailable right now; that would defeat the point.
+            if item.pinned_user_id in load and item.pinned_user_id != item.excluded_user_id:
+                picked = item.pinned_user_id
+                if item.kind == ItemKind.task:
+                    task_assignments[item.item_id] = picked
+                else:
+                    todo_assignments[item.item_id] = picked
+                load[picked] += item.points
+                count[picked] += 1
+            else:
+                (
+                    unassigned_task_ids
+                    if item.kind == ItemKind.task
+                    else unassigned_todo_ids
+                ).append(item.item_id)
+            continue
+
         candidates = [
             uid
             for uid in user_ids
@@ -238,7 +352,8 @@ def rebalance(
     eligible = [
         a
         for a in assignments
-        if not a.ramp_up_enabled
+        if not a.pinned
+        and not a.ramp_up_enabled
         and not a.has_progress
         and not a.already_reassigned
         and not a.assigned_today

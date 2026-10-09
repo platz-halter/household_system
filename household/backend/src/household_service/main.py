@@ -35,6 +35,7 @@ from household_service.schemas import (
     HouseholdSettingsOut,
     HouseholdSettingsUpdate,
     HouseholdUserBrief,
+    HouseholdUserLanguageUpdate,
     HouseholdUserOut,
     HouseholdUserUpdate,
     LeaderboardEntry,
@@ -141,6 +142,22 @@ async def update_me(
     hu = await _self(db, user)
     return HouseholdUserOut.model_validate(
         await crud.update_household_user(db, hu, data)
+    )
+
+
+@app.patch("/me/language", response_model=HouseholdUserOut)
+async def update_my_language(
+    data: HouseholdUserLanguageUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(can_read),
+):
+    """Deliberately its own route, gated can_read rather than folded
+    into PATCH /me (can_write) — a viewer has no business renaming
+    themselves or toggling break mode, but switching their own UI
+    language is harmless and there's no reason to block it."""
+    hu = await _self(db, user)
+    return HouseholdUserOut.model_validate(
+        await crud.update_my_language(db, hu, data.preferred_language)
     )
 
 
@@ -293,8 +310,19 @@ async def list_tasks(
 async def create_task(
     data: TaskCreate,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
+    user: CurrentUser = Depends(can_write),
 ):
+    # Pinning a task bypasses both the fairness algorithm and the
+    # consent-based takeover-request design — unlike every other task
+    # field, which is an ordinary can_write edit, deciding who's always
+    # on the hook for a chore needs the stronger admin gate (same
+    # reasoning as the Board's own admin-only reassign vs. the
+    # consent-based takeover request any writable user can ask for).
+    if data.pinned_user_id is not None and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can pin a task to someone",
+        )
     try:
         task = await crud.create_task(db, data)
     except ValueError as exc:
@@ -338,12 +366,26 @@ async def patch_task(
     task_id: int,
     data: TaskUpdate,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
+    user: CurrentUser = Depends(can_write),
 ):
     task = await crud.get_task(db, task_id)
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
+        )
+    # Same admin-only gate as create_task above — only when this PATCH
+    # actually changes who's pinned (model_fields_set, not `is not
+    # None`: omitting the field entirely must stay a no-op for a
+    # non-admin's otherwise-ordinary can_write edit, same as everywhere
+    # else TaskUpdate's fields are checked).
+    if (
+        "pinned_user_id" in data.model_fields_set
+        and data.pinned_user_id != task.pinned_user_id
+        and user.role != "admin"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can change a task's pinned owner",
         )
     try:
         task = await crud.update_task(db, task, data)

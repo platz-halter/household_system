@@ -7,8 +7,10 @@ from household_service.balancing import (
     CandidateTask,
     CandidateTodo,
     EligibleUser,
+    PinnedAssignment,
     PullableAssignment,
     balance,
+    correct_pins,
     rebalance,
 )
 
@@ -456,3 +458,173 @@ def test_excluded_user_leaves_item_unassigned_if_nobody_else_eligible():
 
     assert result.todo_assignments == {}
     assert result.unassigned_todo_ids == [1]
+
+
+# ---- CandidateTask/CandidateTodo.pinned_user_id ("always assign to") ----
+# A standing household agreement, not a fairness decision — see
+# Task.pinned_user_id's own docstring and balancing.py's module one.
+
+
+def test_pinned_task_always_goes_to_its_owner_even_when_most_loaded():
+    # Without the pin, user 1 (loaded) would never be picked over user 2
+    # (empty) — the pin must override the fairness pick entirely, not
+    # just bias it.
+    users = [
+        EligibleUser(user_id=1, points_this_week=100),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+    task = CandidateTask(
+        task_id=1, expected_points=5, ramp_up_enabled=False, pinned_user_id=1
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments[1] == 1
+
+
+def test_pinned_todo_always_goes_to_its_owner():
+    users = [
+        EligibleUser(user_id=1, points_this_week=100),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+    todo = CandidateTodo(todo_id=1, points=5, pinned_user_id=1)
+
+    result = balance(users=users, tasks=[], todos=[todo], max_new_items_per_user=5)
+
+    assert result.todo_assignments[1] == 1
+
+
+def test_pinned_item_bypasses_the_per_run_cap():
+    # A standing assignment isn't a "new fairness-allocated item," so it
+    # must never be skipped just because its owner already hit the cap
+    # from other candidates processed earlier in the same run (points
+    # descending, so the heavier plain task lands on user 1 first here).
+    users = [EligibleUser(user_id=1, points_this_week=0)]
+    plain_task = CandidateTask(task_id=1, expected_points=10, ramp_up_enabled=False)
+    pinned_task = CandidateTask(
+        task_id=2, expected_points=5, ramp_up_enabled=False, pinned_user_id=1
+    )
+
+    result = balance(
+        users=users,
+        tasks=[plain_task, pinned_task],
+        todos=[],
+        max_new_items_per_user=1,
+    )
+
+    assert result.task_assignments == {1: 1, 2: 1}
+    assert result.unassigned_task_ids == []
+
+
+def test_pinned_item_left_unassigned_when_owner_not_eligible():
+    # The pinned owner isn't in `users` at all here (e.g. on break) —
+    # must NOT fall back to handing it to someone else; that would
+    # defeat the whole point of pinning.
+    users = [EligibleUser(user_id=2, points_this_week=0)]
+    task = CandidateTask(
+        task_id=1, expected_points=5, ramp_up_enabled=False, pinned_user_id=1
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments == {}
+    assert result.unassigned_task_ids == [1]
+
+
+def test_pinned_item_still_counts_toward_owners_load_for_other_items():
+    # Once the pinned item lands on user 1, an unrelated plain item
+    # processed afterward (lower points, so later in the sort) must see
+    # user 1 as already loaded and prefer user 2 instead.
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+    pinned_task = CandidateTask(
+        task_id=1, expected_points=10, ramp_up_enabled=False, pinned_user_id=1
+    )
+    plain_task = CandidateTask(task_id=2, expected_points=1, ramp_up_enabled=False)
+
+    result = balance(
+        users=users,
+        tasks=[pinned_task, plain_task],
+        todos=[],
+        max_new_items_per_user=5,
+    )
+
+    assert result.task_assignments[1] == 1
+    assert result.task_assignments[2] == 2
+
+
+def test_rebalance_never_pulls_a_pinned_assignment():
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=100),
+    ]
+    assignments = [
+        PullableAssignment(
+            assignment_id=1, holder_id=2, remaining_points=50, pinned=True
+        )
+    ]
+
+    moves = rebalance(
+        users=users,
+        assignments=assignments,
+        weekly_points_goal=None,
+        max_new_items_per_user=5,
+    )
+
+    assert moves == []
+
+
+def test_correct_pins_moves_a_mis_held_assignment_to_its_owner():
+    a = PinnedAssignment(
+        assignment_id=1, holder_id=2, pinned_user_id=1, remaining_points=10
+    )
+
+    moves = correct_pins(assignments=[a], eligible_user_ids={1, 2})
+
+    assert moves == [(1, 2, 1)]
+
+
+def test_correct_pins_skips_an_assignment_with_progress():
+    a = PinnedAssignment(
+        assignment_id=1,
+        holder_id=2,
+        pinned_user_id=1,
+        remaining_points=10,
+        has_progress=True,
+    )
+
+    assert correct_pins(assignments=[a], eligible_user_ids={1, 2}) == []
+
+
+def test_correct_pins_never_undoes_an_accepted_takeover():
+    # already_reassigned is sourced from the same TaskAssignment.
+    # reassigned_at column crud.accept_takeover_request stamps — a pin
+    # correction must not silently move a holder's own accepted
+    # takeover right back to the pinned owner.
+    a = PinnedAssignment(
+        assignment_id=1,
+        holder_id=2,
+        pinned_user_id=1,
+        remaining_points=10,
+        already_reassigned=True,
+    )
+
+    assert correct_pins(assignments=[a], eligible_user_ids={1, 2}) == []
+
+
+def test_correct_pins_leaves_it_when_owner_not_currently_eligible():
+    a = PinnedAssignment(
+        assignment_id=1, holder_id=2, pinned_user_id=1, remaining_points=10
+    )
+
+    assert correct_pins(assignments=[a], eligible_user_ids={2}) == []
+
+
+def test_correct_pins_skips_a_fully_completed_assignment():
+    a = PinnedAssignment(
+        assignment_id=1, holder_id=2, pinned_user_id=1, remaining_points=0
+    )
+
+    assert correct_pins(assignments=[a], eligible_user_ids={1, 2}) == []

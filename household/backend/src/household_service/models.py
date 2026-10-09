@@ -46,11 +46,38 @@ class Recurrence(str, enum.Enum):
     """How a Task repeats. Only `weekly` and `monthly` tasks are eligible
     for the balancing tool (household_service/balancing.py) — a `daily`
     task is a standing chore everyone's expected to do on their own, not
-    something that makes sense to hand to one person for a whole period."""
+    something that makes sense to hand to one person for a whole period.
+
+    `manual` is the odd one out: it has NO automatic presence anywhere —
+    not Home's ad-hoc "All tasks" list (daily's own spot), not the
+    balancer's sweep (weekly/monthly's spot). The only way an instance
+    of a `manual` task ever gets created is a deliberate action: an
+    Event Group trigger, a chain spawn, or someone picking it from the
+    Board's "From task" picker. Exists for a task that's really only
+    meaningful as an Event Group root or a chain link, where giving it
+    `daily` (ad-hoc-completable from Home, confusingly, alongside
+    whatever the group/chain actually does) or `weekly`/`monthly`
+    (auto-swept into a TaskAssignment on top of whatever the group/chain
+    creates) would be actively wrong, not just unused. `crud.
+    complete_task` rejects completing one directly (409, no `force`
+    override — unlike a chain-child task, there's no legacy data to
+    accommodate here) since it has no legitimate direct occurrence;
+    always completed via the todo it's spawned/posted as instead, same
+    as `complete_todo` already handles for any other represented task.
+
+    A plain `String` column (see Task.recurrence below), not a Postgres
+    enum — this class itself is still a normal Python `(str, Enum)` for
+    type-safe comparisons in code, matching `EventGroup.schedule_
+    recurrence`'s own precedent and the exact reasoning MIGRATIONS.md's
+    enum section documents: adding a Postgres enum VALUE later needs
+    `ALTER TYPE ... ADD VALUE`, its own migration dance — not worth it
+    for a column that already went through that dance once here, adding
+    `manual` to what was originally a 2-then-3-value Postgres enum."""
 
     daily = "daily"
     weekly = "weekly"
     monthly = "monthly"
+    manual = "manual"
 
 
 class HouseholdUser(Base):
@@ -74,6 +101,18 @@ class HouseholdUser(Base):
     # about something admin-only (new reports) without needing a live
     # token to check against at send time.
     role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # "en"/"de" — this person's own UI language, editable by themselves
+    # (including a viewer — PATCH /me/language is can_read-gated,
+    # unlike the broader PATCH /me). Set from HouseholdSettings.
+    # default_language at row creation (crud.get_or_create_household_
+    # user) and never touched again automatically — changing the admin
+    # default afterwards only affects people not yet seen, not a
+    # retroactive mass-switch of everyone already using the app. Also
+    # what crud._notify renders a notification's title/body in, and
+    # what the frontend's js/i18n.js seeds itself from on login.
+    preferred_language: Mapped[str] = mapped_column(
+        String(5), default="en", server_default="en"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -111,13 +150,15 @@ class Task(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
     # How this task repeats. `weekly` tasks also set `weekdays` (which
-    # weekdays, 0=Monday..6=Sunday); `daily` and `monthly` tasks leave it
-    # null (daily = every day; monthly has no specific weekday). Only
-    # `weekly`/`monthly` tasks are candidates for the balancing tool.
-    recurrence: Mapped[Recurrence] = mapped_column(
-        Enum(Recurrence, name="task_recurrence"),
-        default=Recurrence.daily,
-        server_default="daily",
+    # weekdays, 0=Monday..6=Sunday); `daily`/`monthly`/`manual` tasks
+    # leave it null (daily = every day; monthly has no specific weekday;
+    # manual has no schedule of its own at all — see Recurrence.manual).
+    # Only `weekly`/`monthly` tasks are candidates for the balancing
+    # tool. A plain String, not the Postgres enum this column actually
+    # used to be — see Recurrence's own docstring for why that changed
+    # when `manual` was added.
+    recurrence: Mapped[str] = mapped_column(
+        String(20), default=Recurrence.daily, server_default="daily"
     )
     weekdays: Mapped[list[int] | None] = mapped_column(ARRAY(Integer), nullable=True)
     times_per_day: Mapped[int] = mapped_column(Integer, default=1)
@@ -126,6 +167,49 @@ class Task(Base):
     # been the one completing this task so far (see crud.complete_task).
     ramp_up_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     ramp_up_bonus_points: Mapped[int] = mapped_column(Integer, default=0)
+
+    # "Always assign this task to this person" — a standing household
+    # agreement (e.g. "Alex always does the bathroom"), not a fairness
+    # decision. For a weekly/monthly task, crud.run_balancing's sweep
+    # hands it straight to them every period instead of running it
+    # through balancing.balance()'s fairness pick, and balancing.
+    # rebalance() never pulls it away — see balancing.py's own
+    # CandidateTask/PullableAssignment docstrings for exactly how.
+    # Still counts toward the pinned person's own load for everything
+    # ELSE the balancer distributes that period. For a `daily` or
+    # `manual` task — neither of which the balancer ever touches at
+    # all — the pin instead (a) shows as an informational badge, and
+    # (b) still routes any TodoItem actually created FROM that task
+    # (an Event Group root, or a Board "From task" post left as
+    # "Anyone") straight to the pinned person, via the exact same
+    # CandidateTodo.pinned_user_id path a weekly/monthly task's own
+    # spawned todos already use — it does NOT restrict who can
+    # complete a `daily` task directly from Home (a deliberate,
+    # narrower-than-it-could-be scope — see CLAUDE.md's "Always-assign
+    # (pinned) tasks"). Admin-only to set/change (see main.patch_task)
+    # — task create/edit is otherwise can_write, but unilaterally
+    # pinning a chore onto someone else bypasses both the fairness
+    # algorithm and the consent-based takeover-request design, so this
+    # one field needs the stronger gate. SET NULL (not CASCADE) on the
+    # pinned person's own deletion — the task itself survives, it just
+    # drops back into the normal fairness pool (or loses its badge, for
+    # a daily/manual one). Naturally inert for a chain-child task,
+    # since run_balancing's sweep already excludes every chain-child
+    # task before any pin logic ever runs, and a chain-child task's
+    # only instances come from its own chain spawn, never a bare "From
+    # task" post or an Event Group root — not auto-cleared server-side
+    # the way `recurrence` becoming `daily` would be, though, since
+    # chain-child status is derived/dynamic (from task_chain_links),
+    # not a stored column.
+    pinned_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "household_users.id",
+            ondelete="SET NULL",
+            name="fk_tasks_pinned_user_id_household_users",
+        ),
+        nullable=True,
+    )
+    pinned_user: Mapped[HouseholdUser | None] = relationship()
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -717,6 +801,17 @@ class HouseholdSettings(Base):
     # the two "what hour of the day" schedule pickers above.
     timezone: Mapped[str] = mapped_column(
         String(64), default="UTC", server_default="UTC"
+    )
+
+    # Which of the supported UI languages ("en"/"de") a brand new
+    # HouseholdUser row starts with (crud.get_or_create_household_user
+    # copies this onto the new row at creation time) — admin-editable,
+    # defaults to "en" since that's what the UI was before this
+    # existed. Deliberately NOT retroactive: changing this only affects
+    # people not yet seen by the app, never anyone already using it —
+    # see HouseholdUser.preferred_language for that side of it.
+    default_language: Mapped[str] = mapped_column(
+        String(5), default="en", server_default="en"
     )
 
 

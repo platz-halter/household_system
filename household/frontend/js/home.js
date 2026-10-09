@@ -7,6 +7,7 @@ import { takeoverControl } from "./takeover.js";
 import { refreshNotificationBadge } from "./notifications.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { escapeHtml, escapeAttr, dueBadge, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
+import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 const PAGE_SIZE = 20;
@@ -53,20 +54,20 @@ export async function renderHome(container) {
       <div id="goal-progress"></div>
 
       <div id="incoming-requests-section" style="display:none;">
-        <div class="section-heading"><h2>Takeover requests</h2></div>
+        <div class="section-heading"><h2>${escapeHtml(t("home.section_takeover_requests"))}</h2></div>
         <div id="incoming-requests-list" class="stack" style="margin-bottom: var(--space-3);"></div>
       </div>
 
-      <div class="section-heading"><h2>Assigned to you</h2></div>
+      <div class="section-heading"><h2>${escapeHtml(t("home.section_assigned_to_you"))}</h2></div>
       <div id="assigned-list" class="stack"></div>
 
-      <div class="section-heading"><h2>All tasks</h2></div>
+      <div class="section-heading"><h2>${escapeHtml(t("home.section_all_tasks"))}</h2></div>
       <div class="row" style="margin-bottom: var(--space-3);">
         <div class="search-bar grow">
           ${icons.search}
-          <input type="search" id="search-input" placeholder="Search tasks…" value="${escapeAttr(state.q)}" />
+          <input type="search" id="search-input" placeholder="${escapeAttr(t("common.search_tasks_placeholder"))}" value="${escapeAttr(state.q)}" />
         </div>
-        ${writable ? `<button class="btn btn-icon" id="select-toggle" aria-label="Select tasks" title="Select tasks">${icons.checklist}</button>` : ""}
+        ${writable ? `<button class="btn btn-icon" id="select-toggle" aria-label="${escapeAttr(t("home.select_tasks_label"))}" title="${escapeAttr(t("home.select_tasks_label"))}">${icons.checklist}</button>` : ""}
       </div>
       <div class="chip-row" id="category-chips" style="margin-bottom: var(--space-3);"></div>
       <div id="task-list" class="stack"></div>
@@ -149,9 +150,9 @@ async function confirmDirectChainCompletion(task) {
   }
   const names = parents.map((p) => p.parent_task_name).join(", ");
   return showConfirmDialog({
-    title: "Already chained",
-    message: `"${task.name}" is normally completed automatically after: ${names}. Complete it directly anyway?`,
-    confirmLabel: "Complete anyway",
+    title: t("home.already_chained_title"),
+    message: t("home.already_chained_message", { task: task.name, parents: names }),
+    confirmLabel: t("home.complete_anyway"),
   });
 }
 
@@ -164,7 +165,7 @@ async function completeTask(container, task) {
   }
   try {
     await api.post(`${HB}/tasks/${task.id}/complete`, force ? { force: true } : undefined);
-    showToast(`Logged "${task.name}" (+${task.points} pts)`, "success");
+    showToast(t("home.logged_toast", { title: task.name, points: task.points }), "success");
     afterTaskCompletion(container);
   } catch {
     /* api.js already showed a toast (e.g. 409 if it already hit times_per_day for today) */
@@ -204,8 +205,8 @@ function boardTodoRow(todo, container) {
   const badge = dueBadge(todo.due_date);
   const writable = canWrite();
   const sourceLabel = todo.chain_parent_task_name
-    ? `After: ${todo.chain_parent_task_name}`
-    : "From the board";
+    ? t("home.chain_from", { parent: todo.chain_parent_task_name })
+    : t("home.from_board");
 
   row.innerHTML = `
     <div class="list-row-body">
@@ -215,15 +216,15 @@ function boardTodoRow(todo, container) {
         ${badge ? `<span class="badge badge-${badge.tone}">${escapeHtml(badge.label)}</span>` : ""}
       </div>
     </div>
-    <div class="list-row-points"><span>${todo.points}</span><span class="muted">pts</span></div>
-    ${writable ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="Complete ${escapeAttr(todo.title)}">${icons.check}</button></div>` : ""}
+    <div class="list-row-points"><span>${todo.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
+    ${writable ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="${escapeAttr(t("home.complete_aria", { title: todo.title }))}">${icons.check}</button></div>` : ""}
   `;
 
   if (writable) {
     row.querySelector('[data-action="complete"]').addEventListener("click", async () => {
       try {
         await api.post(`${HB}/todos/${todo.id}/complete`);
-        showToast(`Logged "${todo.title}" (+${todo.points} pts)`, "success");
+        showToast(t("home.logged_toast", { title: todo.title, points: todo.points }), "success");
         afterTodoCompletion(container);
       } catch {
         /* api.js already showed a toast */
@@ -267,10 +268,10 @@ async function loadStats(container) {
     statRoot.innerHTML = `
       <div class="stat-card">
         <div class="stat-value">${weekPoints}</div>
-        <div class="stat-label">Points this week</div>
+        <div class="stat-label">${escapeHtml(t("home.points_this_week"))}</div>
       </div>
       <div class="stat-card">
-        <div class="stat-value">${me.on_break ? "On break" : "Active"}</div>
+        <div class="stat-value">${me.on_break ? escapeHtml(t("home.on_break")) : escapeHtml(t("home.active"))}</div>
         <div class="stat-label">${escapeHtml(me.display_name)}</div>
       </div>
     `;
@@ -279,7 +280,7 @@ async function loadStats(container) {
       const pct = Math.min(100, Math.round((weekPoints / settings.weekly_points_goal) * 100));
       goalRoot.innerHTML = `
         <div class="muted row-between" style="font-size: var(--font-size-xs); margin: var(--space-3) 0 4px;">
-          <span>Weekly goal</span><span>${weekPoints} / ${settings.weekly_points_goal}</span>
+          <span>${escapeHtml(t("home.weekly_goal"))}</span><span>${weekPoints} / ${settings.weekly_points_goal}</span>
         </div>
         <div class="progress-bar"><div class="progress-bar-fill" style="width:${pct}%;"></div></div>
       `;
@@ -288,7 +289,7 @@ async function loadStats(container) {
     }
   } catch {
     cancelSkeleton();
-    statRoot.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">Couldn't load stats</div>`;
+    statRoot.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${escapeHtml(t("home.couldnt_load_stats"))}</div>`;
   }
 }
 
@@ -348,17 +349,17 @@ function renderIncomingRequests(container) {
     row.innerHTML = `
       <div class="list-row-body">
         <div class="list-row-title">${escapeHtml(label)}</div>
-        <div class="list-row-meta"><span>${escapeHtml(req.requester.display_name)} asked you to take this over</span></div>
+        <div class="list-row-meta"><span>${escapeHtml(t("takeover.asked_you", { name: req.requester.display_name }))}</span></div>
       </div>
       <div class="list-row-actions">
-        <button class="btn btn-icon btn-danger" data-action="decline" aria-label="Decline">${icons.close}</button>
-        <button class="btn btn-icon btn-primary" data-action="accept" aria-label="Accept">${icons.check}</button>
+        <button class="btn btn-icon btn-danger" data-action="decline" aria-label="${escapeAttr(t("notif.decline_label"))}">${icons.close}</button>
+        <button class="btn btn-icon btn-primary" data-action="accept" aria-label="${escapeAttr(t("notif.accept_label"))}">${icons.check}</button>
       </div>
     `;
     row.querySelector('[data-action="accept"]').addEventListener("click", async () => {
       try {
         await api.post(`${HB}/takeover-requests/${req.id}/accept`);
-        showToast(`Took over "${label}"`, "success");
+        showToast(t("takeover.took_over", { title: label }), "success");
         afterTakeoverAction(container);
       } catch {
         /* api.js already showed a toast (e.g. 409 if it changed hands first) */
@@ -368,7 +369,7 @@ function renderIncomingRequests(container) {
     row.querySelector('[data-action="decline"]').addEventListener("click", async () => {
       try {
         await api.post(`${HB}/takeover-requests/${req.id}/decline`);
-        showToast("Declined", "success");
+        showToast(t("takeover.declined"), "success");
         afterTakeoverAction(container);
       } catch {
         /* api.js already showed a toast */
@@ -386,7 +387,7 @@ function renderAssignedToYou(container) {
   const myTodos = myTodosCache || [];
 
   if (myAssignments.length === 0 && myTodos.length === 0) {
-    root.innerHTML = `<div class="empty-state">Nothing assigned to you right now</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("home.nothing_assigned"))}</div>`;
     return;
   }
   root.innerHTML = "";
@@ -399,7 +400,7 @@ function renderAssignedToYou(container) {
         <div class="list-row-title">${escapeHtml(a.task_name)}</div>
         <div class="list-row-meta"><span>${escapeHtml(a.period_start)} – ${escapeHtml(a.period_end)}</span></div>
       </div>
-      <div class="list-row-points"><span>${a.task_points}</span><span class="muted">pts</span></div>
+      <div class="list-row-points"><span>${a.task_points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
     `;
     if (canWrite()) {
       const actions = document.createElement("div");
@@ -420,7 +421,7 @@ function assignmentBadge(task) {
   if (!a) return "";
   const isMe = meCache && a.household_user.id === meCache.id;
   return `<span class="badge badge-${isMe ? "success" : "neutral"}">${
-    isMe ? "Assigned to you" : `Assigned to ${escapeHtml(a.household_user.display_name)}`
+    isMe ? escapeHtml(t("home.assigned_to_you_badge")) : escapeHtml(t("home.assigned_to_other_badge", { name: a.household_user.display_name }))
   }</span>`;
 }
 
@@ -439,7 +440,7 @@ function renderCategoryChips(container, selection, writable) {
   const root = container.querySelector("#category-chips");
   if (!root || !categoriesCache) return;
 
-  const chips = [{ id: "", label: "All" }, ...categoriesCache.map((c) => ({
+  const chips = [{ id: "", label: t("common.all") }, ...categoriesCache.map((c) => ({
     id: String(c.id),
     label: c.icon ? `${c.icon} ${c.name}` : c.name,
   }))];
@@ -468,10 +469,21 @@ async function refreshTaskList(container, selection, writable) {
   if (!allTasksCache) {
     const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 64px;"></div>`);
     try {
-      allTasksCache = await api.get(`${HB}/tasks?active=true`);
+      // A `manual` task has no automatic occurrence of its own at all
+      // — it only ever exists as a todo someone deliberately posted/
+      // triggered (an Event Group root, a chain link, the Board's
+      // "From task" picker) — so unlike every other recurrence, it has
+      // no business sitting in this ad-hoc "tap to complete anytime"
+      // list. Filtered client-side, not server-side: the Board's "From
+      // task" picker, the Event Group root picker, and the chain-link
+      // picker all reuse this exact same GET /tasks endpoint and still
+      // need manual tasks included.
+      allTasksCache = (await api.get(`${HB}/tasks?active=true`)).filter(
+        (task) => task.recurrence !== "manual"
+      );
     } catch {
       cancelSkeleton();
-      root.innerHTML = `<div class="empty-state">Couldn't load tasks</div>`;
+      root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_tasks"))}</div>`;
       return;
     }
     cancelSkeleton();
@@ -480,10 +492,10 @@ async function refreshTaskList(container, selection, writable) {
   let filtered = allTasksCache;
   if (state.q) {
     const q = state.q.toLowerCase();
-    filtered = filtered.filter((t) => t.name.toLowerCase().includes(q));
+    filtered = filtered.filter((task) => task.name.toLowerCase().includes(q));
   }
   if (state.categoryId) {
-    filtered = filtered.filter((t) => t.categories.some((c) => String(c.id) === state.categoryId));
+    filtered = filtered.filter((task) => task.categories.some((c) => String(c.id) === state.categoryId));
   }
 
   // All tasks are already fetched in one shot (fine at this app's scale
@@ -495,7 +507,7 @@ async function refreshTaskList(container, selection, writable) {
   if (state.offset >= state.total) state.offset = 0;
   const pageItems = filtered.slice(state.offset, state.offset + PAGE_SIZE);
 
-  renderTaskRows(root, pageItems, container, writable ? selection : null, "No tasks match");
+  renderTaskRows(root, pageItems, container, writable ? selection : null, t("common.no_tasks_match"));
   renderPagination(container.querySelector("#pagination-root"), container, selection, writable);
   renderBulkBar(container, selection, writable);
 }
@@ -522,7 +534,7 @@ function renderPagination(root, container, selection, writable) {
 
   const label = document.createElement("span");
   label.className = "page-label";
-  label.textContent = `Page ${currentPage} of ${totalPages}`;
+  label.textContent = t("home.page_label", { current: currentPage, total: totalPages });
 
   const next = document.createElement("button");
   next.className = "btn btn-icon";
@@ -546,14 +558,15 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
   row.classList.toggle("selected", isSelected);
 
   const catLabel = task.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
+  const weekdayLabels = WEEKDAY_LABELS();
   const schedule =
     task.recurrence === "weekly"
       ? task.weekdays && task.weekdays.length
-        ? task.weekdays.map((w) => WEEKDAY_LABELS[w]).join(" ")
-        : "Weekly"
+        ? task.weekdays.map((w) => weekdayLabels[w]).join(" ")
+        : t("common.recurrence_weekly")
       : task.recurrence === "monthly"
-        ? "Monthly"
-        : "Every day";
+        ? t("common.recurrence_monthly")
+        : t("common.recurrence_daily");
   const doneToday = doneForToday(task);
 
   row.innerHTML = `
@@ -562,15 +575,15 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
       <div class="list-row-title">${escapeHtml(task.name)}</div>
       <div class="list-row-meta">
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
-        <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${task.times_per_day}×/day` : ""}</span>
-        ${task.ramp_up_enabled ? `<span class="badge badge-info">+${task.ramp_up_bonus_points} bonus</span>` : ""}
-        ${task.is_chain_child ? `<span class="badge badge-neutral">Chained</span>` : ""}
+        <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${escapeHtml(t("common.times_per_day", { n: task.times_per_day }))}` : ""}</span>
+        ${task.ramp_up_enabled ? `<span class="badge badge-info">${escapeHtml(t("common.bonus_badge", { n: task.ramp_up_bonus_points }))}</span>` : ""}
+        ${task.is_chain_child ? `<span class="badge badge-neutral">${escapeHtml(t("common.chained_badge"))}</span>` : ""}
         ${assignmentBadge(task)}
-        ${doneToday ? `<span class="badge badge-success">Done today</span>` : ""}
+        ${doneToday ? `<span class="badge badge-success">${escapeHtml(t("home.done_today_badge"))}</span>` : ""}
       </div>
     </div>
-    <div class="list-row-points"><span>${task.points}</span><span class="muted">pts</span></div>
-    ${writable && !inSelectMode && !doneToday ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="Complete ${escapeAttr(task.name)}">${icons.check}</button></div>` : ""}
+    <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
+    ${writable && !inSelectMode && !doneToday ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="${escapeAttr(t("home.complete_aria", { title: task.name }))}">${icons.check}</button></div>` : ""}
   `;
 
   row.addEventListener("click", (e) => {
@@ -603,7 +616,7 @@ function renderTaskRows(root, tasks, container, selection, emptyMessage) {
           else selection.ids.add(id);
           refreshTaskList(container, selection, writable);
         },
-        onComplete: (t) => completeTask(container, t),
+        onComplete: (task) => completeTask(container, task),
       })
     );
   });
@@ -622,9 +635,9 @@ function renderBulkBar(container, selection, writable) {
   const count = selection.ids.size;
   root.innerHTML = `
     <div class="bulk-bar">
-      <span class="count-label">${count} selected</span>
-      <button class="btn btn-icon" id="bulk-cancel" aria-label="Cancel selection">${icons.close}</button>
-      <button class="btn btn-primary grow" id="bulk-complete-btn" ${count === 0 ? "disabled" : ""}>${icons.check}<span>Complete</span></button>
+      <span class="count-label">${escapeHtml(t("home.selected_count", { n: count }))}</span>
+      <button class="btn btn-icon" id="bulk-cancel" aria-label="${escapeAttr(t("home.cancel_selection_label"))}">${icons.close}</button>
+      <button class="btn btn-primary grow" id="bulk-complete-btn" ${count === 0 ? "disabled" : ""}>${icons.check}<span>${escapeHtml(t("home.bulk_complete"))}</span></button>
     </div>
   `;
 
@@ -664,10 +677,7 @@ function renderBulkBar(container, selection, writable) {
         /* api.js already showed a toast for this one; keep going */
       }
     }
-    showToast(
-      `Completed ${completed} of ${ids.length} task${ids.length === 1 ? "" : "s"}`,
-      completed === ids.length ? "success" : "warning"
-    );
+    showToast(t("home.bulk_completed_toast", { completed, total: ids.length, count: ids.length }), completed === ids.length ? "success" : "warning");
     exitSelectMode();
     afterTaskCompletion(container);
   });

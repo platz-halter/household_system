@@ -15,6 +15,11 @@
 // per-row controls) call refreshNotificationBadge() after their own
 // accept/decline/cancel so the bell's count doesn't go stale until the
 // next poll.
+//
+// The title/body text in `notifications`/`n.body` below comes straight
+// from the backend (household_service/i18n.py, rendered in the
+// recipient's own HouseholdUser.preferred_language) — only this panel's
+// own chrome (headings, button labels) goes through this file's t().
 import { api } from "./api.js";
 import { CONFIG } from "./config.js";
 import { icons } from "./icons.js";
@@ -22,6 +27,7 @@ import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { navigate } from "./router.js";
 import { escapeHtml, timeAgo } from "./util.js";
+import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 const POLL_INTERVAL_MS = 30_000;
@@ -93,13 +99,13 @@ function openNotificationPanel() {
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
-        <h2>Notifications</h2>
-        <button class="btn btn-icon btn-ghost" id="notif-panel-close" aria-label="Close">${icons.close}</button>
+        <h2>${escapeHtml(t("notif.title"))}</h2>
+        <button class="btn btn-icon btn-ghost" id="notif-panel-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
       </div>
       <div id="notif-panel-takeover" class="stack"></div>
       <div id="notif-panel-plain-section" class="section-heading" style="margin-top: var(--space-4);">
-        <h2>Recent</h2>
-        <button class="btn btn-ghost" id="notif-mark-all-read" style="font-size: var(--font-size-xs);">Mark all read</button>
+        <h2>${escapeHtml(t("notif.recent"))}</h2>
+        <button class="btn btn-ghost" id="notif-mark-all-read" style="font-size: var(--font-size-xs);">${escapeHtml(t("notif.mark_all_read"))}</button>
       </div>
       <div id="notif-panel-plain" class="stack"></div>
     </div>
@@ -147,7 +153,7 @@ async function renderPanelList(overlay, { initial = false } = {}) {
       api.get(`${HB}/notifications?limit=30`),
     ]);
   } catch {
-    takeoverRoot.innerHTML = `<div class="empty-state">Couldn't load notifications</div>`;
+    takeoverRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("notif.couldnt_load"))}</div>`;
     return;
   }
   await refreshNotificationBadge();
@@ -157,7 +163,7 @@ async function renderPanelList(overlay, { initial = false } = {}) {
 
 function renderTakeoverSection(overlay, root, incoming) {
   if (incoming.length === 0) {
-    root.innerHTML = `<div class="empty-state">${icons.bell}<p style="margin-top: var(--space-2);">Nothing new</p></div>`;
+    root.innerHTML = `<div class="empty-state">${icons.bell}<p style="margin-top: var(--space-2);">${escapeHtml(t("notif.nothing_new"))}</p></div>`;
     return;
   }
 
@@ -170,17 +176,17 @@ function renderTakeoverSection(overlay, root, incoming) {
     row.innerHTML = `
       <div class="list-row-body">
         <div class="list-row-title">${escapeHtml(label)}</div>
-        <div class="list-row-meta"><span>${escapeHtml(req.requester.display_name)} asked you to take this over</span></div>
+        <div class="list-row-meta"><span>${escapeHtml(t("takeover.asked_you", { name: req.requester.display_name }))}</span></div>
       </div>
       <div class="list-row-actions">
-        <button class="btn btn-icon btn-danger" data-action="decline" aria-label="Decline">${icons.close}</button>
-        <button class="btn btn-icon btn-primary" data-action="accept" aria-label="Accept">${icons.check}</button>
+        <button class="btn btn-icon btn-danger" data-action="decline" aria-label="${escapeHtml(t("notif.decline_label"))}">${icons.close}</button>
+        <button class="btn btn-icon btn-primary" data-action="accept" aria-label="${escapeHtml(t("notif.accept_label"))}">${icons.check}</button>
       </div>
     `;
     row.querySelector('[data-action="accept"]').addEventListener("click", async () => {
       try {
         await api.post(`${HB}/takeover-requests/${req.id}/accept`);
-        showToast(`Took over "${label}"`, "success");
+        showToast(t("takeover.took_over", { title: label }), "success");
         await renderPanelList(overlay);
       } catch {
         /* api.js already showed a toast (e.g. 409 if it changed hands first) */
@@ -190,7 +196,7 @@ function renderTakeoverSection(overlay, root, incoming) {
     row.querySelector('[data-action="decline"]').addEventListener("click", async () => {
       try {
         await api.post(`${HB}/takeover-requests/${req.id}/decline`);
-        showToast("Declined", "success");
+        showToast(t("takeover.declined"), "success");
         await renderPanelList(overlay);
       } catch {
         /* api.js already showed a toast */
@@ -219,12 +225,12 @@ function renderPlainSection(overlay, root, notifications) {
     row.className = "list-row";
     row.innerHTML = `
       <div class="list-row-body">
-        <div class="list-row-title">${!n.read_at ? `<span class="badge badge-info" style="margin-right:4px;">New</span>` : ""}${escapeHtml(n.title)}</div>
+        <div class="list-row-title">${!n.read_at ? `<span class="badge badge-info" style="margin-right:4px;">${escapeHtml(t("notif.new_badge"))}</span>` : ""}${escapeHtml(n.title)}</div>
         <div class="list-row-meta"><span>${escapeHtml(n.body)}</span></div>
         <div class="list-row-meta"><span class="muted">${escapeHtml(timeAgo(n.created_at))}</span></div>
       </div>
       <div class="list-row-actions">
-        <button class="btn btn-icon btn-ghost" data-action="dismiss" aria-label="Dismiss">${icons.close}</button>
+        <button class="btn btn-icon btn-ghost" data-action="dismiss" aria-label="${escapeHtml(t("notif.dismiss_label"))}">${icons.close}</button>
       </div>
     `;
     row.addEventListener("click", (e) => {

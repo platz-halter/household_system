@@ -1,5 +1,6 @@
 import { CONFIG } from "./config.js";
 import { api } from "./api.js";
+import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -37,16 +38,16 @@ export async function getPushSubscription() {
 
 export async function subscribeToPush() {
   if (!isPushSupported()) {
-    throw new Error("Push notifications aren't supported in this browser");
+    throw new Error(t("push.not_supported_err"));
   }
   const permission = await Notification.requestPermission();
   if (permission !== "granted") {
-    throw new Error("Notification permission was denied");
+    throw new Error(t("push.permission_denied_err"));
   }
 
   const { public_key } = await api.get(`${HB}/push/vapid-public-key`);
   if (!public_key) {
-    throw new Error("Push isn't configured on the server yet");
+    throw new Error(t("push.not_configured_err"));
   }
 
   const reg = await navigator.serviceWorker.ready;
