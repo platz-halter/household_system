@@ -324,12 +324,38 @@ export async function handleAuthentikCallback() {
   }
 }
 
+// Authentik rotates refresh tokens by default — each one is single-use,
+// so once a refresh call consumes it, the old value is dead even if the
+// call is still in flight. api.js calls tryRefreshAuthentikToken() from
+// EVERY 401'd request independently, and a page frequently fires several
+// requests at once (e.g. on load) — if more than one happens to 401 at
+// the same moment, without this guard each would read the SAME
+// not-yet-rotated refresh token and race to spend it. Authentik accepts
+// only the first; every other concurrent caller gets a flat rejection
+// and (per api.js) treats that as a real logout — dropping an otherwise
+// perfectly good, just-renewed session. Sharing one in-flight promise
+// means every concurrent 401 waits on and gets the exact same outcome
+// as the single real refresh request. (Same fix as household/frontend's
+// own auth.js — this exact bug, independently found there first.)
+let refreshInFlight = null;
+
 /**
  * Used by api.js on a 401 for an Authentik-sourced session — tries to
  * get a new access token with the stored refresh token before giving up
- * and sending the user back to login. Returns true on success.
+ * and sending the user back to login. Returns true on success. Safe to
+ * call concurrently — see refreshInFlight above.
  */
 export async function tryRefreshAuthentikToken() {
+  if (refreshInFlight) return refreshInFlight;
+  refreshInFlight = _doRefresh();
+  try {
+    return await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
+  }
+}
+
+async function _doRefresh() {
   const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
   if (!refreshToken) return false;
 
@@ -339,6 +365,10 @@ export async function tryRefreshAuthentikToken() {
       grant_type: "refresh_token",
       refresh_token: refreshToken,
       client_id: config.client_id,
+      // Repeated explicitly, matching the original /authorize request —
+      // without this, some Authentik setups don't reliably re-apply a
+      // custom scope's claim mapping to the refreshed access token.
+      scope: config.scope,
     });
     const resp = await fetchWithTimeout(config.token_url, {
       method: "POST",
