@@ -125,8 +125,15 @@ async def _release_user_assignments(db: AsyncSession, user: HouseholdUser) -> No
     this now-affects: one this user sent as requester (their deleted/
     unassigned item's assignment is gone, cascading automatically for
     the TaskAssignment case — see the model's FK), and any where this
-    user was the TARGET (can't accept a takeover while on break)."""
-    today = datetime.now(UTC).date()
+    user was the TARGET (can't accept a takeover while on break).
+
+    "Today" is the household's own configured local calendar day
+    (HouseholdSettings.timezone), matching run_balancing's own period
+    boundaries — otherwise a period a UTC-anchored "today" considers
+    already-ended could still be the household's current local period,
+    or vice versa, right around the UTC day boundary."""
+    settings = await get_settings_row(db)
+    today = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
     result = await db.execute(
         select(TaskAssignment)
         .options(selectinload(TaskAssignment.task))
@@ -688,6 +695,10 @@ async def trigger_event_group(
     db.add(run)
     await db.flush()
 
+    # due_date stays UTC-anchored, same as every other due_date in this
+    # service (see CLAUDE.md) — deliberately NOT the same value as the
+    # fairness pass below, which needs the household's own local day so
+    # it agrees with run_balancing's own week/month boundaries.
     today = datetime.now(UTC).date()
     created: list[TodoItem] = []
     for root in group.roots:
@@ -711,8 +722,11 @@ async def trigger_event_group(
     eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
     if eligible:
         settings = await get_settings_row(db)
+        fairness_as_of = (
+            datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
+        )
         week_start, _week_end = _resolve_period(
-            ReportPeriod.week, today, settings.week_start_weekday
+            ReportPeriod.week, fairness_as_of, settings.week_start_weekday
         )
         (
             load_points,
@@ -720,7 +734,7 @@ async def trigger_event_group(
             points_this_week,
             _current,
             _remaining,
-        ) = await _gather_balancer_load(db, eligible, today, week_start)
+        ) = await _gather_balancer_load(db, eligible, fairness_as_of, week_start)
         balancing_users = [
             balancing.EligibleUser(
                 user_id=u.id,
@@ -1522,7 +1536,9 @@ async def _remaining_points(
 async def list_current_assignments(
     db: AsyncSession, *, as_of: date | None = None
 ) -> list[TaskAssignment]:
-    as_of = as_of or datetime.now(UTC).date()
+    if as_of is None:
+        settings = await get_settings_row(db)
+        as_of = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
     result = await db.execute(
         select(TaskAssignment)
         .options(
@@ -1636,13 +1652,13 @@ async def _assign_chain_todo_now(
     Left open/unassigned if nobody else is eligible — exactly like an
     ordinary sweep leftover, and still excluded from self-claiming (see
     claim_todo)."""
-    as_of = datetime.now(UTC).date()
+    settings = await get_settings_row(db)
+    as_of = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
     all_users = await list_household_users(db)
     eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
     if not eligible:
         return
 
-    settings = await get_settings_row(db)
     week_start, _week_end = _resolve_period(
         ReportPeriod.week, as_of, settings.week_start_weekday
     )
@@ -1929,8 +1945,8 @@ async def run_balancing(
     on purpose: pass 2 needs to re-check for imbalances more often than
     once a period to actually catch someone falling behind mid-week, not
     just at its start."""
-    as_of = as_of or datetime.now(UTC).date()
     settings = await get_settings_row(db)
+    as_of = as_of or datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
     week_start, week_end = _resolve_period(
         ReportPeriod.week, as_of, settings.week_start_weekday
     )
@@ -2310,9 +2326,16 @@ async def run_scheduled_balancing_if_due(
     imbalances more often than once a period to actually catch someone
     falling behind during the week. run_balancing itself stamps
     last_balance_run, so once today's run has happened (by whichever
-    trigger got there first) every later tick this same day is a no-op."""
+    trigger got there first) every later tick this same day is a no-op.
+    "Today" is the household's own configured local calendar day
+    (HouseholdSettings.timezone), not UTC's — otherwise this fires near
+    UTC midnight regardless of the household's timezone, which can land
+    in the middle of someone's actual day far from UTC and makes the
+    daily sweep/rebalance less likely to have already run by the time a
+    returning-from-break user becomes eligible again (see
+    _release_user_assignments)."""
     settings = await get_settings_row(db)
-    today = datetime.now(UTC).date()
+    today = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
     if settings.last_balance_run == today:
         return None
     return await run_balancing(db, as_of=today)
