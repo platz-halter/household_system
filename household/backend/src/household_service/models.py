@@ -514,6 +514,17 @@ class TodoItem(Base):
     completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Stamped by crud.cancel_todo, same shape as completed_at above —
+    # what the scheduled cleanup (run_scheduled_overdue_cleanup) measures
+    # a cancelled todo's age against, alongside completed_at for a
+    # completed one and due_date for a still-open one. NULL for anything
+    # cancelled before this column existed — deliberately NOT backfilled,
+    # since there's no way to know when those were actually cancelled,
+    # and a guessed timestamp could auto-delete something years older
+    # than it actually is; those just never become eligible for cleanup.
+    cancelled_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

@@ -6,7 +6,7 @@ import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { escapeHtml, showSkeletonAfterDelay } from "./util.js";
-import { isPushSupported, getPushSubscription, subscribeToPush, unsubscribeFromPush } from "./push.js";
+import { isPushSupported, isIOS, isStandalone, getPushSubscription, subscribeToPush, unsubscribeFromPush } from "./push.js";
 import { APP_VERSION } from "./version.js";
 import { t, getLocale, setLocale, supportedLocales } from "./i18n.js";
 
@@ -307,7 +307,15 @@ async function loadPushSection(container, writable) {
 
   if (!isPushSupported()) {
     cancelSkeleton();
-    root.innerHTML = `<div class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("settings.push_not_supported"))}</div>`;
+    // iOS only exposes the Push API to a page running as an installed
+    // Home Screen app (Safari 16.4+) — a plain browser tab always lands
+    // here, same as a browser that genuinely can't do push at all.
+    // Telling those two apart means an iOS user gets pointed at the
+    // actual fix (install it) instead of a flat "not supported" that's
+    // technically true for the tab they're in, but misleading about
+    // the device as a whole.
+    const message = isIOS() && !isStandalone() ? t("settings.push_ios_install_hint") : t("settings.push_not_supported");
+    root.innerHTML = `<div class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(message)}</div>`;
     return;
   }
 

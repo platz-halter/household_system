@@ -288,6 +288,13 @@ class TaskCompleteRequest(BaseModel):
     # directly (see crud.complete_task) — the frontend only ever sets
     # this after showing the user which task(s) chain it and asking.
     force: bool = False
+    # A second, independent override — logs a completion past the
+    # task's own times_per_day cap for today. The frontend only ever
+    # sets this after showing how many times it's already been logged
+    # today and confirming explicitly; kept separate from `force` so
+    # a chain-child override can never silently also bypass this, or
+    # vice versa (see crud.complete_task's own docstring).
+    force_daily_cap: bool = False
 
 
 # ---- Points ----------------------------------------------------------------

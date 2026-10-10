@@ -96,6 +96,13 @@ export const de = {
   "push.permission_denied_err": "Die Benachrichtigungsberechtigung wurde verweigert",
   "push.not_configured_err": "Push ist auf dem Server noch nicht konfiguriert",
 
+  // --- installPrompt.js --------------------------------------------------
+  "install.android_message": "Installiere Household auf diesem Gerät für schnellen Zugriff und Benachrichtigungen.",
+  "install.ios_message": "Füge Household zum Home-Bildschirm hinzu für schnellen Zugriff: Teilen-Symbol antippen, dann „Zum Home-Bildschirm“.",
+  "install.install_btn": "Installieren",
+  "install.got_it_btn": "Verstanden",
+  "install.dismiss_aria": "Schließen",
+
   // --- settings.js -------------------------------------------------------
   "settings.account": "Konto",
   "settings.unknown_user": "Unbekannter Benutzer",
@@ -136,6 +143,7 @@ export const de = {
   "settings.on_break_toast": "Du machst jetzt Pause",
   "settings.end_break_toast": "Willkommen zurück",
   "settings.push_not_supported": "In diesem Browser nicht unterstützt",
+  "settings.push_ios_install_hint": "Auf iPhone/iPad funktionieren Benachrichtigungen erst, wenn diese App zum Home-Bildschirm hinzugefügt wurde: Teilen-Symbol antippen, dann „Zum Home-Bildschirm“ — öffne die App danach von dort statt über Safari, um dies zu aktivieren.",
   "settings.push_label": "Push-Benachrichtigungen auf diesem Gerät",
   "settings.push_desc": "An dich gerichtete Aufgabenanfragen und wöchentliche Erinnerungen",
   "settings.push_test_btn": "Testbenachrichtigung senden",
@@ -189,7 +197,10 @@ export const de = {
   "home.already_chained_title": "Bereits verkettet",
   "home.already_chained_message":
     '„{task}" wird normalerweise automatisch nach Folgendem abgeschlossen: {parents}. Trotzdem direkt abschließen?',
+  "home.already_done_today_title": "Heute bereits erledigt",
+  "home.already_done_today_message": '„{task}" wurde heute bereits {count}x erfasst (von {n}). Trotzdem erneut erfassen?',
   "home.complete_anyway": "Trotzdem abschließen",
+  "home.complete_again_aria": "{title} erneut erfassen",
   "home.logged_toast": '„{title}" erfasst (+{points} Pkt.)',
   "home.chain_from": "Nach: {parent}",
   "home.from_board": "Vom Board",
@@ -432,9 +443,9 @@ export const de = {
   "admin.run_balancer_btn": "Ausgleich jetzt ausführen",
   "admin.reports_heading": "Berichte",
   "admin.generate_report_label": "Bericht erstellen",
-  "admin.overdue_heading": "Überfällige Aufgaben",
+  "admin.overdue_heading": "Board aufräumen",
   "admin.overdue_desc":
-    "Entfernt ein Board-Todo automatisch, sobald es länger als diese Zeit überfällig ist — ein echtes Löschen, kein Abbrechen, damit es nicht mehr jeden Statusfilter einschließlich „Alle\" überfüllt. Ein bereits erledigtes Todo wird davon nie angefasst, egal wie überfällig es vorher war.",
+    "Entfernt ein Board-Todo automatisch, sobald es länger als diese Zeit herumliegt — ein echtes Löschen, kein Abbrechen, damit es nicht mehr jeden Statusfilter einschließlich „Alle\" überfüllt. Deckt drei Fälle mit demselben Zeitraum ab: noch offen und seit so vielen Tagen überfällig, seit so vielen Tagen erledigt, oder seit so vielen Tagen abgebrochen. Bereits erfasste Punkte sind davon nie betroffen — nur das Todo selbst wird entfernt, nicht der Punkteeintrag, den es erzeugt hat.",
   "admin.authentik_heading": "Authentik-Verbindung",
   "admin.authentik_desc":
     "Ändere die Authentik-OIDC-Einstellungen hier — einschließlich welche Authentik-Gruppe welche Rolle verleiht — statt .env (und früher, für die Gruppenzuordnung, den Quellcode) auf dem Server händisch zu bearbeiten. Jeder Dienst übernimmt eine Änderung innerhalb von etwa einer Minute, ohne Neustart. Das Ändern von Issuer, JWKS-URL oder Client-ID meldet jeden ab, der aktuell über Authentik angemeldet ist (lokale Konten sind nicht betroffen); das Umbenennen einer Gruppe wirkt sich erst auf das nächste Token der Mitglieder dieser Gruppe aus. Speichern oder Zurücksetzen erfordert unten immer dein LOKALES Admin-Passwort, auch wenn du gerade über Authentik angemeldet bist — wer diese Werte umleiten kann, bestimmt, wem jeder Dienst als Admin vertraut, daher reicht eine aktuell gültige Sitzung allein nicht.",
@@ -473,8 +484,8 @@ export const de = {
   "admin.generate_btn": "Erstellen",
   "admin.report_generated_toast": "Bericht erstellt",
   "admin.enter_at_least_1_day": "Gib mindestens 1 Tag ein",
-  "admin.automatically_delete_overdue": "Überfällige Todos automatisch löschen",
-  "admin.after_days_label": "Nach so vielen Tagen Überfälligkeit",
+  "admin.automatically_delete_overdue": "Alte überfällige, erledigte und abgebrochene Todos automatisch löschen",
+  "admin.after_days_label": "Nach so vielen Tagen",
   "admin.also_send_automatically": "Dies auch automatisch jede Woche senden",
   "admin.on_label": "Am",
   "admin.last_sent_auto": "Zuletzt automatisch gesendet: Woche vom {date}",

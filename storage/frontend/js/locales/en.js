@@ -42,6 +42,13 @@ export const en = {
   "api.request_failed": "Request failed",
   "api.session_expired": "Session expired",
 
+  // --- installPrompt.js ---------------------------------------------------
+  "install.android_message": "Install Storage on this device for quick access.",
+  "install.ios_message": 'Add Storage to your Home Screen for quick access: tap Share, then "Add to Home Screen."',
+  "install.install_btn": "Install",
+  "install.got_it_btn": "Got it",
+  "install.dismiss_aria": "Dismiss",
+
   // --- settings.js -------------------------------------------------------
   "settings.account": "Account",
   "settings.unknown_user": "Unknown user",

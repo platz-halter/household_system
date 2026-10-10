@@ -43,6 +43,13 @@ export const de = {
   "api.request_failed": "Anfrage fehlgeschlagen",
   "api.session_expired": "Sitzung abgelaufen",
 
+  // --- installPrompt.js --------------------------------------------------
+  "install.android_message": "Installiere Storage auf diesem Gerät für schnellen Zugriff.",
+  "install.ios_message": "Füge Storage zum Home-Bildschirm hinzu für schnellen Zugriff: Teilen-Symbol antippen, dann „Zum Home-Bildschirm“.",
+  "install.install_btn": "Installieren",
+  "install.got_it_btn": "Verstanden",
+  "install.dismiss_aria": "Schließen",
+
   // --- settings.js -------------------------------------------------------
   "settings.account": "Konto",
   "settings.unknown_user": "Unbekannter Benutzer",

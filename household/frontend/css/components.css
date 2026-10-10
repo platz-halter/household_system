@@ -308,6 +308,34 @@
   padding-bottom: 112px;
 }
 
+/* .fab/.fab-secondary are `position: fixed`, so they sit over the SAME
+   screen position regardless of scroll — on a narrow phone (below
+   --max-content-width, where .page fills edge to edge with no side
+   margin to absorb them), that position lands right on top of a
+   .list-row's own right-aligned buttons (a todo's swap/cancel/complete
+   circles) whenever that row scrolls into the FAB's vertical band,
+   making them untappable. Reserving permanent horizontal padding for
+   this (tried first) backfired: .list-row-body is the only flexible
+   child in that flex row (.list-row-points/.list-row-actions are
+   flex-shrink: 0), so it absorbed the entire loss and .list-row-title's
+   own ellipsis truncation kicked in hard — "Test" became "T…" on every
+   row, not just the one actually behind a FAB at any given moment.
+   Hiding the FABs while the list is actively scrolling (board.js/
+   tasks.js's installScrollHideFab, boardList/task-list.js) avoids that
+   entirely: nothing about the row layout changes, and the FABs are
+   simply not there to overlap anything until scrolling stops. */
+.fab,
+.fab-secondary {
+  transition: transform var(--transition-base), opacity var(--transition-base);
+}
+
+.fab.fab-scroll-hidden,
+.fab-secondary.fab-scroll-hidden {
+  transform: translateY(16px) scale(0.9);
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* --- Modal --- */
 
 .modal-overlay {
@@ -424,6 +452,28 @@
 @keyframes skeleton-loading {
   0% { background-position: 100% 50%; }
   100% { background-position: 0 50%; }
+}
+
+/* --- Add to Home Screen banner --- */
+
+.install-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-surface-raised);
+  border-top: 1px solid var(--color-border);
+  box-shadow: var(--shadow-md);
+  z-index: 45;
+}
+
+.install-banner-text {
+  flex: 1;
+  font-size: var(--font-size-sm);
 }
 
 /* --- Bulk action bar (multi-select "complete tasks") --- */

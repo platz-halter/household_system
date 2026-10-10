@@ -45,6 +45,18 @@ function debounce(fn, delay) {
   };
 }
 
+// Called by tasks.js after a task is created, edited, or deleted — Home's
+// "All tasks" list is its own separate fetch (allTasksCache above), fully
+// decoupled from the Tasks page's own cache, so without this a newly
+// created task wouldn't show up here until a hard reload dropped the
+// stale cache. Only clears the cached data, not any of Home's own
+// state (search/category filter, scroll position) — refreshTaskList()
+// re-fetches and re-applies those on its own next call, same as it
+// already does on first load.
+export function invalidateAllTasksCache() {
+  allTasksCache = null;
+}
+
 export async function renderHome(container) {
   const writable = canWrite();
 
@@ -156,19 +168,39 @@ async function confirmDirectChainCompletion(task) {
   });
 }
 
+// Logging past times_per_day is an explicit, confirmed override (crud.
+// complete_task's `force_daily_cap`) — same "informed override, not a
+// silent bypass" shape as confirmDirectChainCompletion above, just for
+// a different check. completionsTodayCache is already kept fresh by
+// afterTaskCompletion, so this needs no extra fetch of its own.
+function confirmDailyCapOverride(task) {
+  const count = completionsTodayCache[task.id] || 0;
+  return showConfirmDialog({
+    title: t("home.already_done_today_title"),
+    message: t("home.already_done_today_message", { task: task.name, count, n: task.times_per_day }),
+    confirmLabel: t("home.complete_anyway"),
+  });
+}
+
 async function completeTask(container, task) {
-  let force = false;
+  const body = {};
   if (task.is_chain_child) {
     const ok = await confirmDirectChainCompletion(task);
     if (!ok) return;
-    force = true;
+    body.force = true;
+  }
+  if (doneForToday(task)) {
+    const ok = await confirmDailyCapOverride(task);
+    if (!ok) return;
+    body.force_daily_cap = true;
   }
   try {
-    await api.post(`${HB}/tasks/${task.id}/complete`, force ? { force: true } : undefined);
+    await api.post(`${HB}/tasks/${task.id}/complete`, Object.keys(body).length ? body : undefined);
     showToast(t("home.logged_toast", { title: task.name, points: task.points }), "success");
     afterTaskCompletion(container);
   } catch {
-    /* api.js already showed a toast (e.g. 409 if it already hit times_per_day for today) */
+    /* api.js already showed a toast (e.g. 409 if someone else just hit
+       times_per_day for today between this tap and the request landing) */
   }
 }
 
@@ -583,7 +615,11 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
       </div>
     </div>
     <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
-    ${writable && !inSelectMode && !doneToday ? `<div class="list-row-actions"><button class="btn btn-icon btn-primary" data-action="complete" aria-label="${escapeAttr(t("home.complete_aria", { title: task.name }))}">${icons.check}</button></div>` : ""}
+    ${
+      writable && !inSelectMode
+        ? `<div class="list-row-actions"><button class="btn btn-icon${doneToday ? "" : " btn-primary"}" data-action="complete" aria-label="${escapeAttr(t(doneToday ? "home.complete_again_aria" : "home.complete_aria", { title: task.name }))}">${icons.check}</button></div>`
+        : ""
+    }
   `;
 
   row.addEventListener("click", (e) => {

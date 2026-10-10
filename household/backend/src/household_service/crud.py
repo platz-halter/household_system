@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -969,14 +969,25 @@ async def task_completions_today(db: AsyncSession) -> dict[int, int]:
 
 
 async def complete_task(
-    db: AsyncSession, task: Task, user: HouseholdUser, *, force: bool = False
+    db: AsyncSession,
+    task: Task,
+    user: HouseholdUser,
+    *,
+    force: bool = False,
+    force_daily_cap: bool = False,
 ) -> PointsEntry:
     """Logs one completion of `task` by `user` and awards points, including
     the configured ramp-up bonus if this user is (so far) the only one who
     has ever completed this task. Rejects a completion past the task's own
     `times_per_day` for today (by anyone, not just this user) — without
     this, a 1x/day task never actually went away, and repeated taps just
-    kept awarding points indefinitely.
+    kept awarding points indefinitely. `force_daily_cap=True` overrides
+    ONLY this check — the frontend shows how many times it's already been
+    logged today and confirms explicitly before setting this, same
+    "informed override, not a silent bypass" contract `force` below
+    already uses for the chain-child check; kept as its own independent
+    flag rather than folded into `force` so a chain-child override can
+    never silently also bypass the daily cap, or vice versa.
 
     Also rejects a task that only exists as someone else's chain child
     (see TaskChainLink) — it has no legitimate direct occurrence of its
@@ -1009,7 +1020,7 @@ async def complete_task(
             "it's spawned as, not directly"
         )
     done_today = await _completions_today_count(db, task.id)
-    if done_today >= task.times_per_day:
+    if done_today >= task.times_per_day and not force_daily_cap:
         raise ValueError(
             f'"{task.name}" has already been completed {task.times_per_day}x today'
         )
@@ -1268,6 +1279,7 @@ async def cancel_todo(db: AsyncSession, todo: TodoItem) -> TodoItem:
     (see GET /todos/{id}/chain-children / crud.list_chain_children) —
     this function itself just does it, unconditionally, once asked."""
     todo.status = TodoStatus.cancelled
+    todo.cancelled_at = datetime.now(UTC)
     await _cancel_pending_takeover_for_todo(db, todo.id)
     await db.execute(
         delete(TodoItem).where(
@@ -1380,29 +1392,55 @@ async def run_scheduled_overdue_cleanup(
     without waiting for the clock, same reasoning as
     crud._event_group_due's own `now` parameter.
 
-    "Overdue by more than N days" means the same thing the Board's own
-    due-date badge does (util.js's dueBadge: due_date < today, both
-    anchored to UTC) — just with N days of extra grace before this
-    deletes it, not the day it first turns overdue. Only ever considers
-    still-OPEN todos with a due date at all; nothing else can be
-    "overdue" in the first place."""
+    One setting, three independent conditions it sweeps for, matching
+    the admin panel's single "auto remove after" field:
+    1. still-OPEN, overdue by more than N days — the original behavior.
+       "Overdue" means the same thing the Board's own due-date badge
+       does (util.js's dueBadge: due_date < today, both anchored to
+       UTC); this just adds N days of grace before deleting it, not
+       the day it first turns overdue.
+    2. COMPLETED more than N days ago (completed_at).
+    3. CANCELLED more than N days ago (cancelled_at) — NULL for
+       anything cancelled before that column existed (see
+       TodoItem.cancelled_at's own docstring); this comparison
+       naturally excludes those rather than guessing an age for them,
+       so they're simply never swept, not retroactively cleaned up.
+    All three compare against the same day-level cutoff (not a live
+    timestamp) for consistency with the open/due_date case above —
+    this runs hourly, so day-level granularity is all "after N days"
+    needs in practice."""
     settings = await get_settings_row(db)
     if settings.overdue_delete_after_days is None:
         return []
     today = today or datetime.now(UTC).date()
-    cutoff = today - timedelta(days=settings.overdue_delete_after_days)
+    cutoff_date = today - timedelta(days=settings.overdue_delete_after_days)
+    cutoff_dt = datetime.combine(cutoff_date, time.min, tzinfo=UTC)
     result = await db.execute(
         select(TodoItem).where(
-            TodoItem.status == TodoStatus.open,
-            TodoItem.due_date.is_not(None),
-            TodoItem.due_date < cutoff,
+            or_(
+                and_(
+                    TodoItem.status == TodoStatus.open,
+                    TodoItem.due_date.is_not(None),
+                    TodoItem.due_date < cutoff_date,
+                ),
+                and_(
+                    TodoItem.status == TodoStatus.completed,
+                    TodoItem.completed_at.is_not(None),
+                    TodoItem.completed_at < cutoff_dt,
+                ),
+                and_(
+                    TodoItem.status == TodoStatus.cancelled,
+                    TodoItem.cancelled_at.is_not(None),
+                    TodoItem.cancelled_at < cutoff_dt,
+                ),
+            )
         )
     )
-    overdue = list(result.scalars().all())
-    if overdue:
-        await _hard_delete_todos(db, [t.id for t in overdue])
+    stale = list(result.scalars().all())
+    if stale:
+        await _hard_delete_todos(db, [t.id for t in stale])
         await db.commit()
-    return overdue
+    return stale
 
 
 async def claim_todo(

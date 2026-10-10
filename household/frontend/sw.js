@@ -12,6 +12,14 @@ self.addEventListener("push", (event) => {
   const title = payload.title || "Household";
   const options = {
     body: payload.body || "",
+    // Without these, the OS falls back to a generic bell/default icon
+    // instead of this app's own — same icon files the manifest already
+    // uses for the installed app, so nothing new to generate. `icon` is
+    // the notification's own image; `badge` is the small monochrome
+    // glyph Android shows in the status bar once the notification
+    // collapses there (ignored by browsers that don't support it).
+    icon: "/icons/icon-192.png",
+    badge: "/icons/icon-maskable-512.png",
     data: { url: payload.url || "/home" },
   };
   event.waitUntil(self.registration.showNotification(title, options));

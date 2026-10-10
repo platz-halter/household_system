@@ -94,6 +94,13 @@ export const en = {
   "push.permission_denied_err": "Notification permission was denied",
   "push.not_configured_err": "Push isn't configured on the server yet",
 
+  // --- installPrompt.js ---------------------------------------------------
+  "install.android_message": "Install Household on this device for quick access and notifications.",
+  "install.ios_message": 'Add Household to your Home Screen for quick access: tap Share, then "Add to Home Screen."',
+  "install.install_btn": "Install",
+  "install.got_it_btn": "Got it",
+  "install.dismiss_aria": "Dismiss",
+
   // --- settings.js -------------------------------------------------------
   "settings.account": "Account",
   "settings.unknown_user": "Unknown user",
@@ -133,6 +140,7 @@ export const en = {
   "settings.on_break_toast": "You're now on break",
   "settings.end_break_toast": "Welcome back",
   "settings.push_not_supported": "Not supported in this browser",
+  "settings.push_ios_install_hint": "On iPhone/iPad, notifications only work once this is added to your Home Screen: tap Share, then \"Add to Home Screen\" — open it from there instead of Safari to turn this on.",
   "settings.push_label": "Push notifications on this device",
   "settings.push_desc": "Chore requests addressed to you, and weekly reminders",
   "settings.push_test_btn": "Send test notification",
@@ -183,7 +191,10 @@ export const en = {
   "home.select_tasks_label": "Select tasks",
   "home.already_chained_title": "Already chained",
   "home.already_chained_message": '"{task}" is normally completed automatically after: {parents}. Complete it directly anyway?',
+  "home.already_done_today_title": "Already done today",
+  "home.already_done_today_message": '"{task}" has already been logged {count}x today (of {n}). Log it again anyway?',
   "home.complete_anyway": "Complete anyway",
+  "home.complete_again_aria": "Log {title} again",
   "home.logged_toast": 'Logged "{title}" (+{points} pts)',
   "home.chain_from": "After: {parent}",
   "home.from_board": "From the board",
@@ -424,9 +435,9 @@ export const en = {
   "admin.run_balancer_btn": "Run balancer now",
   "admin.reports_heading": "Reports",
   "admin.generate_report_label": "Generate report",
-  "admin.overdue_heading": "Overdue tasks",
+  "admin.overdue_heading": "Board cleanup",
   "admin.overdue_desc":
-    'Automatically removes a board todo once it\'s been overdue for longer than this — a real delete, not a cancel, so it stops cluttering every status filter including "All." A todo someone\'s already completed is never touched by this, regardless of how overdue it was before that.',
+    'Automatically removes a board todo once it\'s been sitting around for longer than this — a real delete, not a cancel, so it stops cluttering every status filter including "All." Covers three cases on the same timer: still open and overdue by this many days, completed more than this many days ago, or cancelled more than this many days ago. Earned points are never affected — only the todo itself is removed, not the points ledger entry it created.',
   "admin.authentik_heading": "Authentik connection",
   "admin.authentik_desc":
     "Change the Authentik OIDC settings — including which Authentik group grants which role — here instead of hand-editing .env (and previously, for the group mapping, a source-code edit) on the server. Every service picks up a change within about a minute, no restart needed. Changing the issuer, JWKS URL, or client ID will sign out anyone currently logged in through Authentik (local accounts are unaffected); renaming a group only affects the next token that group's members present. Saving or resetting always requires your LOCAL admin password below, even if you're signed in through Authentik right now — whoever can repoint these values controls who every service trusts as an admin, so a currently-valid session alone isn't enough.",
@@ -465,8 +476,8 @@ export const en = {
   "admin.generate_btn": "Generate",
   "admin.report_generated_toast": "Report generated",
   "admin.enter_at_least_1_day": "Enter at least 1 day",
-  "admin.automatically_delete_overdue": "Automatically delete overdue todos",
-  "admin.after_days_label": "After this many days overdue",
+  "admin.automatically_delete_overdue": "Automatically delete old overdue, completed, and cancelled todos",
+  "admin.after_days_label": "After this many days",
   "admin.also_send_automatically": "Also send this automatically, every week",
   "admin.on_label": "On",
   "admin.last_sent_auto": "Last sent automatically: week of {date}",

@@ -8,6 +8,7 @@ import { openTaskPickerModal } from "./taskPicker.js";
 import { openTriggerConfirmModal } from "./eventGroups.js";
 import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 import { t, getLocale } from "./i18n.js";
+import { invalidateAllTasksCache } from "./home.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
@@ -1155,6 +1156,7 @@ async function openTaskModal(container, writable, task = null) {
         await api.post(`${HB}/tasks`, payload);
       }
       showToast(t("tasks.task_saved"), "success");
+      invalidateAllTasksCache();
       close();
       loadTasks(container, writable);
     } catch {
@@ -1174,6 +1176,7 @@ async function openTaskModal(container, writable, task = null) {
       try {
         await api.del(`${HB}/tasks/${task.id}`);
         showToast(t("tasks.task_deleted"), "success");
+        invalidateAllTasksCache();
         close();
         loadTasks(container, writable);
       } catch {

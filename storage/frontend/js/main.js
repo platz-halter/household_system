@@ -3,6 +3,7 @@ import { handleAuthentikCallback, warmGroupRoleMap } from "./auth.js";
 import { startRouter } from "./router.js";
 import { showToast } from "./toast.js";
 import { t, applyStaticTranslations } from "./i18n.js";
+import { initInstallPrompt } from "./installPrompt.js";
 
 // index.html's inline head script already applies the theme before first
 // paint to avoid a flash; this just keeps the two in sync in case the
@@ -43,6 +44,7 @@ async function boot() {
   // UI a user couldn't reach this fast anyway (e.g. the /admin route,
   // which needs at least one more navigation to get to).
   warmGroupRoleMap();
+  initInstallPrompt();
   startRouter();
 }
 

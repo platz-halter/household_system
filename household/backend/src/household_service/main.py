@@ -691,7 +691,11 @@ async def complete_task(
 
     try:
         entry = await crud.complete_task(
-            db, task, target, force=body.force if body else False
+            db,
+            task,
+            target,
+            force=body.force if body else False,
+            force_daily_cap=body.force_daily_cap if body else False,
         )
     except ValueError as exc:
         raise HTTPException(
