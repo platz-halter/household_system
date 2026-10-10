@@ -1002,18 +1002,19 @@ async def complete_task(
     the person tapping complete, not something this function can
     second-guess.
 
-    Also rejects a `Recurrence.manual` task outright, with no `force`
-    override — unlike a chain-child task, there's no legacy data this
-    needs to stay permissive for (manual is a brand new recurrence);
-    it's always completed via whichever todo it was actually posted/
-    spawned/triggered as instead (`complete_todo`, which stamps the
-    represented task onto the PointsEntry independently of this
-    function and never calls it)."""
-    if task.recurrence == Recurrence.manual:
-        raise ValueError(
-            f'"{task.name}" has no automatic occurrence of its own — complete '
-            "it from the todo it was posted/triggered as instead"
-        )
+    A `Recurrence.manual` task has no automatic occurrence of its own —
+    it's normally only ever instantiated as a todo (an Event Group root,
+    a chain spawn, or a Board "From task" post), completed there via
+    `complete_todo` instead. This function nonetheless allows completing
+    one directly too (user request: a manual task that was never wired
+    into an Event Group or chain would otherwise have no way to ever be
+    completed at all, and manual is now the default recurrence for a
+    newly created task — see TaskCreate's own default). Goes through the
+    exact same path as any other recurrence from here on (times_per_day,
+    ramp-up, chain-spawning its own children if it happens to be a chain
+    PARENT) — being a chain CHILD is still blocked by the check above,
+    `force` still required for that, same as ever; this only removed the
+    recurrence-based rejection, not the chain-child one."""
     if await is_chain_child(db, task.id) and not force:
         raise ValueError(
             f'"{task.name}" is a chained task — complete it from the todo '

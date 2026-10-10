@@ -53,7 +53,7 @@ h1, h2, h3, p {
 
 #app {
   min-height: 100%;
-  padding-top: var(--topbar-height);
+  padding-top: calc(var(--topbar-height) + env(safe-area-inset-top, 0px));
   padding-bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
 }
 
@@ -62,7 +62,22 @@ h1, h2, h3, p {
   top: 0;
   left: 0;
   right: 0;
-  height: var(--topbar-height);
+  /* Was a fixed height with padding-top ALSO added inside it — with
+     box-sizing: border-box (global reset), the padding ate directly
+     into the topbar's own content height instead of pushing the bar
+     down, so on a device with a real safe-area-inset-top (an iPhone's
+     notch/Dynamic Island in standalone mode, or an Android punch-hole
+     status bar) the icons got squeezed into whatever sliver of height
+     was left — on iOS specifically, often negative, shoving them up
+     into the inset itself and making them hard to tap. Sized like
+     .bottom-nav's own height already correctly is (base + inset, not
+     base alone) so the inset adds height instead of eating it — #app's
+     own padding-top above has to match this same total or a gap/overlap
+     reappears between the fixed topbar and the page content scrolling
+     under it (the "white bar" reported on Android). (Same fix as
+     household/frontend's own base.css — this exact gap, found there
+     first.) */
+  height: calc(var(--topbar-height) + env(safe-area-inset-top, 0px));
   padding-top: env(safe-area-inset-top, 0px);
   display: flex;
   align-items: center;

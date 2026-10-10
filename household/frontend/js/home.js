@@ -600,18 +600,17 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
           ? t("tasks.manual_option")
           : t("common.recurrence_daily");
   const doneToday = doneForToday(task);
-  // A manual task has no automatic occurrence of its own at all — the
-  // backend rejects completing it directly outright, no override (see
-  // crud.complete_task's own docstring: always via whichever todo it
-  // was actually posted/spawned/triggered as). It's still listed here
-  // (home.js's "All tasks" no longer filters it out) so it's not
-  // invisible just because it can't be logged from this particular
-  // screen — just without a complete button, or a selection checkbox
-  // in bulk mode, that would otherwise always fail.
-  const canCompleteHere = writable && !isManual;
+  // A manual task used to be rejected outright by the backend here —
+  // crud.complete_task now allows completing one directly too (a manual
+  // task that was never wired into an Event Group/chain would otherwise
+  // have no way to ever be completed, and manual is the default
+  // recurrence for a new task), so this no longer special-cases it: it
+  // gets the same complete button/selection checkbox as any other task.
+  // A chain-child task still goes through its own confirm-then-force
+  // flow (see completeTask below), the same as before.
 
   row.innerHTML = `
-    ${inSelectMode && canCompleteHere ? `<div class="list-row-select">${icons.check}</div>` : ""}
+    ${inSelectMode && writable ? `<div class="list-row-select">${icons.check}</div>` : ""}
     <div class="list-row-body">
       <div class="list-row-title">${escapeHtml(task.name)}</div>
       <div class="list-row-meta">
@@ -625,7 +624,7 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
     </div>
     <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
     ${
-      canCompleteHere && !inSelectMode
+      writable && !inSelectMode
         ? `<div class="list-row-actions"><button class="btn btn-icon${doneToday ? "" : " btn-primary"}" data-action="complete" aria-label="${escapeAttr(t(doneToday ? "home.complete_again_aria" : "home.complete_aria", { title: task.name }))}">${icons.check}</button></div>`
         : ""
     }
@@ -633,7 +632,7 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
 
   row.addEventListener("click", (e) => {
     if (inSelectMode) {
-      if (canCompleteHere) onToggleSelect(task.id);
+      if (writable) onToggleSelect(task.id);
       return;
     }
     if (e.target.closest('[data-action="complete"]')) {
