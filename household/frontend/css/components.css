@@ -21,7 +21,6 @@
   text-decoration: none; /* .btn is also used on <a> (e.g. the topbar settings link) */
   cursor: pointer;
   transition: background-color var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast);
-  -webkit-tap-highlight-color: transparent;
 }
 
 .btn:active {

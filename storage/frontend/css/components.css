@@ -19,7 +19,6 @@
   text-decoration: none; /* .btn is also used on <a> (e.g. Settings -> Manage rooms) */
   cursor: pointer;
   transition: background-color var(--transition-fast), border-color var(--transition-fast), opacity var(--transition-fast);
-  -webkit-tap-highlight-color: transparent;
 }
 
 .btn:active {

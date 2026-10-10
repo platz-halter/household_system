@@ -4,6 +4,15 @@
 
 *, *::before, *::after {
   box-sizing: border-box;
+  /* Android Chrome's default tap highlight is a flat, square blue
+     overlay on whatever was just pressed — was only ever turned off on
+     .btn, so anything NOT .btn-classed (the bottom-nav tabs, .list-row,
+     .chip, .fab/.fab-secondary, the event-card trash button, …) still
+     flashed it on every tap. Global, not per-component, so nothing new
+     added later needs to remember this too; pressed-state feedback is
+     already handled per element (.btn:active's opacity dip, etc.), so
+     nothing relies on the browser's own highlight to show a tap landed.*/
+  -webkit-tap-highlight-color: transparent;
 }
 
 html, body {
