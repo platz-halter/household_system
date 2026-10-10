@@ -212,6 +212,20 @@
   transform: scale(0.98);
 }
 
+/* Only added when a grid is freshly populated from a fetch (overview.js's
+   renderGrid(..., { animate: true })) — never on a selection-mode toggle,
+   which redraws the same cards in place and should stay instant, not
+   replay an entrance every time. animation-delay is set per-card inline
+   for the staggered-cascade effect. */
+.item-card.fade-in {
+  animation: item-fade-in var(--transition-base) both;
+}
+
+@keyframes item-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
 .item-card.selected {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 2px var(--color-accent) inset;
@@ -285,6 +299,15 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* Starts invisible and fades in once overview.js adds .loaded, right
+     after the image has actually decoded — avoids a flash of a
+     half-painted frame, which img.decode() + a hard swap used to risk. */
+  opacity: 0;
+  transition: opacity var(--transition-base);
+}
+
+.item-thumb img.loaded {
+  opacity: 1;
 }
 
 .item-card-body {

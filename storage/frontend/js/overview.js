@@ -307,15 +307,18 @@ async function refreshItems(container, selection) {
 
   state.total = page.total;
   currentItems = page.items;
-  renderGrid(container, selection);
+  renderGrid(container, selection, { animate: true });
 }
 
 // Rebuilds the grid/pagination/bulk-bar from the already-fetched
 // currentItems cache, with no network call and no skeleton flash. Used
 // whenever only the selection UI changes (entering/exiting/cancelling
 // bulk-select) — the set of items on screen hasn't changed, just how
-// each card is drawn.
-function renderGrid(container, selection) {
+// each card is drawn. `animate` is only ever true right after a real
+// fetch (refreshItems) — replaying the entrance fade on a plain
+// selection-mode toggle would make picking "Select" feel like the whole
+// grid just reloaded, when nothing it shows actually changed.
+function renderGrid(container, selection, { animate = false } = {}) {
   const grid = container.querySelector("#item-grid");
   const paginationRoot = container.querySelector("#pagination-root");
   if (!grid) return;
@@ -324,7 +327,17 @@ function renderGrid(container, selection) {
     grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${icons.box}<p style="margin-top: var(--space-2);">${escapeHtml(t("overview.no_items_found"))}</p></div>`;
   } else {
     grid.innerHTML = "";
-    currentItems.forEach((item) => grid.appendChild(renderItemCard(item, container, selection)));
+    currentItems.forEach((item, index) => {
+      const card = renderItemCard(item, container, selection);
+      if (animate) {
+        card.classList.add("fade-in");
+        // Staggered cascade rather than every card popping in at once —
+        // capped so a long page of results doesn't drag the last row's
+        // entrance out too far.
+        card.style.animationDelay = `${Math.min(index * 25, 300)}ms`;
+      }
+      grid.appendChild(card);
+    });
   }
 
   renderPagination(paginationRoot, container, selection);
@@ -345,13 +358,29 @@ function renderItemCard(item, container, selection) {
   thumb.style.position = "relative";
   if (item.image_path) {
     thumb.innerHTML = icons.image; // placeholder while the authenticated fetch resolves
-    fetchImageUrl(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`).then((objectUrl) => {
+    fetchImageUrl(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`).then(async (objectUrl) => {
       if (!objectUrl) return; // fetch failed — keep the placeholder icon
       const img = document.createElement("img");
       img.src = objectUrl;
       img.alt = item.name;
+      // Waits for the image to actually finish decoding before it's ever
+      // shown — without this, swapping it in right after `src` is set
+      // risked a visible flash of a half-painted frame, on top of the
+      // abrupt placeholder-to-photo pop this was already doing.
+      try {
+        await img.decode();
+      } catch {
+        // Decode can fail for reasons unrelated to the image itself
+        // (e.g. this card got removed from the DOM meanwhile) — show it
+        // anyway rather than leave the placeholder icon up forever.
+      }
       thumb.innerHTML = ""; // clears the placeholder — badge must go AFTER this
       thumb.appendChild(img);
+      // .loaded (opacity 0 -> 1, css/components.css) has to be added on
+      // a later frame than the append — adding it in the same tick as
+      // insertion gives the browser nothing to transition FROM, since
+      // it never gets to paint the opacity:0 state first.
+      requestAnimationFrame(() => img.classList.add("loaded"));
       if (inSelectionMode) thumb.appendChild(selectionBadge(isSelected));
     });
   } else {
