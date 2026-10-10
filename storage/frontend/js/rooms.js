@@ -4,6 +4,7 @@ import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
+import { t } from "./i18n.js";
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -16,18 +17,17 @@ export async function renderRooms(container) {
   container.innerHTML = `
     <div class="page">
       <div class="row-between" style="margin-bottom: var(--space-2);">
-        <h1 style="margin: 0; font-size: var(--font-size-lg);">Rooms</h1>
+        <h1 style="margin: 0; font-size: var(--font-size-lg);">${escapeHtml(t("rooms.heading"))}</h1>
       </div>
       <p class="muted" style="font-size: var(--font-size-sm);">
-        The rooms available when setting an item's location — add one here
-        before using it on an item, instead of typing a new one each time.
+        ${escapeHtml(t("rooms.desc"))}
       </p>
 
       ${
         writable
           ? `<div class="row" style="margin-bottom: var(--space-4);">
-               <input class="input" id="new-room-name" placeholder="New room name" maxlength="64" />
-               <button class="btn btn-primary" id="add-room-btn">${icons.plus}<span>Add</span></button>
+               <input class="input" id="new-room-name" placeholder="${escapeAttr(t("rooms.new_room_placeholder"))}" maxlength="64" />
+               <button class="btn btn-primary" id="add-room-btn">${icons.plus}<span>${escapeHtml(t("rooms.add_btn"))}</span></button>
              </div>`
           : ""
       }
@@ -42,14 +42,14 @@ export async function renderRooms(container) {
     const submit = async () => {
       const name = nameInput.value.trim();
       if (!name) {
-        showToast("Enter a room name", "warning");
+        showToast(t("rooms.enter_name_warning"), "warning");
         return;
       }
       addBtn.disabled = true;
       try {
         await api.post(`${CONFIG.STORAGE_BASE}/rooms`, { name });
         nameInput.value = "";
-        showToast(`Added "${name}"`, "success");
+        showToast(t("common.added_toast", { name }), "success");
         await loadRooms(container, writable);
       } catch {
         /* api.js already showed a toast */
@@ -76,13 +76,13 @@ async function loadRooms(container, writable) {
     rooms = await api.get(`${CONFIG.STORAGE_BASE}/rooms`);
   } catch {
     cancelSkeleton();
-    root.innerHTML = `<div class="empty-state">Couldn't load rooms</div>`;
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("rooms.couldnt_load"))}</div>`;
     return;
   }
   cancelSkeleton();
 
   if (rooms.length === 0) {
-    root.innerHTML = `<div class="empty-state">${icons.box}<p style="margin-top: var(--space-2);">No rooms yet</p></div>`;
+    root.innerHTML = `<div class="empty-state">${icons.box}<p style="margin-top: var(--space-2);">${escapeHtml(t("rooms.no_rooms_yet"))}</p></div>`;
     return;
   }
 
@@ -91,7 +91,7 @@ async function loadRooms(container, writable) {
       (room) => `
       <div class="row-between" style="padding: var(--space-3) var(--space-4); border: 1px solid var(--color-border); border-radius: var(--radius-md);">
         <span>${escapeHtml(room.name)}</span>
-        ${writable ? `<button class="btn btn-icon" data-room-id="${room.id}" data-room-name="${escapeAttr(room.name)}" aria-label="Delete ${escapeAttr(room.name)}">${icons.trash}</button>` : ""}
+        ${writable ? `<button class="btn btn-icon" data-room-id="${room.id}" data-room-name="${escapeAttr(room.name)}" aria-label="${escapeAttr(t("rooms.delete_aria", { name: room.name }))}">${icons.trash}</button>` : ""}
       </div>`
     )
     .join("");
@@ -100,15 +100,15 @@ async function loadRooms(container, writable) {
     root.querySelectorAll("[data-room-id]").forEach((btn) => {
       btn.addEventListener("click", async () => {
         const ok = await showConfirmDialog({
-          title: "Delete room",
-          message: `Delete "${btn.dataset.roomName}"? This only works while no item is stored there.`,
-          confirmLabel: "Delete",
+          title: t("rooms.delete_title"),
+          message: t("rooms.delete_message", { name: btn.dataset.roomName }),
+          confirmLabel: t("common.delete"),
           danger: true,
         });
         if (!ok) return;
         try {
           await api.del(`${CONFIG.STORAGE_BASE}/rooms/${btn.dataset.roomId}`);
-          showToast("Room deleted", "success");
+          showToast(t("rooms.deleted_toast"), "success");
           await loadRooms(container, writable);
         } catch {
           /* api.js already showed a toast (e.g. 409 if still in use) */

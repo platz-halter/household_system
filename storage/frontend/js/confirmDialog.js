@@ -1,4 +1,5 @@
 import { icons } from "./icons.js";
+import { t } from "./i18n.js";
 
 /**
  * Shows a styled confirmation modal (replaces window.confirm()). Resolves
@@ -8,10 +9,10 @@ import { icons } from "./icons.js";
  * @param {{title?: string, message: string, confirmLabel?: string, cancelLabel?: string, danger?: boolean}} opts
  */
 export function showConfirmDialog({
-  title = "Are you sure?",
+  title = t("confirm.default_title"),
   message,
-  confirmLabel = "Confirm",
-  cancelLabel = "Cancel",
+  confirmLabel = t("confirm.default_confirm"),
+  cancelLabel = t("confirm.default_cancel"),
   danger = false,
 } = {}) {
   return new Promise((resolve) => {
@@ -21,7 +22,7 @@ export function showConfirmDialog({
       <div class="modal confirm-modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
         <div class="modal-header">
           <h2 id="confirm-title">${escapeHtml(title)}</h2>
-          <button class="btn btn-icon btn-ghost" id="confirm-close" aria-label="Close">${icons.close}</button>
+          <button class="btn btn-icon btn-ghost" id="confirm-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
         </div>
         <p class="muted">${escapeHtml(message)}</p>
         <div class="modal-footer">

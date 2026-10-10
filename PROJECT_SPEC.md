@@ -114,7 +114,9 @@ Tracks physical items (cellar, pantry, etc.).
     "maximize" image viewer for individual items, a button to add a new
     item, and a bulk-add flow ("save and add another" after submitting
     one item), plus multi-select for bulk edit/delete.
-  - **Settings**: theme selection, signed-in user info, logout.
+  - **Settings**: theme selection, language selection (English/German,
+    device-local — see CLAUDE.md's "Multi-language support" under the
+    storage service), signed-in user info, logout.
 - Reachable both from home (via Caddy) and on the go (away from the home
   network, through the same Caddy/Netbird/Authentik chain already used
   for other homelab services).
@@ -372,24 +374,25 @@ Tracks physical items (cellar, pantry, etc.).
 
 ### Multi-language support
 
-- English and German, chosen per the household rather than hardcoded.
-  Every signed-in user picks their own UI language from Settings
-  (`HouseholdUser.preferred_language`); an admin sets which language a
-  **brand new** account starts with (`HouseholdSettings.default_language`)
-  — not retroactive, so changing the admin default never silently
-  switches anyone already using the app.
-- A notification's title/body renders in its RECIPIENT's own language —
-  each person reads their own inbox in their own language, regardless of
-  who triggered it or what the household's shared default is.
-- A PDF report renders in the household's shared default language
-  instead — it's one document, not per-viewer, so it can't follow each
-  admin's own preference the way a notification follows its one
-  recipient.
-- Deliberately out of scope for this round: translating backend
-  `ValueError`/`HTTPException` `detail` messages (needs real error
-  codes, a bigger change) and the storage frontend (no admin/settings
-  concept to hook a default language into — see CLAUDE.md's "Storage
-  has no admin/user distinction at all").
+- English and German in both apps, but the two systems choose the
+  language differently, matching each one's own data model:
+  - **Household**: chosen per the household rather than hardcoded.
+    Every signed-in user picks their own UI language from Settings
+    (`HouseholdUser.preferred_language`); an admin sets which language a
+    **brand new** account starts with (`HouseholdSettings.default_language`)
+    — not retroactive, so changing the admin default never silently
+    switches anyone already using the app. A notification's title/body
+    renders in its RECIPIENT's own language; a PDF report renders in the
+    household's shared default instead, since it's one document, not
+    per-viewer.
+  - **Storage**: has no per-service user table at all (see CLAUDE.md's
+    "Storage has no admin/user distinction at all"), so the choice is
+    purely device-local — a Settings page switcher, stored the same way
+    the theme already is, with no admin default and nothing server-side
+    to sync against.
+- Deliberately out of scope: translating backend `ValueError`/
+  `HTTPException` `detail` messages in either service (needs real error
+  codes, a bigger change than a string lookup).
 
 ## Non-functional
 

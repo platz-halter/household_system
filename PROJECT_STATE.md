@@ -836,6 +836,70 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   rebuilt the container, curled the manifest and all four icons (200,
   correct content-types/dimensions), and loaded the real page in
   headless Chromium at phone width for an actual screenshot.
+- ✅ **Multi-language support (English/German)**, storage's own —
+  frontend-only, since storage has no per-service user table to persist
+  a preference against and no backend notifications/reports of its own
+  to translate (see CLAUDE.md's "Storage has no admin/user distinction
+  at all"). `storage/frontend/js/i18n.js` is its own independent copy of
+  household's design (deliberately not shared between the two frontends
+  — see CLAUDE.md's "Both frontends" under Frontend conventions),
+  simplified: no `syncLocaleFromServer`/`reconcileLocale`, since there's
+  no server-side value to reconcile a cached one against — the choice
+  lives entirely in `localStorage` (`hs-lang`), the exact same storage
+  model `theme.js` already used for the theme. `en.js`/`de.js` (114 keys
+  each, verified for exact key/placeholder/plural-shape parity the same
+  one-off-script way household's were). Every file swept: `overview.js`
+  (the big one — search/filter/sort, the add/edit/bulk-edit item
+  modals, the shelf picker, pagination), `rooms.js`, `settings.js`
+  (gained a "Language" section: native self-names "English"/"Deutsch",
+  writes `hs-lang`, reloads — no admin "default for new users" setting,
+  since there's no admin concept here to hook one into),
+  `confirmDialog.js`, `login.js`, `main.js`, `theme.js`, and — unlike
+  household's own i18n round, which left this one unaddressed in ITS
+  `api.js` — the generic request-error toasts in `api.js` itself
+  ("Network error," "You don't have permission," session-expired).
+  Plural count strings (bulk-select "N item(s) selected/deleted,"
+  "Delete/Edit/Apply to N item(s)") use the same `{one, other}`
+  `Intl.PluralRules` form household's own `t()` supports. An independent
+  audit subagent, run the same way as household's own i18n round's,
+  caught two real issues after the first sweep pass — both then fixed
+  in BOTH frontends for consistency, since the same bug turned out to
+  already exist in household/frontend/js/settings.js too, unnoticed
+  until now: (1) the account card rendered `user.role`/`user.source`
+  raw (`"admin"`, `"local"`, etc. — straight from the decoded token,
+  never through `t()`); fixed with a small label-key lookup in both
+  apps' `settings.js`, dropping the `text-transform: capitalize` CSS
+  that only existed to dress up the untranslated raw value. (2)
+  `login.js`'s failed-login toast shows `err.message` ahead of
+  `t("login.failed")` — `err.message` is either `auth.js`'s own
+  hardcoded `"Login failed"` default, or the backend's raw `detail`
+  text (e.g. a rate-limit message), and the backend-sourced case stays
+  English-only regardless of locale (the same already-documented,
+  accepted gap as the backend-detail-messages limitation) — but the
+  one piece that WAS fixable client-side, `auth.js`'s own default
+  string, is now `t("login.failed")`. Applied to storage's `auth.js`
+  only, not household's — household's own `i18n.js` has a
+  `syncLocaleFromServer` → `api.js` → `auth.js` import chain that
+  importing `t` into `auth.js` would turn into a genuine circular
+  import (storage's `i18n.js` imports nothing that imports `auth.js`
+  back, so no such risk there); left as a known, flagged gap in
+  household's `auth.js` rather than risk an untested module-graph
+  change to an already-shipped feature for a round scoped to storage.
+  **Live-verified end to end** (CDP-driven headless Chromium, one
+  throwaway local admin account): Overview/Rooms/Settings render with
+  zero raw/untranslated keys in either language; switching language in
+  Settings persists across navigation without a re-login; the bulk-
+  select delete/edit modals, the add-item modal, and the delete/add
+  confirm dialogs and toasts all render correctly in German including
+  plural forms (verified by reading actual rendered DOM text, not just
+  checking that `t()` was called); the account-card role/source fix
+  renders correctly ("Admin · Lokal"); a deliberately-wrong password
+  correctly still shows the backend's own (English) detail message,
+  confirming the fix's scope boundary is exactly where intended, not
+  wider. The throwaway account and every test item created during
+  verification were cleaned up afterward (the bulk-delete test itself
+  removed its own items as part of exercising that flow — nothing extra
+  was left to clean up).
 
 ## Household service — backend
 
@@ -2920,6 +2984,12 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
   choice on the backend side) — a deliberate choice for a household
   chores app used by people who already know each other, not a formal
   business tool; stated here rather than left silent.
+  **Addendum, from storage's own i18n round below**: an audit run
+  against storage's equivalent `settings.js` caught `user.role`/
+  `user.source` being rendered raw (never through `t()`) there, and the
+  identical bug turned out to already exist in THIS app's `settings.js`
+  too — fixed here at the same time, with the same small label-key
+  lookup; see storage's own entry for the full writeup.
 
 ## Authentication & permissions (cross-cutting)
 

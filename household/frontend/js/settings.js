@@ -20,6 +20,16 @@ const HB = CONFIG.HOUSEHOLD_BASE;
 // UI text to translate.
 const LOCALE_NATIVE_NAMES = { en: "English", de: "Deutsch" };
 
+// `user.role`/`user.source` are raw values straight from the decoded
+// token ("admin"/"user"/"viewer", "local"/"authentik") — displaying
+// them as-is would leave two ordinary English words sitting in an
+// otherwise-translated account card. "Authentik" itself is a brand
+// name and stays as-is either way. (Same fix as storage/frontend's own
+// settings.js — this exact gap was caught there first, by an
+// independent audit, then mirrored back here for consistency.)
+const ROLE_LABEL_KEYS = { admin: "settings.role_admin", user: "settings.role_user", viewer: "settings.role_viewer" };
+const SOURCE_LABEL_KEYS = { local: "settings.source_local", authentik: "settings.source_authentik" };
+
 function canWrite() {
   const info = getCurrentUserInfo();
   return info && (info.role === "admin" || info.role === "user");
@@ -36,6 +46,8 @@ export async function renderSettings(container) {
   const writable = canWrite();
   const admin = isAdmin();
   const initial = (user.subject || "?").slice(0, 1).toUpperCase();
+  const roleLabel = user.role && ROLE_LABEL_KEYS[user.role] ? t(ROLE_LABEL_KEYS[user.role]) : t("settings.unknown_role");
+  const sourceLabel = user.source && SOURCE_LABEL_KEYS[user.source] ? t(SOURCE_LABEL_KEYS[user.source]) : "";
 
   container.innerHTML = `
     <div class="page">
@@ -45,8 +57,8 @@ export async function renderSettings(container) {
           <div class="user-avatar" id="account-avatar">${escapeHtml(initial)}</div>
           <div>
             <div style="font-weight:600;">${escapeHtml(user.subject || t("settings.unknown_user"))}</div>
-            <div class="muted" style="font-size: var(--font-size-sm); text-transform: capitalize;">
-              ${escapeHtml(user.role || t("settings.unknown_role"))} · ${escapeHtml(user.source || "")}
+            <div class="muted" style="font-size: var(--font-size-sm);">
+              ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)}
             </div>
           </div>
         </div>

@@ -1,4 +1,5 @@
 import { CONFIG } from "./config.js";
+import { t } from "./i18n.js";
 
 const TOKEN_KEY = "hs_token";
 const SOURCE_KEY = "hs_auth_source"; // "local" | "authentik"
@@ -159,7 +160,15 @@ export async function login(username, password) {
   });
 
   if (!resp.ok) {
-    let detail = "Login failed";
+    // The real `detail` text below, when the backend sends one (e.g. a
+    // bad password, or auth_service/rate_limit.py's lockout message),
+    // is backend-produced and stays English-only regardless of locale
+    // — a known, documented gap (same category as household/frontend's
+    // own i18n round: translating it would need real backend error
+    // codes, not just a frontend string lookup). This fallback is the
+    // one piece that IS fixable client-side: it's only ever used if the
+    // response body can't even be parsed as JSON.
+    let detail = t("login.failed");
     try {
       detail = (await resp.json()).detail || detail;
     } catch {

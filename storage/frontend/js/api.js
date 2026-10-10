@@ -1,5 +1,6 @@
 import { getToken, clearToken, getAuthSource, tryRefreshAuthentikToken } from "./auth.js";
 import { showToast } from "./toast.js";
+import { t } from "./i18n.js";
 
 class ApiError extends Error {
   constructor(message, status) {
@@ -24,7 +25,7 @@ async function request(url, options = {}) {
   try {
     resp = await fetch(url, { ...options, headers });
   } catch (err) {
-    if (!silent) showToast("Network error — is the server reachable?", "danger");
+    if (!silent) showToast(t("api.network_error"), "danger");
     throw new ApiError(err.message, 0);
   }
 
@@ -46,7 +47,7 @@ async function request(url, options = {}) {
     // reload also guarantees any module-level cache gets dropped along
     // with the now-cleared token.
     window.location.assign("/login");
-    throw new ApiError("Session expired", 401);
+    throw new ApiError(t("api.session_expired"), 401);
   }
 
   if (resp.status === 204) {
@@ -57,15 +58,20 @@ async function request(url, options = {}) {
   const data = contentType.includes("application/json") ? await resp.json() : await resp.blob();
 
   if (!resp.ok) {
-    const message = (data && data.detail) || `Request failed (${resp.status})`;
+    // `data.detail` is a backend-produced message, not run through this
+    // frontend's own t() — it's plain English either way for now (same
+    // gap household/frontend's own i18n round left in its backend's
+    // HTTPException details), so it's shown as-is rather than mixed
+    // with a mistranslated fallback.
+    const message = (data && data.detail) || t("api.request_failed");
     if (!silent) {
       if (resp.status === 403) {
-        showToast("You don't have permission to do that", "warning");
+        showToast(t("api.forbidden"), "warning");
       } else {
-        showToast(typeof message === "string" ? message : "Request failed", "danger");
+        showToast(typeof message === "string" ? message : t("api.request_failed"), "danger");
       }
     }
-    throw new ApiError(typeof message === "string" ? message : "Request failed", resp.status);
+    throw new ApiError(typeof message === "string" ? message : t("api.request_failed"), resp.status);
   }
 
   return data;

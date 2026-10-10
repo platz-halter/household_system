@@ -2,11 +2,20 @@ import { getStoredTheme, applyTheme } from "./theme.js";
 import { handleAuthentikCallback, warmGroupRoleMap } from "./auth.js";
 import { startRouter } from "./router.js";
 import { showToast } from "./toast.js";
+import { t, applyStaticTranslations } from "./i18n.js";
 
 // index.html's inline head script already applies the theme before first
 // paint to avoid a flash; this just keeps the two in sync in case the
 // stored value changes some other way.
 applyTheme(getStoredTheme());
+
+// i18n.js's own module-level code (imported transitively by many modules
+// already loaded above) has already resolved a locale and set <html
+// lang> by this point — this just applies it to the static chrome
+// (topbar/bottom-nav labels) that lives in index.html rather than being
+// rendered by any page module.
+document.title = t("app.title");
+applyStaticTranslations();
 
 async function boot() {
   // Cheap no-op unless the URL is actually an Authentik callback
@@ -17,7 +26,7 @@ async function boot() {
   const loggedIn = await handleAuthentikCallback();
 
   if (hadCallback && !loggedIn) {
-    showToast("Login with Authentik failed", "danger");
+    showToast(t("login.authentik_callback_failed"), "danger");
   }
   // Not navigate() — the router's click/popstate listeners aren't
   // attached yet, and startRouter()'s own initial render below would

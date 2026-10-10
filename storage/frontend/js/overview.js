@@ -4,6 +4,7 @@ import { icons } from "./icons.js";
 import { getCurrentUserInfo } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
+import { t } from "./i18n.js";
 
 const PAGE_SIZE = 20;
 
@@ -58,7 +59,7 @@ function quantityLabel(item) {
   if (item.quantity_type === "countable") {
     return `${item.quantity ?? 0}×`;
   }
-  return item.quantity_note || "uncountable";
+  return item.quantity_note || t("overview.uncountable");
 }
 
 function locationLabel(item) {
@@ -72,48 +73,48 @@ export async function renderOverview(container) {
       <div class="stack" style="margin-bottom: var(--space-3);">
         <div class="search-bar">
           ${icons.search}
-          <input type="search" id="search-input" placeholder="Search items…" value="${escapeAttr(state.q)}" />
+          <input type="search" id="search-input" placeholder="${escapeAttr(t("overview.search_placeholder"))}" value="${escapeAttr(state.q)}" />
         </div>
         <div class="row">
-          <button class="btn grow" id="filter-toggle">${icons.filter}<span>Filter</span></button>
+          <button class="btn grow" id="filter-toggle">${icons.filter}<span>${escapeHtml(t("overview.filter_btn"))}</span></button>
           <select class="select" id="sort-select" style="flex: 1;">
-            <option value="name-asc">Name (A–Z)</option>
-            <option value="name-desc">Name (Z–A)</option>
-            <option value="quantity-asc">Quantity (low–high)</option>
-            <option value="quantity-desc">Quantity (high–low)</option>
-            <option value="updated_at-desc">Recently updated</option>
-            <option value="created_at-desc">Newest first</option>
+            <option value="name-asc">${escapeHtml(t("overview.sort_name_asc"))}</option>
+            <option value="name-desc">${escapeHtml(t("overview.sort_name_desc"))}</option>
+            <option value="quantity-asc">${escapeHtml(t("overview.sort_qty_asc"))}</option>
+            <option value="quantity-desc">${escapeHtml(t("overview.sort_qty_desc"))}</option>
+            <option value="updated_at-desc">${escapeHtml(t("overview.sort_updated"))}</option>
+            <option value="created_at-desc">${escapeHtml(t("overview.sort_created"))}</option>
           </select>
-          <button class="btn btn-icon" id="select-toggle" aria-label="Select items" title="Select items">${icons.checklist}</button>
+          <button class="btn btn-icon" id="select-toggle" aria-label="${escapeAttr(t("overview.select_items_aria"))}" title="${escapeAttr(t("overview.select_items_aria"))}">${icons.checklist}</button>
         </div>
         <div class="filter-panel hidden" id="filter-panel">
           <div class="field-row">
             <div class="field">
-              <label for="filter-room">Room</label>
-              <select class="select" id="filter-room"><option value="">Any</option></select>
+              <label for="filter-room">${escapeHtml(t("overview.room_label"))}</label>
+              <select class="select" id="filter-room"><option value="">${escapeHtml(t("overview.any"))}</option></select>
             </div>
             <div class="field">
-              <label>Quantity</label>
+              <label>${escapeHtml(t("overview.quantity_label"))}</label>
               <div class="row">
-                <input class="input" type="number" min="0" id="filter-min-qty" placeholder="Min" value="${escapeAttr(state.minQuantity)}" />
-                <input class="input" type="number" min="0" id="filter-max-qty" placeholder="Max" value="${escapeAttr(state.maxQuantity)}" />
+                <input class="input" type="number" min="0" id="filter-min-qty" placeholder="${escapeAttr(t("overview.min_placeholder"))}" value="${escapeAttr(state.minQuantity)}" />
+                <input class="input" type="number" min="0" id="filter-max-qty" placeholder="${escapeAttr(t("overview.max_placeholder"))}" value="${escapeAttr(state.maxQuantity)}" />
               </div>
             </div>
           </div>
           <div class="field-row">
             <div class="field">
-              <label>Shelf</label>
+              <label>${escapeHtml(t("overview.shelf_label"))}</label>
               <button type="button" class="btn btn-block" id="filter-shelf-btn" style="justify-content: space-between;">
-                <span id="filter-shelf-label">Any</span>
+                <span id="filter-shelf-label">${escapeHtml(t("overview.any"))}</span>
                 ${icons.chevronRight}
               </button>
             </div>
             <div class="field">
-              <label for="filter-level">Shelf level</label>
-              <input class="input" type="number" id="filter-level" placeholder="Any" value="${escapeAttr(state.level)}" />
+              <label for="filter-level">${escapeHtml(t("overview.level_label"))}</label>
+              <input class="input" type="number" id="filter-level" placeholder="${escapeAttr(t("overview.any"))}" value="${escapeAttr(state.level)}" />
             </div>
           </div>
-          <button class="btn" id="filter-clear">Clear filters</button>
+          <button class="btn" id="filter-clear">${escapeHtml(t("overview.clear_filters_btn"))}</button>
         </div>
       </div>
 
@@ -121,7 +122,7 @@ export async function renderOverview(container) {
       <div id="pagination-root"></div>
     </div>
     <div id="bulk-bar-root"></div>
-    <button class="fab" id="add-item-fab" aria-label="Add item">${icons.plus}</button>
+    <button class="fab" id="add-item-fab" aria-label="${escapeAttr(t("overview.add_item_aria"))}">${icons.plus}</button>
   `;
 
   const searchInput = container.querySelector("#search-input");
@@ -188,7 +189,7 @@ export async function renderOverview(container) {
     currentShelves = [...new Set(relevant.map((l) => l.shelf).filter(Boolean))].sort();
 
     fillSelect(roomSelect, rooms, state.room);
-    shelfLabel.textContent = state.shelf || "Any";
+    shelfLabel.textContent = state.shelf || t("overview.any");
   }
 
   function fillSelect(selectEl, values, selected) {
@@ -220,7 +221,7 @@ export async function renderOverview(container) {
       selected: state.shelf,
       onSelect: (shelf) => {
         state.shelf = shelf;
-        shelfLabel.textContent = shelf || "Any";
+        shelfLabel.textContent = shelf || t("overview.any");
         state.offset = 0;
         refreshItems(container, selection);
       },
@@ -299,7 +300,7 @@ async function refreshItems(container, selection) {
     page = await api.get(`${CONFIG.STORAGE_BASE}/items?${buildQuery()}`);
   } catch {
     cancelSkeleton();
-    grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">Couldn't load items. Pull down to retry.</div>`;
+    grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${escapeHtml(t("overview.couldnt_load_items"))}</div>`;
     return;
   }
   cancelSkeleton();
@@ -320,7 +321,7 @@ function renderGrid(container, selection) {
   if (!grid) return;
 
   if (currentItems.length === 0) {
-    grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${icons.box}<p style="margin-top: var(--space-2);">No items found</p></div>`;
+    grid.innerHTML = `<div class="empty-state" style="grid-column: 1/-1;">${icons.box}<p style="margin-top: var(--space-2);">${escapeHtml(t("overview.no_items_found"))}</p></div>`;
   } else {
     grid.innerHTML = "";
     currentItems.forEach((item) => grid.appendChild(renderItemCard(item, container, selection)));
@@ -427,10 +428,10 @@ function renderBulkBar(container, selection) {
   const count = selection.ids.size;
   root.innerHTML = `
     <div class="bulk-bar">
-      <span class="bulk-bar-count">${count} selected</span>
-      <button class="btn btn-icon" id="bulk-cancel" aria-label="Cancel selection">${icons.close}</button>
-      <button class="btn grow" id="bulk-edit-btn" ${count === 0 ? "disabled" : ""}>Edit</button>
-      <button class="btn btn-danger grow" id="bulk-delete-btn" ${count === 0 ? "disabled" : ""}>${icons.trash}<span>Delete</span></button>
+      <span class="bulk-bar-count">${escapeHtml(t("overview.selected_count", { n: count }))}</span>
+      <button class="btn btn-icon" id="bulk-cancel" aria-label="${escapeAttr(t("overview.cancel_selection_aria"))}">${icons.close}</button>
+      <button class="btn grow" id="bulk-edit-btn" ${count === 0 ? "disabled" : ""}>${escapeHtml(t("overview.bulk_edit_btn"))}</button>
+      <button class="btn btn-danger grow" id="bulk-delete-btn" ${count === 0 ? "disabled" : ""}>${icons.trash}<span>${escapeHtml(t("common.delete"))}</span></button>
     </div>
   `;
 
@@ -448,9 +449,9 @@ function renderBulkBar(container, selection) {
 
   root.querySelector("#bulk-delete-btn").addEventListener("click", async () => {
     const ok = await showConfirmDialog({
-      title: "Delete items",
-      message: `Delete ${count} item${count === 1 ? "" : "s"}? This can't be undone.`,
-      confirmLabel: "Delete",
+      title: t("overview.delete_items_title"),
+      message: t("overview.delete_items_message", { n: count, count }),
+      confirmLabel: t("common.delete"),
       danger: true,
     });
     if (!ok) return;
@@ -458,7 +459,7 @@ function renderBulkBar(container, selection) {
       const result = await api.post(`${CONFIG.STORAGE_BASE}/items/bulk-delete`, {
         item_ids: [...selection.ids],
       });
-      showToast(`Deleted ${result.deleted} item${result.deleted === 1 ? "" : "s"}`, "success");
+      showToast(t("overview.deleted_items_toast", { n: result.deleted, count: result.deleted }), "success");
       selection.mode = false;
       selection.ids.clear();
       container.querySelector("#select-toggle").classList.remove("btn-primary");
@@ -472,51 +473,51 @@ function renderBulkBar(container, selection) {
 
 function openBulkEditModal(container, selection) {
   const count = selection.ids.size;
-  const { body, close } = openModalShell(`Edit ${count} item${count === 1 ? "" : "s"}`);
+  const { body, close } = openModalShell(t("overview.bulk_edit_title", { n: count, count }));
 
   body.innerHTML = `
     <div class="stack">
       <div class="field">
-        <label class="row"><input type="checkbox" id="bulk-set-location" /> <span>Change location</span></label>
+        <label class="row"><input type="checkbox" id="bulk-set-location" /> <span>${escapeHtml(t("overview.change_location_label"))}</span></label>
         <div class="field-row" id="bulk-location-fields" style="margin-top: var(--space-2);">
           <div class="field">
-            <label for="bulk-room">Room</label>
+            <label for="bulk-room">${escapeHtml(t("overview.room_label"))}</label>
             <input class="input" id="bulk-room" />
           </div>
           <div class="field">
-            <label for="bulk-level">Level</label>
+            <label for="bulk-level">${escapeHtml(t("overview.level_label"))}</label>
             <input class="input" id="bulk-level" />
           </div>
         </div>
         <div class="field" id="bulk-shelf-field">
-          <label for="bulk-shelf">Shelf</label>
+          <label for="bulk-shelf">${escapeHtml(t("overview.shelf_label"))}</label>
           <input class="input" id="bulk-shelf" />
         </div>
       </div>
 
       <div class="field">
-        <label class="row"><input type="checkbox" id="bulk-set-quantity" /> <span>Change quantity</span></label>
+        <label class="row"><input type="checkbox" id="bulk-set-quantity" /> <span>${escapeHtml(t("overview.change_quantity_label"))}</span></label>
         <div id="bulk-quantity-fields" style="margin-top: var(--space-2);">
           <div class="field">
-            <label for="bulk-qty-type">Quantity type</label>
+            <label for="bulk-qty-type">${escapeHtml(t("overview.quantity_type_label"))}</label>
             <select class="select" id="bulk-qty-type">
-              <option value="countable">Countable</option>
-              <option value="uncountable">Uncountable</option>
+              <option value="countable">${escapeHtml(t("overview.countable_option"))}</option>
+              <option value="uncountable">${escapeHtml(t("overview.uncountable_option"))}</option>
             </select>
           </div>
           <div class="field" id="bulk-qty-countable-wrap">
-            <label for="bulk-quantity">Quantity</label>
+            <label for="bulk-quantity">${escapeHtml(t("overview.quantity_label"))}</label>
             <input class="input" type="number" min="0" id="bulk-quantity" />
           </div>
           <div class="field hidden" id="bulk-qty-uncountable-wrap">
-            <label for="bulk-qty-note">Amount note</label>
-            <input class="input" id="bulk-qty-note" placeholder="e.g. half bag" />
+            <label for="bulk-qty-note">${escapeHtml(t("overview.amount_note_label"))}</label>
+            <input class="input" id="bulk-qty-note" placeholder="${escapeAttr(t("overview.amount_note_placeholder"))}" />
           </div>
         </div>
       </div>
     </div>
     <div class="modal-footer">
-      <button class="btn btn-primary grow" id="bulk-save-btn">Apply to ${count} item${count === 1 ? "" : "s"}</button>
+      <button class="btn btn-primary grow" id="bulk-save-btn">${escapeHtml(t("overview.apply_to_items_btn", { n: count, count }))}</button>
     </div>
   `;
 
@@ -561,12 +562,12 @@ function openBulkEditModal(container, selection) {
     const setQuantity = setQuantityCheckbox.checked;
 
     if (!setLocation && !setQuantity) {
-      showToast("Choose at least one thing to change", "warning");
+      showToast(t("overview.choose_at_least_one_warning"), "warning");
       return;
     }
     const room = body.querySelector("#bulk-room").value.trim();
     if (setLocation && !room) {
-      showToast("Room is required to change location", "warning");
+      showToast(t("overview.room_required_warning"), "warning");
       return;
     }
 
@@ -589,7 +590,7 @@ function openBulkEditModal(container, selection) {
 
     try {
       const result = await api.patch(`${CONFIG.STORAGE_BASE}/items/bulk`, payload);
-      showToast(`Updated ${result.updated} item${result.updated === 1 ? "" : "s"}`, "success");
+      showToast(t("overview.updated_items_toast", { n: result.updated, count: result.updated }), "success");
       selection.mode = false;
       selection.ids.clear();
       container.querySelector("#select-toggle").classList.remove("btn-primary");
@@ -624,7 +625,7 @@ function renderPagination(root, container, selection) {
 
   const label = document.createElement("span");
   label.className = "page-label";
-  label.textContent = `Page ${currentPage} of ${totalPages}`;
+  label.textContent = t("overview.page_label", { current: currentPage, total: totalPages });
 
   const next = document.createElement("button");
   next.className = "btn btn-icon";
@@ -647,11 +648,11 @@ function renderPagination(root, container, selection) {
 // list, so this list has no inherent size cap the way Room's does; a
 // search box keeps it usable on mobile regardless of how long it gets.
 function openShelfPickerModal({ shelves, selected, onSelect }) {
-  const { body, close } = openModalShell("Filter by shelf");
+  const { body, close } = openModalShell(t("overview.filter_shelf_modal_title"));
   body.innerHTML = `
     <div class="search-bar" style="margin-bottom: var(--space-3);">
       ${icons.search}
-      <input type="search" id="sp-search" placeholder="Search shelves…" />
+      <input type="search" id="sp-search" placeholder="${escapeAttr(t("overview.search_shelves_placeholder"))}" />
     </div>
     <div id="sp-list" class="stack" style="max-height: 55vh; overflow-y: auto;"></div>
   `;
@@ -671,7 +672,7 @@ function openShelfPickerModal({ shelves, selected, onSelect }) {
     const filtered = q ? shelves.filter((s) => s.toLowerCase().includes(q)) : shelves;
     listRoot.innerHTML = "";
 
-    const anyRow = pickerRow("Any", !selected);
+    const anyRow = pickerRow(t("overview.any"), !selected);
     anyRow.addEventListener("click", () => {
       onSelect("");
       close();
@@ -681,7 +682,7 @@ function openShelfPickerModal({ shelves, selected, onSelect }) {
     if (filtered.length === 0) {
       const empty = document.createElement("div");
       empty.className = "empty-state";
-      empty.textContent = "No shelves match";
+      empty.textContent = t("overview.no_shelves_match");
       listRoot.appendChild(empty);
       return;
     }
@@ -713,7 +714,7 @@ function openModalShell(titleText) {
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2>${escapeHtml(titleText)}</h2>
-        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="Close">${icons.close}</button>
+        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeAttr(t("common.close"))}">${icons.close}</button>
       </div>
       <div id="modal-body"></div>
     </div>
@@ -740,7 +741,7 @@ function openLightbox(src, alt) {
   const overlay = document.createElement("div");
   overlay.className = "lightbox-overlay";
   overlay.innerHTML = `
-    <button class="lightbox-close" aria-label="Close">${icons.close}</button>
+    <button class="lightbox-close" aria-label="${escapeAttr(t("overview.lightbox_close_aria"))}">${icons.close}</button>
     <img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" />
   `;
   const close = () => overlay.remove();
@@ -755,36 +756,36 @@ function itemFormHtml(item = {}) {
   return `
     <div class="stack">
       <div class="field">
-        <label for="f-name">Name</label>
+        <label for="f-name">${escapeHtml(t("overview.name_label"))}</label>
         <input class="input" id="f-name" value="${escapeAttr(item.name || "")}" required />
       </div>
       <div class="field">
-        <label for="f-description">Description</label>
+        <label for="f-description">${escapeHtml(t("overview.description_label"))}</label>
         <textarea class="input" id="f-description" rows="2">${escapeHtml(item.description || "")}</textarea>
       </div>
       <div class="field">
-        <label for="f-aliases">Aliases (comma separated)</label>
+        <label for="f-aliases">${escapeHtml(t("overview.aliases_label"))}</label>
         <input class="input" id="f-aliases" value="${escapeAttr((item.aliases || []).join(", "))}" />
       </div>
       <div class="field">
-        <label for="f-qty-type">Quantity type</label>
+        <label for="f-qty-type">${escapeHtml(t("overview.quantity_type_label"))}</label>
         <select class="select" id="f-qty-type">
-          <option value="countable" ${item.quantity_type !== "uncountable" ? "selected" : ""}>Countable</option>
-          <option value="uncountable" ${item.quantity_type === "uncountable" ? "selected" : ""}>Uncountable</option>
+          <option value="countable" ${item.quantity_type !== "uncountable" ? "selected" : ""}>${escapeHtml(t("overview.countable_option"))}</option>
+          <option value="uncountable" ${item.quantity_type === "uncountable" ? "selected" : ""}>${escapeHtml(t("overview.uncountable_option"))}</option>
         </select>
       </div>
       <div class="field" id="f-qty-countable-wrap">
-        <label for="f-quantity">Quantity</label>
+        <label for="f-quantity">${escapeHtml(t("overview.quantity_label"))}</label>
         <input class="input" type="number" min="0" id="f-quantity" value="${item.quantity ?? ""}" />
       </div>
       <div class="field" id="f-qty-uncountable-wrap">
-        <label for="f-qty-note">Amount note</label>
-        <input class="input" id="f-qty-note" placeholder="e.g. half bag" value="${escapeAttr(item.quantity_note || "")}" />
+        <label for="f-qty-note">${escapeHtml(t("overview.amount_note_label"))}</label>
+        <input class="input" id="f-qty-note" placeholder="${escapeAttr(t("overview.amount_note_placeholder"))}" value="${escapeAttr(item.quantity_note || "")}" />
       </div>
       <div class="field">
-        <label for="f-room">Room</label>
+        <label for="f-room">${escapeHtml(t("overview.room_label"))}</label>
         <select class="select" id="f-room">
-          <option value="">No room set</option>
+          <option value="">${escapeHtml(t("overview.no_room_set_option"))}</option>
           ${(roomsCache || [])
             .map(
               (r) =>
@@ -792,20 +793,20 @@ function itemFormHtml(item = {}) {
             )
             .join("")}
         </select>
-        ${(roomsCache || []).length === 0 ? `<span class="muted" style="font-size: var(--font-size-xs);">No rooms yet — add one in Settings → Manage rooms.</span>` : ""}
+        ${(roomsCache || []).length === 0 ? `<span class="muted" style="font-size: var(--font-size-xs);">${escapeHtml(t("overview.no_rooms_yet_note"))}</span>` : ""}
       </div>
       <div class="field-row">
         <div class="field">
-          <label for="f-shelf">Shelf</label>
+          <label for="f-shelf">${escapeHtml(t("overview.shelf_label"))}</label>
           <input class="input" id="f-shelf" value="${escapeAttr(loc.shelf || "")}" />
         </div>
         <div class="field">
-          <label for="f-level">Shelf level</label>
+          <label for="f-level">${escapeHtml(t("overview.level_label"))}</label>
           <input class="input" id="f-level" value="${escapeAttr(loc.level || "")}" />
         </div>
       </div>
       <div class="field">
-        <label for="f-image">Photo</label>
+        <label for="f-image">${escapeHtml(t("overview.photo_label"))}</label>
         <input class="input" type="file" id="f-image" accept="image/png,image/jpeg,image/webp" />
       </div>
     </div>
@@ -865,8 +866,8 @@ function openItemModal(item, container) {
     ${
       writable
         ? `<div class="modal-footer">
-             <button class="btn btn-danger" id="delete-btn">${icons.trash}<span>Delete</span></button>
-             <button class="btn btn-primary grow" id="save-btn">Save changes</button>
+             <button class="btn btn-danger" id="delete-btn">${icons.trash}<span>${escapeHtml(t("common.delete"))}</span></button>
+             <button class="btn btn-primary grow" id="save-btn">${escapeHtml(t("overview.save_changes_btn"))}</button>
            </div>`
         : ""
     }
@@ -893,7 +894,7 @@ function openItemModal(item, container) {
   body.querySelector("#save-btn").addEventListener("click", async () => {
     const { payload, imageFile } = readItemForm(body);
     if (!payload.name) {
-      showToast("Name is required", "warning");
+      showToast(t("common.name_required"), "warning");
       return;
     }
     try {
@@ -904,7 +905,7 @@ function openItemModal(item, container) {
         await api.postForm(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`, fd);
         invalidateImageUrl(`${CONFIG.STORAGE_BASE}/items/${item.id}/image`);
       }
-      showToast("Item updated", "success");
+      showToast(t("overview.item_updated_toast"), "success");
       close();
       refreshItems(container);
     } catch {
@@ -914,15 +915,15 @@ function openItemModal(item, container) {
 
   body.querySelector("#delete-btn").addEventListener("click", async () => {
     const ok = await showConfirmDialog({
-      title: "Delete item",
-      message: `Delete "${item.name}"? This can't be undone.`,
-      confirmLabel: "Delete",
+      title: t("overview.delete_item_title"),
+      message: t("overview.delete_item_message", { name: item.name }),
+      confirmLabel: t("common.delete"),
       danger: true,
     });
     if (!ok) return;
     try {
       await api.del(`${CONFIG.STORAGE_BASE}/items/${item.id}`);
-      showToast("Item deleted", "success");
+      showToast(t("overview.item_deleted_toast"), "success");
       close();
       refreshItems(container);
     } catch {
@@ -935,22 +936,22 @@ function readOnlyItemHtml(item) {
   return `
     <div class="stack">
       ${item.description ? `<p>${escapeHtml(item.description)}</p>` : ""}
-      <div class="row-between"><span class="muted">Quantity</span><span>${escapeHtml(quantityLabel(item))}</span></div>
-      ${locationLabel(item) ? `<div class="row-between"><span class="muted">Location</span><span>${escapeHtml(locationLabel(item))}</span></div>` : ""}
+      <div class="row-between"><span class="muted">${escapeHtml(t("overview.quantity_label"))}</span><span>${escapeHtml(quantityLabel(item))}</span></div>
+      ${locationLabel(item) ? `<div class="row-between"><span class="muted">${escapeHtml(t("overview.location_label"))}</span><span>${escapeHtml(locationLabel(item))}</span></div>` : ""}
       ${item.aliases && item.aliases.length ? `<div class="chip-row">${item.aliases.map((a) => `<span class="chip">${escapeHtml(a)}</span>`).join("")}</div>` : ""}
     </div>
   `;
 }
 
 function openAddModal(container) {
-  const { body, close } = openModalShell("Add item");
+  const { body, close } = openModalShell(t("overview.add_item_modal_title"));
 
   function renderForm() {
     body.innerHTML = `
       ${itemFormHtml()}
       <div class="modal-footer">
-        <button class="btn grow" id="save-another-btn">Save &amp; add another</button>
-        <button class="btn btn-primary grow" id="save-close-btn">Save &amp; close</button>
+        <button class="btn grow" id="save-another-btn">${escapeHtml(t("overview.save_add_another_btn"))}</button>
+        <button class="btn btn-primary grow" id="save-close-btn">${escapeHtml(t("overview.save_close_btn"))}</button>
       </div>
     `;
     wireQtyTypeToggle(body);
@@ -962,7 +963,7 @@ function openAddModal(container) {
   async function submit(addAnother) {
     const { payload, imageFile } = readItemForm(body);
     if (!payload.name) {
-      showToast("Name is required", "warning");
+      showToast(t("common.name_required"), "warning");
       return;
     }
     // Remember room/level/shelf for the "add another" flow — bulk-adding
@@ -976,7 +977,7 @@ function openAddModal(container) {
         fd.append("file", imageFile);
         await api.postForm(`${CONFIG.STORAGE_BASE}/items/${created.id}/image`, fd);
       }
-      showToast(`Added "${created.name}"`, "success");
+      showToast(t("common.added_toast", { name: created.name }), "success");
 
       if (addAnother) {
         renderForm();
