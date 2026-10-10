@@ -19,10 +19,16 @@
   <link rel="stylesheet" href="/css/components.css" />
   <script>
     // Apply the stored theme before first paint, so there's no flash of
-    // the default theme on load.
+    // the default theme on load — also syncs <meta name="theme-color">
+    // (what Android actually paints the status bar with, independently
+    // of this page's own content) to the theme's real background color,
+    // so dark mode doesn't start with a plain white status bar before
+    // theme.js's own applyTheme() gets a chance to run.
     (function () {
       var t = localStorage.getItem("hs-theme") || "light";
       document.documentElement.setAttribute("data-theme", t);
+      var bg = getComputedStyle(document.documentElement).getPropertyValue("--color-bg").trim();
+      if (bg) document.querySelector('meta[name="theme-color"]').setAttribute("content", bg);
     })();
   </script>
 </head>

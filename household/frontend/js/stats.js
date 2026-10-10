@@ -1,6 +1,10 @@
 import { CONFIG } from "./config.js";
 import { api, fetchImageUrl } from "./api.js";
-import { escapeHtml, initials, timeAgo, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
+import { getCurrentUserInfo } from "./auth.js";
+import { icons } from "./icons.js";
+import { showToast } from "./toast.js";
+import { showConfirmDialog } from "./confirmDialog.js";
+import { escapeHtml, escapeAttr, initials, timeAgo, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
 import { t, getLocale } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -8,6 +12,11 @@ const HB = CONFIG.HOUSEHOLD_BASE;
 const state = { period: "week", scope: "me" };
 let meCache = null;
 let settingsCache = null;
+
+function isAdmin() {
+  const info = getCurrentUserInfo();
+  return Boolean(info && info.role === "admin");
+}
 
 async function getSettings() {
   if (!settingsCache) {
@@ -156,6 +165,12 @@ async function loadRecent(container) {
       root.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.no_activity_yet"))}</div>`;
       return;
     }
+    // Admin-only, and only for a direct task completion (source ==
+    // "task") — a todo completion also means a completed Board item,
+    // and undoing just the points here would leave that stuck showing
+    // completed with nothing to show for it (see main.delete_points_
+    // entry's own scoping).
+    const canRemove = isAdmin();
     root.innerHTML = entries
       .map((e) => {
         const label = e.task_name || e.todo_title || (e.source === "task" ? t("stats.deleted_task") : t("stats.deleted_todo"));
@@ -167,10 +182,36 @@ async function loadRecent(container) {
               <div class="list-row-meta"><span>${timeAgo(e.earned_at)}</span></div>
             </div>
             <div class="list-row-points"><span>+${e.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
+            ${
+              canRemove && e.source === "task"
+                ? `<button class="btn btn-icon" data-remove-entry="${e.id}" aria-label="${escapeAttr(t("stats.remove_entry_aria", { label }))}">${icons.trash}</button>`
+                : ""
+            }
           </div>`;
       })
       .join("");
     hydrateAvatars(root);
+    if (canRemove) {
+      root.querySelectorAll("[data-remove-entry]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const ok = await showConfirmDialog({
+            title: t("stats.remove_entry_title"),
+            message: t("stats.remove_entry_message"),
+            confirmLabel: t("common.delete"),
+            danger: true,
+          });
+          if (!ok) return;
+          try {
+            await api.del(`${HB}/points/${btn.dataset.removeEntry}`);
+            showToast(t("stats.remove_entry_toast"), "success");
+            loadRecent(container);
+            loadLeaderboard(container);
+          } catch {
+            /* api.js already showed a toast */
+          }
+        });
+      });
+    }
   } catch {
     cancelSkeleton();
     root.innerHTML = `<div class="empty-state">${escapeHtml(t("stats.couldnt_load_recent"))}</div>`;

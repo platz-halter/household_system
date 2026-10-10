@@ -14,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from household_service import crud, scheduler
 from household_service import reports as reports_pdf
-from household_service.models import ReportPeriod, TakeoverStatus, TodoStatus
+from household_service.models import (
+    PointsSource,
+    ReportPeriod,
+    TakeoverStatus,
+    TodoStatus,
+)
 from household_service.schemas import (
     ActivityDay,
     BalancingRunResult,
@@ -324,7 +329,7 @@ async def create_task(
             detail="Only an admin can pin a task to someone",
         )
     try:
-        task = await crud.create_task(db, data)
+        task = await crud.create_task(db, data, creator=await _self(db, user))
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
@@ -647,13 +652,26 @@ async def delete_event_group_run(
 async def delete_task(
     task_id: int,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
+    user: CurrentUser = Depends(can_write),
 ):
     task = await crud.get_task(db, task_id)
     if task is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Task not found"
         )
+    # An admin can delete any task; a plain can_write user can only
+    # delete one they created themselves (user request: self-service
+    # undo for a task someone accidentally added, without needing to
+    # also hand them blanket permission to delete anyone else's). NULL
+    # created_by_id (predates this column) means nobody can self-delete
+    # it — only an admin can.
+    if user.role != "admin":
+        self_user = await _self(db, user)
+        if task.created_by_id != self_user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only an admin, or whoever created this task, can delete it",
+            )
     await crud.delete_task(db, task)
 
 
@@ -1107,6 +1125,31 @@ async def points_recent(
     return [
         PointsEntryOut.from_model(e) for e in await crud.recent_points(db, limit=limit)
     ]
+
+
+@app.delete("/points/{entry_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_points_entry(
+    entry_id: int,
+    db: AsyncSession = Depends(get_db),
+    _user: CurrentUser = Depends(can_admin),
+):
+    entry = await crud.get_points_entry(db, entry_id)
+    if entry is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Points entry not found"
+        )
+    # Scoped to a direct task completion only — a todo completion's
+    # PointsEntry also implies a completed Board item (status/completed_
+    # at/completed_by_id on the TodoItem itself), and reverting that
+    # consistently is a separate, bigger feature this doesn't attempt;
+    # removing just the points here would leave the todo stuck showing
+    # completed with no matching ledger entry.
+    if entry.source != PointsSource.task:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only a direct task completion can be removed this way, not a todo completion",
+        )
+    await crud.delete_points_entry(db, entry)
 
 
 @app.get("/points/activity", response_model=list[ActivityDay])

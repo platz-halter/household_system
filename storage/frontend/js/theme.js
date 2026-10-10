@@ -20,4 +20,23 @@ export function getStoredTheme() {
 export function applyTheme(id) {
   document.documentElement.setAttribute("data-theme", id);
   localStorage.setItem(STORAGE_KEY, id);
+  syncThemeColorMeta();
+}
+
+// <meta name="theme-color"> is what Android actually paints the status
+// bar/notch area with, independently of anything in this page's own
+// layout — index.html's own topbar-safe-area fix only controls the WEB
+// content underneath it. Left at its static index.html value (plain
+// white) regardless of theme, it stayed a bright white strip even in
+// dark mode, clashing with the app's own background right above it
+// (reported as a "white gap" that didn't go away after the layout fix).
+// Reads the CSS variable rather than hardcoding light/dark hex values
+// here too, so this can't drift from tokens.css's own colors. (Same fix
+// as household/frontend's own theme.js — this exact gap, found there
+// first.)
+function syncThemeColorMeta() {
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (!meta) return;
+  const bg = getComputedStyle(document.documentElement).getPropertyValue("--color-bg").trim();
+  if (bg) meta.setAttribute("content", bg);
 }

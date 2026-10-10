@@ -419,6 +419,10 @@ export const de = {
   "stats.deleted_task": "eine gelöschte Aufgabe",
   "stats.deleted_todo": "ein gelöschtes Todo",
   "stats.completed_label": "{name} hat {label} erledigt",
+  "stats.remove_entry_aria": "Diese Erledigung von {label} entfernen",
+  "stats.remove_entry_title": "Diese Erledigung entfernen?",
+  "stats.remove_entry_message": "Dadurch werden die dafür erhaltenen Punkte entfernt. Die Person wird nicht benachrichtigt.",
+  "stats.remove_entry_toast": "Erledigung entfernt",
 
   // --- admin.js -------------------------------------------------------------
   "admin.heading": "Admin-Bereich",

@@ -26,6 +26,11 @@ let categoriesCache = [];
 let tasksCache = [];
 let usersCache = [];
 let eventGroupsCache = [];
+// The current user's own HouseholdUser row — needed to tell whether
+// they're allowed to delete a given task (an admin can delete any
+// task; a plain writable user only one they created themselves, see
+// main.delete_task). Fetched lazily, once, the first time it's needed.
+let meCache = null;
 // Used only to LABEL an event group's "At ..." hour (both the schedule
 // badge on its list row and the create/edit modal's own picker) — the
 // hour itself is stored/interpreted server-side (crud._event_group_due);
@@ -972,6 +977,20 @@ async function openTaskModal(container, writable, task = null) {
   // itself would have nothing to attach to.
   const pinEligible = !task?.is_chain_child;
 
+  // An admin can delete any task; a plain writable user only one they
+  // created themselves (see main.delete_task) — self-service undo for
+  // a task they accidentally added, without a blanket permission to
+  // delete anyone else's. NULL created_by_id (predates this field)
+  // means only an admin can.
+  if (task && !meCache) {
+    try {
+      meCache = await api.get(`${HB}/me`);
+    } catch {
+      meCache = null;
+    }
+  }
+  const canDelete = Boolean(task) && (isAdmin() || (meCache && task.created_by_id === meCache.id));
+
   const { body, close } = openModalShell(task ? t("tasks.edit_task_title") : t("tasks.new_task_title"));
 
   body.innerHTML = `
@@ -1074,7 +1093,7 @@ async function openTaskModal(container, writable, task = null) {
       }
     </div>
     <div class="modal-footer">
-      ${task ? `<button class="btn btn-danger" id="f-delete">${icons.trash}</button>` : ""}
+      ${canDelete ? `<button class="btn btn-danger" id="f-delete">${icons.trash}</button>` : ""}
       <button class="btn btn-primary grow" id="f-save">${escapeHtml(t("common.save"))}</button>
     </div>
   `;
@@ -1165,7 +1184,7 @@ async function openTaskModal(container, writable, task = null) {
     }
   });
 
-  if (task) {
+  if (canDelete) {
     body.querySelector("#f-delete").addEventListener("click", async () => {
       const ok = await showConfirmDialog({
         title: t("tasks.delete_task_title"),

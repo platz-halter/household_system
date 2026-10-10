@@ -163,6 +163,11 @@ class TaskOut(BaseModel):
     # "Always assign to" owner — see Task.pinned_user_id's own docstring.
     pinned_user_id: int | None = None
     pinned_user: HouseholdUserBrief | None = None
+    # Who created this task — NULL for anything created before this
+    # column existed. The frontend uses it to decide whether a non-admin
+    # gets a Delete button on THIS task (see main.delete_task); nothing
+    # else reads it.
+    created_by_id: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -189,6 +194,7 @@ class TaskOut(BaseModel):
                 if task.pinned_user
                 else None
             ),
+            created_by_id=task.created_by_id,
         )
 
 

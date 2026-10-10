@@ -411,6 +411,10 @@ export const en = {
   "stats.deleted_task": "a deleted task",
   "stats.deleted_todo": "a deleted todo",
   "stats.completed_label": "{name} completed {label}",
+  "stats.remove_entry_aria": "Remove this completion of {label}",
+  "stats.remove_entry_title": "Remove this completion?",
+  "stats.remove_entry_message": "This removes the points it earned. The person won't be notified.",
+  "stats.remove_entry_toast": "Completion removed",
 
   // --- admin.js -------------------------------------------------------------
   "admin.heading": "Admin panel",

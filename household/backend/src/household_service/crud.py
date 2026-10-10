@@ -282,7 +282,9 @@ async def _validate_pinned_user(db: AsyncSession, pinned_user_id: int | None) ->
         raise ValueError("a viewer can't be pinned to a task — they can never complete it")
 
 
-async def create_task(db: AsyncSession, data: TaskCreate) -> Task:
+async def create_task(
+    db: AsyncSession, data: TaskCreate, creator: HouseholdUser | None = None
+) -> Task:
     categories = await _resolve_categories(db, data.category_ids)
     await _validate_pinned_user(db, data.pinned_user_id)
     task = Task(
@@ -296,6 +298,7 @@ async def create_task(db: AsyncSession, data: TaskCreate) -> Task:
         ramp_up_enabled=data.ramp_up_enabled,
         ramp_up_bonus_points=data.ramp_up_bonus_points,
         pinned_user_id=data.pinned_user_id,
+        created_by_id=creator.id if creator else None,
         categories=categories,
     )
     db.add(task)
@@ -2631,6 +2634,25 @@ async def recent_points(db: AsyncSession, limit: int = 20) -> list[PointsEntry]:
         _points_entry_query().order_by(PointsEntry.earned_at.desc()).limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def get_points_entry(db: AsyncSession, entry_id: int) -> PointsEntry | None:
+    return await db.get(PointsEntry, entry_id)
+
+
+async def delete_points_entry(db: AsyncSession, entry: PointsEntry) -> None:
+    """Admin-only undo for a mistaken direct task completion (source ==
+    task — see main.delete_points_entry, which rejects a todo-sourced
+    one outright) — removes the points and, since `_completions_today_
+    count`/`doneForToday` are both live COUNT queries over this table,
+    un-marks "done today" too, with nothing else to clean up. Deleting a
+    task- or todo-sourced row either way is always safe on its own: a
+    task has no FK pointing back at a PointsEntry at all, and TodoItem's
+    own completed_at/completed_by_id/status aren't derived from this
+    table, so they're simply left as they are — only relevant for the
+    todo case this function doesn't handle."""
+    await db.delete(entry)
+    await db.commit()
 
 
 async def daily_activity(

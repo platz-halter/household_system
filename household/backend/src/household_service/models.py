@@ -149,6 +149,27 @@ class Task(Base):
     points: Mapped[int] = mapped_column(Integer)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Who created this task — NULL for anything created before this
+    # column existed (not backfilled, same "don't guess" reasoning as
+    # TodoItem.cancelled_at's own docstring). The one thing this is
+    # actually used for: main.delete_task lets a non-admin delete a
+    # task only if they're its creator — a plain `can_write` user can
+    # still edit/pin-badge-view any task, but deleting someone ELSE's
+    # task needs an admin. SET NULL (not CASCADE) on the creator's own
+    # deletion — the task survives, it just stops being anyone's to
+    # self-delete.
+    created_by_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "household_users.id",
+            ondelete="SET NULL",
+            name="fk_tasks_created_by_id_household_users",
+        ),
+        nullable=True,
+    )
+    created_by: Mapped[HouseholdUser | None] = relationship(
+        foreign_keys=[created_by_id]
+    )
+
     # How this task repeats. `weekly` tasks also set `weekdays` (which
     # weekdays, 0=Monday..6=Sunday); `daily`/`monthly`/`manual` tasks
     # leave it null (daily = every day; monthly has no specific weekday;
@@ -209,7 +230,12 @@ class Task(Base):
         ),
         nullable=True,
     )
-    pinned_user: Mapped[HouseholdUser | None] = relationship()
+    # foreign_keys explicit on both this and created_by below — two
+    # separate FK columns from Task into household_users now, which
+    # SQLAlchemy can't disambiguate on its own.
+    pinned_user: Mapped[HouseholdUser | None] = relationship(
+        foreign_keys=[pinned_user_id]
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
