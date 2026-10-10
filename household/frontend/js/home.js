@@ -501,18 +501,15 @@ async function refreshTaskList(container, selection, writable) {
   if (!allTasksCache) {
     const cancelSkeleton = showSkeletonAfterDelay(root, `<div class="skeleton" style="height: 64px;"></div>`);
     try {
-      // A `manual` task has no automatic occurrence of its own at all
-      // — it only ever exists as a todo someone deliberately posted/
-      // triggered (an Event Group root, a chain link, the Board's
-      // "From task" picker) — so unlike every other recurrence, it has
-      // no business sitting in this ad-hoc "tap to complete anytime"
-      // list. Filtered client-side, not server-side: the Board's "From
-      // task" picker, the Event Group root picker, and the chain-link
-      // picker all reuse this exact same GET /tasks endpoint and still
-      // need manual tasks included.
-      allTasksCache = (await api.get(`${HB}/tasks?active=true`)).filter(
-        (task) => task.recurrence !== "manual"
-      );
+      // Manual tasks used to be filtered out here entirely (no automatic
+      // occurrence of their own — see Recurrence.manual) on the theory
+      // that this list is for ad-hoc "tap to complete anytime" tasks.
+      // Now shown instead, now that manual is the default for a new
+      // task (see openTaskModal) — being invisible here made a freshly
+      // created manual task look like it vanished. taskRow() below
+      // still withholds the complete button/selection checkbox for one,
+      // since the backend rejects completing it directly either way.
+      allTasksCache = await api.get(`${HB}/tasks?active=true`);
     } catch {
       cancelSkeleton();
       root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.couldnt_load_tasks"))}</div>`;
@@ -591,6 +588,7 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
 
   const catLabel = task.categories.map((c) => (c.icon ? `${c.icon} ${c.name}` : c.name)).join(" · ");
   const weekdayLabels = WEEKDAY_LABELS();
+  const isManual = task.recurrence === "manual";
   const schedule =
     task.recurrence === "weekly"
       ? task.weekdays && task.weekdays.length
@@ -598,11 +596,22 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
         : t("common.recurrence_weekly")
       : task.recurrence === "monthly"
         ? t("common.recurrence_monthly")
-        : t("common.recurrence_daily");
+        : isManual
+          ? t("tasks.manual_option")
+          : t("common.recurrence_daily");
   const doneToday = doneForToday(task);
+  // A manual task has no automatic occurrence of its own at all — the
+  // backend rejects completing it directly outright, no override (see
+  // crud.complete_task's own docstring: always via whichever todo it
+  // was actually posted/spawned/triggered as). It's still listed here
+  // (home.js's "All tasks" no longer filters it out) so it's not
+  // invisible just because it can't be logged from this particular
+  // screen — just without a complete button, or a selection checkbox
+  // in bulk mode, that would otherwise always fail.
+  const canCompleteHere = writable && !isManual;
 
   row.innerHTML = `
-    ${inSelectMode ? `<div class="list-row-select">${icons.check}</div>` : ""}
+    ${inSelectMode && canCompleteHere ? `<div class="list-row-select">${icons.check}</div>` : ""}
     <div class="list-row-body">
       <div class="list-row-title">${escapeHtml(task.name)}</div>
       <div class="list-row-meta">
@@ -616,7 +625,7 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
     </div>
     <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
     ${
-      writable && !inSelectMode
+      canCompleteHere && !inSelectMode
         ? `<div class="list-row-actions"><button class="btn btn-icon${doneToday ? "" : " btn-primary"}" data-action="complete" aria-label="${escapeAttr(t(doneToday ? "home.complete_again_aria" : "home.complete_aria", { title: task.name }))}">${icons.check}</button></div>`
         : ""
     }
@@ -624,7 +633,7 @@ function taskRow(task, { selection, onToggleSelect, onComplete, writable }) {
 
   row.addEventListener("click", (e) => {
     if (inSelectMode) {
-      onToggleSelect(task.id);
+      if (canCompleteHere) onToggleSelect(task.id);
       return;
     }
     if (e.target.closest('[data-action="complete"]')) {

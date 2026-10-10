@@ -953,7 +953,11 @@ async function initChainLinksSection(body, task, writable) {
 async function openTaskModal(container, writable, task = null) {
   const selectedCats = new Set((task?.categories || []).map((c) => c.id));
   const selectedWeekdays = new Set(task?.weekdays || []);
-  const recurrence = task?.recurrence || "daily";
+  // Manual is the default for a brand-new task (task is null here) — most
+  // new tasks created lately are event-group roots/chain links, which
+  // need manual specifically (see Recurrence.manual's own docstring);
+  // picking daily/weekly/monthly is still one tap away, same as before.
+  const recurrence = task?.recurrence || "manual";
   const weekdayLabels = WEEKDAY_LABELS();
   const pinnable = pinnableUsers(await loadUsers(true));
   const canEditPin = isAdmin();
@@ -999,9 +1003,6 @@ async function openTaskModal(container, writable, task = null) {
           <option value="monthly" ${recurrence === "monthly" ? "selected" : ""}>${escapeHtml(t("common.recurrence_monthly"))}</option>
           <option value="manual" ${recurrence === "manual" ? "selected" : ""}>${escapeHtml(t("tasks.manual_option"))}</option>
         </select>
-        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
-          ${escapeHtml(t("tasks.balancer_note"))}
-        </p>
         <div class="weekday-picker" id="f-weekdays" style="margin-top: var(--space-2); ${recurrence === "weekly" ? "" : "display:none;"}">
           ${weekdayLabels.map((label, i) => `<div class="weekday-pill${selectedWeekdays.has(i) ? " on" : ""}" data-day="${i}">${escapeHtml(label)}</div>`).join("")}
         </div>
