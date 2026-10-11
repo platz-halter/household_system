@@ -56,7 +56,19 @@ class Settings(BaseSettings):
         "https://authentik.pressnet.duckdns.org/application/o/token/"
     )
     authentik_end_session_url: str = "https://authentik.pressnet.duckdns.org/application/o/household-system/end-session/"
-    authentik_scope: str = "openid profile email groups"
+    # offline_access is what actually gets Authentik (and most spec-
+    # compliant OIDC providers) to issue a refresh_token in the first
+    # place — without it, a token response can come back with none at
+    # all, silently turning every access-token expiry into a hard
+    # logout (auth.js's tryRefreshAuthentikToken has nothing to use,
+    # api.js falls straight through to the redirect) regardless of how
+    # correctly the refresh code itself is written. Confirmed as the
+    # actual cause of "sessions time out very quickly": this default
+    # was missing it, and this household has no saved admin-panel
+    # override to compensate. Only affects logins from here on — an
+    # already-issued local token keeps whatever scope it was granted
+    # under until the next login.
+    authentik_scope: str = "openid profile email groups offline_access"
     # Which Authentik group name maps to which app role — used to be a
     # hardcoded dict (shared/auth.py's GROUP_ROLE_MAP) that needed a
     # source edit + rebuild + redeploy to change. Same fallback-until-

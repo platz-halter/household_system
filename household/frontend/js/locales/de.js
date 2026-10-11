@@ -349,10 +349,7 @@ export const de = {
   "tasks.no_chained_tasks_yet": "Noch keine Folgeaufgaben",
   "tasks.remove_label": "Entfernen",
   "tasks.chain_task_removed": "Folgeaufgabe entfernt",
-  "tasks.already_chained_from":
-    '„{name}" ist bereits verkettet von: {parents}. Eine verkettete Aufgabe kann selbst keine weiteren Aufgaben verketten.',
-  "tasks.already_chained_from_other":
-    '„{name}" ist bereits von einer anderen Aufgabe verkettet und kann selbst keine weiteren Aufgaben verketten.',
+  "tasks.already_chained_from": '„{name}" ist bereits verkettet von: {parents}.',
   "tasks.no_eligible_tasks": "Keine zulässigen Aufgaben",
   "tasks.add_chain_task_btn": "Folgeaufgabe hinzufügen…",
   "tasks.choose_chain_task_title": "Folgeaufgabe auswählen",
@@ -373,6 +370,7 @@ export const de = {
     'Wenn „{name}" abgeschlossen wird, wird jede der unten verketteten Aufgaben als Einmalaufgabe auf dem Board erstellt. „Gleiche Person" weist sie direkt der Person zu, die diese Aufgabe gerade abgeschlossen hat; „Andere Person" gibt sie an die laut Ausgleichs-Tool fairste Person, nie an die abschließende Person. Das Auswählen einer Aufgabe unten fügt sie sofort hinzu — es gibt keinen separaten Speicherschritt.',
   "tasks.pick_weekday_weekly_task": "Wähle mindestens einen Wochentag für eine wöchentliche Aufgabe",
   "tasks.task_saved": "Aufgabe gespeichert",
+  "tasks.draft_restored_toast": "Deinen nicht gespeicherten Entwurf von vorhin wiederhergestellt",
   "tasks.delete_task_title": "Aufgabe löschen",
   "tasks.delete_task_message": '„{name}" löschen? Bereits damit verdiente Punkte bleiben erhalten.',
   "tasks.task_deleted": "Aufgabe gelöscht",
@@ -394,6 +392,8 @@ export const de = {
   "eg.nothing_to_create": "Nichts zu erstellen",
   "eg.not_grouped": "Nicht gruppiert",
   "eg.grouped": "Gruppiert",
+  "eg.swap_task_title": "Aufgabe austauschen",
+  "eg.swap_task_aria": "{name} nur für diesen Auslöser gegen eine andere Aufgabe austauschen",
   "eg.created_toast": {
     one: '{n} Aufgabe für „{name}" erstellt',
     other: '{n} Aufgaben für „{name}" erstellt',

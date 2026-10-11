@@ -303,8 +303,22 @@
   stroke-width: 2.2;
 }
 
+/* A flat 112px here, regardless of `.fab-secondary`'s own real position —
+   #app's own padding-bottom already reserves `--bottomnav-height +
+   safe-area-inset-bottom`; what THIS needs to add on top of that is only
+   the clearance from there up to .fab-secondary's own top edge (its
+   `bottom` offset's own `+ var(--space-4)` term, +68px stacking gap,
+   +its own 48px height), plus a bit of breathing room — none of which
+   includes another inset term, since #app's padding already covers
+   that part once. 112px undershot this by a real margin (worked out to
+   148px), which meant the last row or two of a long list could still
+   end up partly behind the secondary FAB — the exact "content hidden
+   under a FAB" failure this class exists to prevent in the first
+   place, just by a few rows instead of all of them. Expressed via the
+   same building blocks .fab-secondary's own `bottom` formula uses, so
+   the two can't quietly drift apart again. */
 .page-dual-fab {
-  padding-bottom: 112px;
+  padding-bottom: calc(68px + 48px + 2 * var(--space-4));
 }
 
 /* .fab/.fab-secondary are `position: fixed`, so they sit over the SAME

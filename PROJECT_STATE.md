@@ -9,9 +9,10 @@ full pre-deploy security pass done — see this file's own entries
 below).
 - 1.2.0 adds **Event Groups**: a named bundle of tasks (e.g. "Dinner")
   that posts all of them to the board in one tap, taking the existing
-  one-level chain cap into account so a `Set the table -> Clear the
-  table` style chain still "just works" as part of the group without
-  any new chaining concept, with a creator-editable per-task opt-out
+  chain-link structure into account (at the time, capped at one level;
+  since lifted — see the eighth round below) so a `Set the table ->
+  Clear the table` style chain still "just works" as part of the group
+  without any new chaining concept, with a creator-editable per-task opt-out
   from being tagged into the group (a chained task is still created,
   just without the group's label). Trigger-time assignment reuses the
   balancer's own fairness pass immediately, rather than waiting for the
@@ -91,6 +92,97 @@ below).
   the behavior and the labels. See "Household service — backend"/"—
   frontend" for the full design, the DST/weekday-crossover correctness
   notes, and live-verification notes.
+- 1.2.0 also picked up an eighth round, a batch of five user-reported
+  items: **(1)** the Tasks page gained a search box plus category
+  filter chips (debounced, mirrors Home's own chip pattern), filtering
+  the already-fetched `tasksCache` client-side rather than re-querying
+  `GET /tasks` per keystroke. **(2)** Event Groups can now have one
+  root **swapped out just for this trigger** without touching the
+  saved group — `POST /event-groups/{id}/trigger` takes an optional
+  `root_task_ids` body (`EventGroupTriggerIn`); `crud.trigger_event_group`
+  gained `override_root_task_ids`, re-validated exactly like the saved
+  roots, falling back to `group.roots` when omitted so a normal trigger
+  (and the next one after a swapped one) is unaffected. The trigger
+  confirm modal's preview re-fetches live after a swap. **(3)** iOS
+  bottom-padding inconsistency between Board/Tasks and Home/Stats
+  (user-reported, not yet resolved — needs real device screenshots;
+  see the live-verification note below) and a storage-frontend gap
+  under the bottom nav on Overview/Settings — **not fixed this round**,
+  flagged rather than guessed at. **(4)** the biggest of the five: the
+  **one-level chain cap from 1.1.0/1.1.0-round-4 is lifted** — chains
+  can now go to any depth (user request: "add chained tasks back to
+  chained tasks while preventing loops"). **(5)** "sessions time out
+  very quickly" root-caused to Authentik's OAuth scope missing
+  `offline_access` — without it Authentik issues no `refresh_token` at
+  all, so every access-token expiry became a hard logout regardless of
+  how correct the refresh-retry code itself was; fixed in
+  `shared/config.py`'s default and this deployment's `.env`/
+  `.env.example` (`AUTHENTIK_SCOPE`). Only affects logins from here on.
+  Also fixed along the way: the New Task draft-autosave (localStorage,
+  so in-progress input survives an accidental close/timeout) wasn't
+  cleared on an explicit cancel, only on successful save — `openModalShell`
+  gained an `onDismiss` callback, fired on the X-button/backdrop-click
+  but not on the caller's own post-save `close()`, so a forced
+  redirect (e.g. that same session-timeout bug) still leaves the draft
+  intact to restore.
+  - **Chain-depth lift, full design**: `create_chain_link`'s old
+    two-sided check (`is_chain_child(parent)` OR `is_chain_parent(child)`)
+    is replaced with a single-parent rule (the new child can't already
+    be chained from something else — `is_chain_child(child_task_id)`,
+    unchanged) plus a real cycle check: the new child can't already be
+    an ANCESTOR of the new parent. `crud._chain_ancestors` walks up one
+    parent-link at a time (single-parent means every task's ancestors
+    form a line, not a tree, so this is a plain walk, not a general
+    graph search) and catches a cycle at any depth, not just the direct
+    `C→A→B`-when-`A→B`-exists case a shallower first attempt missed.
+    Every place that used to assume "at most one level down" now walks
+    the full tree instead: `_spawn_chain_children`/
+    `_spawn_chain_children_on_creation` both recurse into themselves
+    after spawning each direct child (stamping `chain_spawn_handled=True`
+    on each before recursing, so a later direct completion of a
+    mid-chain todo can't double-spawn its own children a second time
+    through the other idempotency key); the new `_todo_descendant_ids`
+    BFS helper replaces single-level lookups in `cancel_todo` (deleting
+    an open parent must not let Postgres's `spawned_by_todo_id` cascade
+    take an already-completed grandchild down with it) and
+    `_hard_delete_todos`; `preview_event_group` and
+    `_event_group_run_cleanup_candidates` both walk the full
+    chain-descendant tree per root instead of one level. Frontend: the
+    Tasks-page chain-link editor no longer blocks a chain-child task
+    from having its own chain-link picker (the old `renderCappedNotice`
+    early-return is gone — a chain-child task now gets the normal
+    picker, plus an informational "chained from: X" note above it); the
+    picker's eligible-candidates list additionally excludes the task's
+    own ancestors (walked client-side via repeated `chain-parents`
+    calls), proactively avoiding a cycle the backend would reject
+    anyway.
+  - **Live-verified** against an isolated `household_sim` database
+    (created, migrated to head, dropped afterward — the real
+    `household` DB's row counts confirmed unaffected): `A→B→C`
+    chain-link creation; `C→A` and `C→B` both rejected as cycles;
+    `A→A` rejected (self-link); a second task rejected from chaining an
+    already-chained child (single-parent rule); a todo created from
+    task A spawns B's todo, which spawns C's todo (not all pointing at
+    A); completing B's todo directly does not also re-spawn a second C
+    todo; cancelling A's todo while C's todo is already completed keeps
+    C and detaches its `spawned_by_todo_id`; a 3-level Event Group
+    (`E→F→G`) correctly includes the grandchild in both
+    `preview_event_group` and the run's delete-cleanup candidates. Full
+    backend test suite (62 tests) still passes unmodified.
+  - **Honesty note on this round's verification**: the Tasks-page
+    search/filter (item 1) was only syntax-checked, never exercised in
+    a real browser — this round's headless-Chromium tooling hung
+    indefinitely navigating to any real localhost page (confirmed
+    environmental, not an app bug: `data:` URLs navigated instantly,
+    `curl` to the same URLs was instant, disabling JS still hung) and
+    was abandoned in favor of API/DB-level verification for everything
+    else. An earlier round's "safe-area inset" live-verification
+    (topbar/safe-area padding) also turned out to have tested an
+    injected literal CSS override rather than the real `env()`-based
+    code path — headless Chrome always reports `0` for every
+    `env()` inset, with no simulation support — so that fix, while
+    plausible, was never actually confirmed against real device
+    behavior either.
 - 1.1.0 adds **chained tasks**: completing one task can auto-spawn
   others onto the board as one-off todos, so a parent chore like "Set
   the table" can define child chores like "Clear the table" that only
@@ -98,8 +190,10 @@ below).
   separately scheduled (and over-scheduled) by the balancer on their
   own cadence. See its own entry under "Household service — backend"
   for the full design (same-person-direct vs. different-person-via-
-  balancer semantics, the one-level depth cap that makes a chained loop
-  structurally impossible, the "one source of instances" exclusion
+  balancer semantics, the one-level depth cap that originally made a
+  chained loop structurally impossible — lifted in the eighth round
+  above, replaced with an explicit ancestor-walk cycle check — the "one
+  source of instances" exclusion
   from the sweep/direct-completion/Home's standalone list) and
   "Household service — frontend" for the Tasks-page chain-link editor,
   the "After: {parent}" todo label, and the Tasks-page calendar view.
@@ -130,10 +224,12 @@ below).
   See "Household service — backend"/"— frontend" for each one's own
   entry.
 - 1.1.0 also picked up a fourth round: an admin reassign now notifies
-  the new assignee (previously silent); chaining is capped at exactly
-  one level, not just cycle-rejected (a task is a pure parent, a pure
+  the new assignee (previously silent); chaining was capped at exactly
+  one level, not just cycle-rejected (a task was a pure parent, a pure
   chain child, or neither — never both, closing a real gap a first
-  attempt at this left open, caught via live testing); and the Tasks
+  attempt at this left open, caught via live testing — this cap was
+  itself lifted in 1.2.0's eighth round above, on explicit later
+  request); and the Tasks
   page gained a calendar view for a month-at-a-glance of weekly/monthly
   task schedules. Also fixed, found along the way: `.hidden = true` on
   a `.btn`-classed element (the notification bell, a disabled chain
@@ -2020,7 +2116,7 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
     todos) afterward.
 
 - ✅ **Always-assign (pinned) tasks.** `Task.pinned_user_id` (migration `141c12efdcbb`, named FK constraint `fk_tasks_pinned_user_id_household_users`, `ON DELETE SET NULL` — applied and round-tripped cleanly) — a standing household agreement ("Alex always does the bathroom"), opting a weekly/monthly task out of the auto-balancer's fairness pool entirely rather than merely biasing it. Implemented as pure functions in `balancing.py`, not a crud-level special case, specifically so `test_balancing.py` covers it the same way as everything else (11 new tests): `CandidateTask`/`CandidateTodo.pinned_user_id` makes `balance()` hand the item straight to its owner — bypassing both the fairness pick AND the per-run cap, since a pin was never a "new fairness-allocated item" to begin with — or leave it unassigned if they're not currently eligible (**deliberately** not handed to anyone else just because the pinned person is on break; that's the whole point of pinning, a decision explicitly flagged rather than silently made). `rebalance()` skips any `PullableAssignment` with `pinned=True` unconditionally. A third pure function, `correct_pins()`, handles an EXISTING assignment held by the wrong person (the pin was just set, or changed, after this period's sweep already ran) — moves it back, gated on `has_progress` and `already_reassigned` (the SAME `TaskAssignment.reassigned_at` column both `rebalance()`'s own pull AND `crud.accept_takeover_request`'s consent-based move stamp). `crud.run_balancing` runs `correct_pins()` first, then threads `pinned_user_id` through the normal `candidate_tasks`/`balance()` call for the sweep, then sets `pinned=` on every `PullableAssignment` for the rebalance pass. Also covers `run_balancing`'s unclaimed-board-todo sweep (`CandidateTodo.pinned_user_id` resolved from a todo's own `source_task_id` via one small targeted query) and `trigger_event_group`'s batch balance (resolved from each root's own task, paired back to its spawned todo via `zip()` since both lists are built in lockstep) — NOT `_assign_chain_todo_now` or `claim_todo` (deliberately out of scope; see CLAUDE.md's own entry for the full reasoning on both). Auto-cleared to `None` by `crud.update_task` the moment recurrence becomes `daily` (same pattern `weekdays` already gets); naturally inert (not auto-cleared, since chain-child status is dynamic, not a stored column) for a chain-child task, via the sweep's pre-existing `excluded_chain_child_ids` filter. **Admin-only to set or change** — `main.create_task`/`patch_task` check `"pinned_user_id" in data.model_fields_set` (not `is not None`, so explicit `null` can actually clear an existing pin — unlike every other `TaskUpdate` field) and the value actually changed before requiring `user.role == "admin"`; every other task field stays an ordinary `can_write` edit. `crud._validate_pinned_user` rejects an unknown or viewer-role pinned user (400) — a viewer can never complete anything, so pinning one would leave the task permanently stuck. `HouseholdUserOut` gained a `role` field (previously visible only for the CURRENT user via their own decoded JWT, never for anyone else) specifically so the frontend's pinned-owner picker can exclude viewers client-side the same way the backend already would reject one — not secret, household members already know each other's roles. Frontend: Tasks page's task-edit modal gained an "Always assign to" select (visible to everyone, enabled only for `isAdmin()`, hidden when recurrence is Daily or the task `is_chain_child`), and the task list row gained an `"Always: {name}"` badge. The save payload always includes `pinned_user_id` (explicit `null` for "No one"), since the PATCH route's clearing logic needs the field present in the request, not just non-null. **Live-verified end to end** (CDP-driven headless Chromium, three throwaway local accounts: one admin, two user-role): an admin-created task pinned to A landed on A via a real balancer run even though the fairness math alone would have picked differently; a non-admin's attempt to repin it got a 403, while the SAME non-admin editing an unrelated field with the pin left untouched succeeded normally; A requested a takeover to B, B accepted, and — the exact bug an advisor review caught before this was called done — running the balancer AGAIN afterward did **not** silently move it back to the pinned owner, confirming `already_reassigned`'s shared-column reasoning actually holds up live, not just in the unit tests; a second pinned task with its owner on break came back from a real balancer run correctly unassigned, not handed to the other eligible user; and a real Event Group trigger with that same task as its one root assigned the spawned todo straight to the pinned owner. Before this round's own fixtures were created, `HouseholdSettings.default_language` was found back at `"de"` despite being restored to `"en"` at the end of the i18n round above — cause not tracked down (not this round's own code; `Task.pinned_user_id` never touches it), just reset to `"en"` again before proceeding. All three throwaway accounts and every test task/event-group/run from this round were cleaned up afterward.
-- ✅ **Manual (non-repeating) tasks, and pinning extended to every recurrence.** `Recurrence.manual` — no automatic occurrence at all; the only way an instance is created is a deliberate action (an Event Group trigger, a chain spawn, or the Board's "From task" picker). `crud.complete_task` rejects completing one directly with a 409 and no `force` override (unlike the chain-child rejection beside it — no legacy data to accommodate, `manual` is brand new); always completed via whichever todo it was posted/spawned/triggered as instead. **`Task.recurrence` converted from a Postgres enum to a plain `String`** (migration `a74f9c9fa5ed`, hand-written — autogenerate omitted the `USING recurrence::text` cast and left a now-invalid enum-typed default in place; the generated file needed the default dropped first, the cast added, the default reset to plain `'daily'`, and the orphaned `task_recurrence` type dropped, in that order) — same precedent `EventGroup.schedule_recurrence` already set, trading one `ALTER TYPE ... ADD VALUE` migration now for never needing that dance again. `Recurrence` stayed a normal Python `(str, Enum)`, so no `crud.py` comparison code needed to change; empirically verified live (a scratch write through the real async ORM, not just reasoned about) that this doesn't hit the Python 3.11+ `str(enum_member)` formatting change some other mixed-in str enums fall into — the stored value really is `"weekly"`, never `"Recurrence.weekly"`. **Caught in review, not live**: the sweep's old `Task.recurrence != Recurrence.daily` filter would have let `manual` through, and `_task_period`'s weekly-or-else-monthly fallback would have then auto-swept a REAL `TaskAssignment` for every `manual` task once a month — exactly the "gets automatically created" behavior this recurrence exists to not have. Fixed with an explicit `Task.recurrence.in_([Recurrence.weekly, Recurrence.monthly])` allow-list. Pinning (see the entry above) was originally weekly/monthly-only, with `daily` auto-cleared — that restriction is now lifted on explicit request: a pin on a `daily`/`manual` task shows as a badge and still routes any todo CREATED from that task to the pinned person (the exact same `CandidateTodo.pinned_user_id` path a weekly/monthly task's own spawned todos already used — no new code needed for this half), but does not restrict who can tap "complete" on a `daily` task from Home; offered as a follow-up in this round's report rather than built. `home.js` filters `manual` tasks out of its own "All tasks" list CLIENT-side only — the Board/Event-Group-root/chain-link pickers all reuse the same `GET /tasks` endpoint and still need them. Board's New Todo form now prefills "Request from" with a picked task's pinned owner, if assignable — convenience only, since left on "Anyone" it still reaches them eventually via the sweep, just with a visible `CLAIM_WINDOW` delay that otherwise looks broken. **Live-verified end to end**: a manual task created via the API; still returned by `GET /tasks` (for the pickers) but absent from Home's rendered list and present on the Tasks page and the Board's "From task" picker (checked by reading actual rendered DOM text, not just the API response); direct completion returned 409; a real balancer run created no `TaskAssignment` for it; pinning it then triggering an Event Group with it as the one root assigned the spawned todo straight to the pinned person, and completing THAT todo (not the task) succeeded normally; a daily task created with a pin kept it through a daily→weekly→daily recurrence round-trip. Also this round: reworded the Tasks page's German "Event Groups" info box (the previous wording used "Ein Tipp," the noun for a piece of advice, where "Ein Antippen"/"tippen" — tapping — was meant; also corrected to a proper closing „…" quote instead of a plain `"` within that one string) and removed the now-redundant description paragraphs under the Admin panel's "Timezone" and "Default language for new users" headings (both self-explanatory from their own heading + control). **Flagged, not fixed**: the straight-`"`-as-closing-quote mismatch found in that one string is systemic across `de.js` and `household_service/i18n.py` — every other German string with embedded quotes has the same issue (proper „ opening, plain `"` instead of „…" closing) — left alone everywhere else since only the one string was actually asked to be reworded; a dedicated typography pass across both files is its own, separate task. Cleaned up all test fixtures afterward; `HouseholdSettings.default_language` checked again at the end and found unchanged (`"en"`, as left at the start of this round) — the mystery reset noted in the entry above has not recurred.
+- ✅ **Manual (non-repeating) tasks, and pinning extended to every recurrence.** `Recurrence.manual` — no automatic occurrence at all; the only way an instance is created is a deliberate action (an Event Group trigger, a chain spawn, or the Board's "From task" picker). `crud.complete_task` originally rejected completing one directly with a 409 and no `force` override (unlike the chain-child rejection beside it); a later round lifted that specifically for Home's direct-completion path on explicit user request ("allow manual completion of manual tasks from the home screen... even if they aren't assigned to an event group or chain") — a `manual` task with no event-group/chain instance of its own would otherwise be permanently uncompletable from Home. The event-group/chain-spawned-todo completion path (`complete_todo`) is unaffected either way, since it never called `complete_task` to begin with. **`Task.recurrence` converted from a Postgres enum to a plain `String`** (migration `a74f9c9fa5ed`, hand-written — autogenerate omitted the `USING recurrence::text` cast and left a now-invalid enum-typed default in place; the generated file needed the default dropped first, the cast added, the default reset to plain `'daily'`, and the orphaned `task_recurrence` type dropped, in that order) — same precedent `EventGroup.schedule_recurrence` already set, trading one `ALTER TYPE ... ADD VALUE` migration now for never needing that dance again. `Recurrence` stayed a normal Python `(str, Enum)`, so no `crud.py` comparison code needed to change; empirically verified live (a scratch write through the real async ORM, not just reasoned about) that this doesn't hit the Python 3.11+ `str(enum_member)` formatting change some other mixed-in str enums fall into — the stored value really is `"weekly"`, never `"Recurrence.weekly"`. **Caught in review, not live**: the sweep's old `Task.recurrence != Recurrence.daily` filter would have let `manual` through, and `_task_period`'s weekly-or-else-monthly fallback would have then auto-swept a REAL `TaskAssignment` for every `manual` task once a month — exactly the "gets automatically created" behavior this recurrence exists to not have. Fixed with an explicit `Task.recurrence.in_([Recurrence.weekly, Recurrence.monthly])` allow-list. Pinning (see the entry above) was originally weekly/monthly-only, with `daily` auto-cleared — that restriction is now lifted on explicit request: a pin on a `daily`/`manual` task shows as a badge and still routes any todo CREATED from that task to the pinned person (the exact same `CandidateTodo.pinned_user_id` path a weekly/monthly task's own spawned todos already used — no new code needed for this half), but does not restrict who can tap "complete" on a `daily` task from Home; offered as a follow-up in this round's report rather than built. `home.js` originally filtered `manual` tasks out of its own "All tasks" list client-side — a later round reversed this on explicit user request ("Manual tasks should appear in Home All tasks"), since direct Home completion (above) needs them visible there too; the Board/Event-Group-root/chain-link pickers still reuse the same unfiltered `GET /tasks` endpoint, now for the same reason rather than a different one. Board's New Todo form now prefills "Request from" with a picked task's pinned owner, if assignable — convenience only, since left on "Anyone" it still reaches them eventually via the sweep, just with a visible `CLAIM_WINDOW` delay that otherwise looks broken. **Live-verified end to end**: a manual task created via the API; still returned by `GET /tasks` (for the pickers) but absent from Home's rendered list and present on the Tasks page and the Board's "From task" picker (checked by reading actual rendered DOM text, not just the API response); direct completion returned 409; a real balancer run created no `TaskAssignment` for it; pinning it then triggering an Event Group with it as the one root assigned the spawned todo straight to the pinned person, and completing THAT todo (not the task) succeeded normally; a daily task created with a pin kept it through a daily→weekly→daily recurrence round-trip. Also this round: reworded the Tasks page's German "Event Groups" info box (the previous wording used "Ein Tipp," the noun for a piece of advice, where "Ein Antippen"/"tippen" — tapping — was meant; also corrected to a proper closing „…" quote instead of a plain `"` within that one string) and removed the now-redundant description paragraphs under the Admin panel's "Timezone" and "Default language for new users" headings (both self-explanatory from their own heading + control). **Flagged, not fixed**: the straight-`"`-as-closing-quote mismatch found in that one string is systemic across `de.js` and `household_service/i18n.py` — every other German string with embedded quotes has the same issue (proper „ opening, plain `"` instead of „…" closing) — left alone everywhere else since only the one string was actually asked to be reworded; a dedicated typography pass across both files is its own, separate task. Cleaned up all test fixtures afterward; `HouseholdSettings.default_language` checked again at the end and found unchanged (`"en"`, as left at the start of this round) — the mystery reset noted in the entry above has not recurred.
 - ✅ **Multi-language support (English/German), backend half.** `household_service/i18n.py` — a flat `dict[str, dict[Lang, str]]` plus `t(lang, key, **params) -> str`, English-fallback for a present-but-missing language, `KeyError` for a genuinely unknown key. Two call sites, each with its own "whose language" rule (documented in the module's own docstring): all 8 `crud._notify()` call sites (chain-task spawn, chore request, reassign, takeover requested/responded, weekly nudge, new report, scheduled-event-group creation) render in the RECIPIENT's `HouseholdUser.preferred_language`; `reports.py`'s PDF generation renders in the household's shared `HouseholdSettings.default_language` instead, including German-idiomatic date (`06.10.2026`) and decimal-comma (`12,50 EUR`) formatting via new `_fmt_date`/`_fmt_datetime`/`_fmt_amount` helpers — not just string lookups. `HouseholdUser.preferred_language` (`String(5)`, default `"en"`) and `HouseholdSettings.default_language` (same type/default) added via migration `59982065edd0` — both plain non-FK columns with `server_default`, applied and round-tripped (`upgrade` → `downgrade` → `upgrade` → `alembic check`) cleanly on the first attempt, no FK-naming fix-up needed this time. `crud.get_or_create_household_user` seeds a brand-new row's `preferred_language` from the admin-configured `default_language` at creation time only — changing the admin default afterward is deliberately **not retroactive** (same reasoning as every other per-user default this service has). New `PATCH /me/language` route, `can_read`-gated (not `can_write` like the broader `PATCH /me`) so a viewer can set their own language even though they can't touch `display_name`/`on_break`. `household/backend/tests/test_i18n.py` (5 tests): every key has both languages, no empty translations, `{param}` placeholders match between `en`/`de` for every key (a mistyped placeholder in just one language would otherwise only surface as a live `KeyError` for that language's recipients), substitution correctness, and the unknown-language fallback chain. Caught and fixed by an advisor review before this was called done: a `chain_task.body` German string that read as "parent already done" when chain children now spawn at the parent's CREATION, not completion (see "Chained tasks" above) — reworded to the same neutral "After: X" framing English already used. Smoke-tested `generate_report_pdf` directly (English, German, and the empty-rows/no-rate branch) against a scratch `REPORTS_DIR` outside the container, all three render without error. Live-verified end to end against the running backend+frontend together — see the frontend entry below for the full verification narrative (both halves were verified in the same pass, logged-in as real throwaway accounts, not just unit tests).
 
 ## Household service — frontend

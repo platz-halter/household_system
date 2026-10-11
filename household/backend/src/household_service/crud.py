@@ -371,15 +371,31 @@ async def is_chain_child(db: AsyncSession, task_id: int) -> bool:
     return result.scalar_one_or_none() is not None
 
 
-async def is_chain_parent(db: AsyncSession, task_id: int) -> bool:
-    """Whether `task_id` already chains at least one other task — the
-    other half of the one-level cap (see create_chain_link): a task
-    that's about to become someone's chain CHILD must not already be
-    a parent itself, or it'd sit in the middle of a two-level chain."""
-    result = await db.execute(
-        select(TaskChainLink.id).where(TaskChainLink.parent_task_id == task_id).limit(1)
-    )
-    return result.scalar_one_or_none() is not None
+async def _chain_ancestors(db: AsyncSession, task_id: int) -> list[int]:
+    """Walks UP the chain from `task_id` through its own parent link,
+    one level at a time, and returns every ancestor found (nearest
+    first). A task has at most one parent (create_chain_link's own
+    single-parent rule — a task can only ever be chained from one other
+    task), so this is a plain walk, not a general graph search; `seen`
+    just guards against an infinite loop if the data ever ended up
+    cyclic some other way (it shouldn't, if every link went through
+    create_chain_link's own check below, but this function has to stay
+    safe to call regardless)."""
+    ancestors: list[int] = []
+    seen = {task_id}
+    current = task_id
+    while True:
+        parent_id = await db.scalar(
+            select(TaskChainLink.parent_task_id).where(
+                TaskChainLink.child_task_id == current
+            )
+        )
+        if parent_id is None or parent_id in seen:
+            break
+        ancestors.append(parent_id)
+        seen.add(parent_id)
+        current = parent_id
+    return ancestors
 
 
 async def list_chain_links(
@@ -440,32 +456,29 @@ async def create_chain_link(
     if existing is not None:
         raise ValueError("This chain link already exists")
 
-    # Chains are capped at exactly one level: a task is a pure parent, a
-    # pure child, or neither — never both. This is what makes a chained
-    # loop structurally impossible, not a graph walk looking for one: a
-    # cycle needs at least one task with both an incoming and an
-    # outgoing chain edge, and these three checks together mean no task
-    # can ever have both, from either direction:
-    #   - the new PARENT can't already be a CHILD (would make it a
-    #     middle node, child-side)
-    #   - the new CHILD can't already be a PARENT (would make it a
-    #     middle node, parent-side — the case a two-check version of
-    #     this missed: C->A->B is still only "A is already a child" or
-    #     "A is already a parent" depending which link you look at
-    #     first, so both directions have to be checked on BOTH tasks)
-    #   - the new CHILD can't already be a CHILD of something else
-    #     (no double-parenting)
-    if await is_chain_child(db, parent_task_id):
-        raise ValueError(
-            "This task is already chained from another task and can't "
-            "chain further tasks itself"
-        )
-    if await is_chain_parent(db, child_task_id):
-        raise ValueError(
-            "This task already chains another task and can't be chained itself"
-        )
+    # Chains can now go more than one level deep (user request: "add
+    # chained tasks back to chained tasks while preventing loops") — a
+    # task can be both someone's chain child AND chain its own children.
+    # Two rules keep this sane:
+    #   - single parent: the new CHILD can't already be chained from
+    #     something else. This is what makes "every task's ancestors
+    #     form a simple line, not a tree merging back together"
+    #     structurally true, which is what lets _chain_ancestors below
+    #     (and the spawn/delete code elsewhere) walk UP via one parent
+    #     link at a time instead of a general graph search.
+    #   - no loops: the new CHILD can't already be an ANCESTOR of the
+    #     new PARENT — chaining it in would close a cycle (new child ->
+    #     ... -> new parent -> new child). Walking up from the parent
+    #     and checking whether the child shows up catches this at any
+    #     depth, not just the direct C->A->B case a shallower check
+    #     used to miss.
     if await is_chain_child(db, child_task_id):
         raise ValueError("This task is already chained to another task")
+    if child_task_id in await _chain_ancestors(db, parent_task_id):
+        raise ValueError(
+            "This would create a loop — the task you're chaining is "
+            "already an ancestor of this one"
+        )
 
     max_position = await db.scalar(
         select(func.max(TaskChainLink.position)).where(
@@ -631,15 +644,18 @@ async def preview_event_group(
     db: AsyncSession, root_task_ids: list[int], excluded_task_ids: list[int]
 ) -> list[dict]:
     """Computes the full set of tasks an event group covers RIGHT NOW:
-    every root, plus each root's current direct chain children — the
-    one-level chain cap (see TaskChainLink) means that's the entire
-    tree, no recursion needed. Deliberately stateless (task ids in, not
-    a saved EventGroup) so the exact same computation serves the
-    create-modal's live preview (before a group has ever been saved)
-    and a fresh pre-trigger preview — a chain link added after the
-    group was saved shows up automatically either way, since this never
-    reads cached membership for which descendants exist, only for which
-    ones are excluded."""
+    every root, plus each root's whole chain-descendant tree at any
+    depth (chaining isn't capped at one level anymore — see
+    TaskChainLink) — breadth-first per root, so a root's entire lineage
+    appears before moving to the next root. Deliberately stateless
+    (task ids in, not a saved EventGroup) so the exact same computation
+    serves the create-modal's live preview (before a group has ever
+    been saved) and a fresh pre-trigger preview — a chain link added
+    (at any depth) after the group was saved shows up automatically
+    either way, since this never reads cached membership for which
+    descendants exist, only for which ones are excluded. `parent_task_
+    name` is the IMMEDIATE parent (lineage), not necessarily the root —
+    "Chained from: X" names whoever directly spawns a given descendant."""
     excluded = set(excluded_task_ids)
     items: list[dict] = []
     for task_id in root_task_ids:
@@ -656,23 +672,33 @@ async def preview_event_group(
                 "excluded": False,
             }
         )
-        links = await list_chain_links(db, task_id)
-        for link in links:
-            items.append(
-                {
-                    "task_id": link.child_task_id,
-                    "task_name": link.child_task.name,
-                    "points": link.child_task.points,
-                    "is_root": False,
-                    "parent_task_name": task.name,
-                    "excluded": link.child_task_id in excluded,
-                }
-            )
+        frontier = [(task_id, task.name)]
+        while frontier:
+            next_frontier: list[tuple[int, str]] = []
+            for parent_id, parent_name in frontier:
+                links = await list_chain_links(db, parent_id)
+                for link in links:
+                    items.append(
+                        {
+                            "task_id": link.child_task_id,
+                            "task_name": link.child_task.name,
+                            "points": link.child_task.points,
+                            "is_root": False,
+                            "parent_task_name": parent_name,
+                            "excluded": link.child_task_id in excluded,
+                        }
+                    )
+                    next_frontier.append((link.child_task_id, link.child_task.name))
+            frontier = next_frontier
     return items
 
 
 async def trigger_event_group(
-    db: AsyncSession, group: EventGroup, user: HouseholdUser | None
+    db: AsyncSession,
+    group: EventGroup,
+    user: HouseholdUser | None,
+    *,
+    override_root_task_ids: list[int] | None = None,
 ) -> tuple[EventGroupRun, list[TodoItem]]:
     """Creates one open TodoItem per root task, all tagged with a new
     EventGroupRun, fairly distributed across eligible users in one
@@ -683,14 +709,32 @@ async def trigger_event_group(
     since the group was saved) rather than trusting the saved
     membership blindly.
 
+    `override_root_task_ids`, when given, swaps which tasks THIS ONE
+    trigger uses as roots (user request: "swap out one task before
+    creation [without modifying] the event group on next creation") —
+    it never touches the saved EventGroupTask rows, so the next trigger
+    (manual or scheduled) goes back to the group's own normal roots.
+    Still re-validated exactly like the saved roots are
+    (_validate_event_group_roots), and still uses the saved
+    excluded_task_ids for which chain descendants stay ungrouped — only
+    which TASKS are used as roots for this run changes.
+
     `user` is None only for a scheduled auto-trigger
     (run_scheduled_event_groups_if_due) — there's no human actor for
     that, so `EventGroupRun.triggered_by_id`/`TodoItem.created_by_id`
     are both left null rather than attributed to whoever happens to be
-    the admin running the server."""
-    if not group.roots:
+    the admin running the server. (A scheduled trigger never passes
+    override_root_task_ids either — there's nobody there to have asked
+    for a swap.)"""
+    root_task_ids = (
+        override_root_task_ids
+        if override_root_task_ids is not None
+        else [r.task_id for r in group.roots]
+    )
+    if not root_task_ids:
         raise ValueError("This event group has no tasks yet")
-    await _validate_event_group_roots(db, [r.task_id for r in group.roots])
+    await _validate_event_group_roots(db, root_task_ids)
+    root_tasks = [await get_task(db, task_id) for task_id in root_task_ids]
 
     run = EventGroupRun(
         event_group_id=group.id, triggered_by_id=user.id if user else None
@@ -704,14 +748,14 @@ async def trigger_event_group(
     # it agrees with run_balancing's own week/month boundaries.
     today = datetime.now(UTC).date()
     created: list[TodoItem] = []
-    for root in group.roots:
+    for task in root_tasks:
         todo = TodoItem(
-            title=root.task.name,
-            description=root.task.description,
-            points=root.task.points,
+            title=task.name,
+            description=task.description,
+            points=task.points,
             due_date=today,
             created_by_id=user.id if user else None,
-            source_task_id=root.task_id,
+            source_task_id=task.id,
             event_group_run_id=run.id,
             # A root's own chain children get spawned below, right in
             # this same trigger — never a second time at completion.
@@ -753,7 +797,7 @@ async def trigger_event_group(
         # daily ration, so nobody should be skipped just for already
         # holding something.
         max_new_items_per_user = max(load_count.values(), default=0) + len(created)
-        # `created` and `group.roots` were built in lockstep above (one
+        # `created` and `root_tasks` were built in lockstep above (one
         # todo per root, same order) — zip pairs each todo back to the
         # root task it might be pinned through. A root's OWN pin, if
         # any — not to be confused with its chain children, which can
@@ -765,9 +809,9 @@ async def trigger_event_group(
                 balancing.CandidateTodo(
                     todo_id=todo.id,
                     points=todo.points,
-                    pinned_user_id=root.task.pinned_user_id,
+                    pinned_user_id=task.pinned_user_id,
                 )
-                for todo, root in zip(created, group.roots)
+                for todo, task in zip(created, root_tasks)
             ],
             max_new_items_per_user=max_new_items_per_user,
         )
@@ -1232,8 +1276,10 @@ async def complete_todo(
     todo that predates that change (chain_spawn_handled still false —
     old data) or one completed via a chain-child todo itself
     (`chain_link_id` set — always a no-op in practice, since chaining
-    is capped at one level: a chain child can never itself be a
-    parent)."""
+    is capped at one level — it no longer is, but
+    chain_spawn_handled=True is stamped on every spawned child at any
+    depth the moment it's created, so this fallback still never fires
+    for one)."""
     todo.status = TodoStatus.completed
     todo.completed_by_id = user.id
     todo.completed_at = datetime.now(UTC)
@@ -1270,6 +1316,31 @@ async def complete_todo(
     return todo
 
 
+async def _todo_descendant_ids(db: AsyncSession, root_ids: list[int]) -> set[int]:
+    """Every todo spawned (at ANY depth) from any of `root_ids`, via
+    spawned_by_todo_id — walks the whole chain-spawn tree level by
+    level, not just direct children. Needed now that chaining isn't
+    capped at one level: a direct child can have its own children too,
+    and a naive single-level detach-then-delete risks Postgres's own
+    `ON DELETE CASCADE` on spawned_by_todo_id silently taking out a
+    completed/cancelled GRANDCHILD along with an open child being
+    deleted — exactly the data loss crud.cancel_todo's and
+    _hard_delete_todos's own "only touch open ones" rule exists to
+    prevent, just one level further down than either used to check."""
+    all_descendants: set[int] = set()
+    frontier = list(root_ids)
+    while frontier:
+        result = await db.execute(
+            select(TodoItem.id).where(TodoItem.spawned_by_todo_id.in_(frontier))
+        )
+        next_level = [row[0] for row in result.all() if row[0] not in all_descendants]
+        if not next_level:
+            break
+        all_descendants.update(next_level)
+        frontier = next_level
+    return all_descendants
+
+
 async def cancel_todo(db: AsyncSession, todo: TodoItem) -> TodoItem:
     """Cancelling deletes any chain children this todo pre-spawned at
     its OWN creation that are still open (user request: "if the parent
@@ -1281,15 +1352,34 @@ async def cancel_todo(db: AsyncSession, todo: TodoItem) -> TodoItem:
     shouldn't claw that back), and one already cancelled on its own is
     left as-is too. The frontend warns about this before calling here
     (see GET /todos/{id}/chain-children / crud.list_chain_children) —
-    this function itself just does it, unconditionally, once asked."""
+    this function itself just does it, unconditionally, once asked.
+
+    Walks the FULL descendant tree (_todo_descendant_ids), not just
+    direct children — a grandchild can exist now that chaining isn't
+    capped at one level, and deleting an open child via a plain SQL
+    DELETE would otherwise let Postgres's own ON DELETE CASCADE take a
+    completed/cancelled grandchild down with it. Detaches every non-
+    open descendant (any depth) first, same "stays, just loses the why
+    pointer" treatment as everywhere else, THEN deletes the open ones —
+    in that order, the delete can never cascade through a row meant to
+    survive."""
     todo.status = TodoStatus.cancelled
     todo.cancelled_at = datetime.now(UTC)
     await _cancel_pending_takeover_for_todo(db, todo.id)
-    await db.execute(
-        delete(TodoItem).where(
-            TodoItem.spawned_by_todo_id == todo.id, TodoItem.status == TodoStatus.open
+    descendant_ids = await _todo_descendant_ids(db, [todo.id])
+    if descendant_ids:
+        await db.execute(
+            update(TodoItem)
+            .where(
+                TodoItem.id.in_(descendant_ids), TodoItem.status != TodoStatus.open
+            )
+            .values(spawned_by_todo_id=None)
         )
-    )
+        await db.execute(
+            delete(TodoItem).where(
+                TodoItem.id.in_(descendant_ids), TodoItem.status == TodoStatus.open
+            )
+        )
     await db.commit()
     await db.refresh(todo, attribute_names=["status"])
     return todo
@@ -1307,21 +1397,25 @@ async def _hard_delete_todos(db: AsyncSession, todo_ids: list[int]) -> None:
     child that's already completed (and earned real points) or already
     cancelled on its own — unlike the softer crud.cancel_todo, which
     only ever removes a still-OPEN child. First detaches (nulls
-    spawned_by_todo_id on) any non-open child of `todo_ids`, exactly the
+    spawned_by_todo_id on) any non-open DESCENDANT of `todo_ids`, at
+    ANY depth (_todo_descendant_ids — a direct child can have its own
+    children now that chaining isn't capped at one level), exactly the
     same "stays, just loses the why pointer" treatment chain_link_id's
     own ON DELETE SET NULL already gets elsewhere — then deletes. A
-    child that's itself in `todo_ids` is unaffected by the detach (it's
-    getting deleted outright anyway)."""
+    descendant that's itself in `todo_ids` is unaffected by the detach
+    (it's getting deleted outright anyway)."""
     if not todo_ids:
         return
-    await db.execute(
-        update(TodoItem)
-        .where(
-            TodoItem.spawned_by_todo_id.in_(todo_ids),
-            TodoItem.status != TodoStatus.open,
+    descendant_ids = await _todo_descendant_ids(db, todo_ids)
+    if descendant_ids:
+        await db.execute(
+            update(TodoItem)
+            .where(
+                TodoItem.id.in_(descendant_ids),
+                TodoItem.status != TodoStatus.open,
+            )
+            .values(spawned_by_todo_id=None)
         )
-        .values(spawned_by_todo_id=None)
-    )
     await db.execute(delete(TodoItem).where(TodoItem.id.in_(todo_ids)))
 
 
@@ -1335,13 +1429,12 @@ async def _event_group_run_cleanup_candidates(
 ) -> list[TodoItem]:
     """Every todo a bulk delete of this run would consider: todos
     actually tagged with the run (roots, plus any chain descendant that
-    inherited the tag), PLUS any chain descendant spawned by one of
-    those that ISN'T tagged — a descendant the group's creator
-    explicitly excluded from the group's tag (EventGroupExclusion) is
-    still part of "this event" for a bulk delete's purposes, it just
-    never showed up clustered or badged for it. One level of lookup is
-    enough: chaining is capped at one level, so a spawned child can
-    never itself be a parent with further children."""
+    inherited the tag), PLUS any chain descendant spawned (at ANY
+    depth — _todo_descendant_ids, now that chaining isn't capped at one
+    level) by one of those that ISN'T tagged — a descendant the group's
+    creator explicitly excluded from the group's tag (EventGroupExclusion)
+    is still part of "this event" for a bulk delete's purposes, it just
+    never showed up clustered or badged for it."""
     tagged = await db.execute(
         select(TodoItem).where(TodoItem.event_group_run_id == run_id)
     )
@@ -1349,11 +1442,12 @@ async def _event_group_run_cleanup_candidates(
     tagged_ids = {t.id for t in tagged_todos}
     if not tagged_ids:
         return []
-    spawned = await db.execute(
-        select(TodoItem).where(TodoItem.spawned_by_todo_id.in_(tagged_ids))
-    )
-    extra = [t for t in spawned.scalars().all() if t.id not in tagged_ids]
-    return tagged_todos + extra
+    descendant_ids = await _todo_descendant_ids(db, list(tagged_ids))
+    extra_ids = descendant_ids - tagged_ids
+    if not extra_ids:
+        return tagged_todos
+    extra = await db.execute(select(TodoItem).where(TodoItem.id.in_(extra_ids)))
+    return tagged_todos + list(extra.scalars().all())
 
 
 async def event_group_run_delete_preview(
@@ -1773,7 +1867,7 @@ async def _spawn_one_chain_child(
     spawned_by_todo_id: int | None,
     event_group_run_id: int | None,
     excluded_task_ids: set[int],
-) -> TodoItem | None:
+) -> TodoItem:
     """Builds and persists one chain-spawned TodoItem for `link` — the
     shared tail of both _spawn_chain_children (completion-time) and
     _spawn_chain_children_on_creation (creation-time), which only
@@ -1784,11 +1878,21 @@ async def _spawn_one_chain_child(
     be None (same_user: parent unassigned, so leave the child
     unassigned too; different_user: nobody to exclude).
 
-    Returns the child whenever it ended up with a real assignee (either
-    branch), so a caller that wants to notify someone can — the two
-    callers differ on whether a same_user pick is worth notifying (see
-    each one's own docstring for why), so that filtering happens on
-    their side, not here."""
+    Deliberately never sets `source_task_id` on the child it creates:
+    that column means "posted/triggered directly from this task" (Board
+    "From task", an Event Group root), which pin-routing reads — a
+    chain child's pin (if its task even has one) is meant to stay inert
+    (see Task.pinned_user_id's own docstring), and setting source_
+    task_id here would wire that routing back on by accident. It's also
+    exactly why a caller recursing onto a freshly-spawned child can't
+    just read `child.source_task_id` to find its own chain links — see
+    _spawn_chain_children_on_creation's own `task_id` override param.
+
+    ALWAYS returns the created row now, regardless of whether it ended
+    up with a real assignee — callers that only care about notifying
+    someone filter on `.assigned_to_id is not None` themselves; a
+    caller that needs to recurse onto this child's OWN chain children
+    needs the row either way."""
     child = TodoItem(
         title=link.child_task.name,
         description=link.child_task.description,
@@ -1807,12 +1911,12 @@ async def _spawn_one_chain_child(
         child.assigned_to_id = anchor_user_id
         db.add(child)
         await db.flush()
-        return child if child.assigned_to_id is not None else None
+        return child
     child.exclude_user_id = anchor_user_id
     db.add(child)
     await db.flush()
     await _assign_chain_todo_now(db, child, exclude_user_id=anchor_user_id)
-    return child if child.assigned_to_id is not None else None
+    return child
 
 
 async def _spawn_chain_children(
@@ -1851,7 +1955,23 @@ async def _spawn_chain_children(
     push.send_to_subscriptions commits internally (it prunes dead
     subscriptions as it goes), so notifying from inside this function,
     before the caller's commit, would split one logical transaction
-    (points entry + all spawned children) into several."""
+    (points entry + all spawned children) into several.
+
+    Only the DIRECT children are spawned with "whoever completed the
+    parent" as the anchor — a direct child's OWN children (now that
+    chaining isn't capped at one level) are spawned right alongside it
+    by recursing into _spawn_chain_children_on_creation instead of
+    calling this function again: a grandchild wasn't produced by a
+    completion event, it was produced by its own parent (the direct
+    child) being CREATED, so creation semantics — anchored on that
+    child's own assigned_to_id, not the original completer — are the
+    correct ones below the first level. Each direct child gets
+    chain_spawn_handled=True stamped here before that recursive call,
+    so a later direct completion of ITS own todo doesn't also trigger
+    this same completion-time path a second time for the same
+    descendants (the two paths key their idempotency differently —
+    spawned_by_entry_id here, spawned_by_todo_id there — so without
+    this they wouldn't catch each other)."""
     links = await list_chain_links(db, parent_task_id)
     if not links:
         return []
@@ -1870,13 +1990,22 @@ async def _spawn_chain_children(
             event_group_run_id=event_group_run_id,
             excluded_task_ids=excluded_task_ids,
         )
+        child.chain_spawn_handled = True
         # A same_user child is assigned straight to `completer` — the
         # very person who just completed the parent — so notifying
         # them about a task they implicitly just gave themselves would
         # be pointless. Only a different_user pick is worth telling
         # someone about here.
-        if child is not None and not link.same_user:
+        if child.assigned_to_id is not None and not link.same_user:
             to_notify.append(child)
+        to_notify.extend(
+            await _spawn_chain_children_on_creation(
+                db,
+                parent_todo=child,
+                task_id=link.child_task_id,
+                event_group_run_id=event_group_run_id,
+            )
+        )
     return to_notify
 
 
@@ -1885,6 +2014,7 @@ async def _spawn_chain_children_on_creation(
     *,
     parent_todo: TodoItem,
     event_group_run_id: int | None = None,
+    task_id: int | None = None,
 ) -> list[TodoItem]:
     """The creation-time sibling of _spawn_chain_children — called right
     when `parent_todo` itself is created (crud.create_todo /
@@ -1899,6 +2029,18 @@ async def _spawn_chain_children_on_creation(
     Idempotent via uq_todo_chain_spawn_by_todo (chain_link_id,
     spawned_by_todo_id).
 
+    `task_id` is which task's OWN chain links to look up — defaults to
+    `parent_todo.source_task_id` (the normal case: a todo posted/
+    triggered directly from a task). Recursing onto a just-spawned
+    chain child (now that chaining isn't capped at one level) has to
+    pass this explicitly instead: a chain child's `source_task_id` is
+    always null on purpose (see _spawn_one_chain_child's own docstring
+    for why), so without this override, recursion would silently find
+    "no links" for every child regardless of whether it actually chains
+    anything — not an error, just quietly wrong. The real task id in
+    that case is the chain LINK's own child_task_id, which the caller
+    already has.
+
     Deliberately does NOT try to keep a same_user child in sync with
     the parent's assignee afterward — reassigning, claiming, or taking
     over the parent later never touches an already-spawned child (user
@@ -1906,7 +2048,8 @@ async def _spawn_chain_children_on_creation(
     touching the chain task"). If the parent is unassigned right now,
     a same_user child is created unassigned too, and a different_user
     child's balancer pick has nobody in particular to exclude."""
-    links = await list_chain_links(db, parent_todo.source_task_id)
+    task_id = task_id if task_id is not None else parent_todo.source_task_id
+    links = await list_chain_links(db, task_id)
     if not links:
         return []
 
@@ -1924,13 +2067,27 @@ async def _spawn_chain_children_on_creation(
             event_group_run_id=event_group_run_id,
             excluded_task_ids=excluded_task_ids,
         )
+        # This child's own further children (if it chains any) spawn
+        # right alongside it, recursively — so it's handled the moment
+        # it's created, same as every other level; a later direct
+        # completion of its own todo must NOT also spawn them again via
+        # complete_todo's chain_spawn_handled fallback.
+        child.chain_spawn_handled = True
         # Unlike _spawn_chain_children's completion-time notify filter,
         # a same_user pick here is still worth telling someone about —
         # the anchor is whoever the PARENT happens to be assigned to,
         # not whoever's currently acting, so it's very possibly someone
         # who hasn't touched this page at all yet.
-        if child is not None:
+        if child.assigned_to_id is not None:
             to_notify.append(child)
+        to_notify.extend(
+            await _spawn_chain_children_on_creation(
+                db,
+                parent_todo=child,
+                event_group_run_id=event_group_run_id,
+                task_id=link.child_task_id,
+            )
+        )
     return to_notify
 
 

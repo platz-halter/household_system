@@ -556,6 +556,17 @@ class EventGroupTriggerResult(BaseModel):
     todos: list[TodoOut]
 
 
+class EventGroupTriggerIn(BaseModel):
+    """Optional body for POST /event-groups/{id}/trigger. Omit (or send
+    an empty body) to trigger the group's own saved roots, same as
+    always. root_task_ids, when given, is a one-off substitution for
+    THIS trigger only (see crud.trigger_event_group's own docstring) —
+    it's never written back to the saved EventGroupTask rows, so the
+    next trigger goes back to normal."""
+
+    root_task_ids: list[int] | None = None
+
+
 # ---- Task assignments / balancing tool ---------------------------------
 
 

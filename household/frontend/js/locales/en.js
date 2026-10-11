@@ -342,9 +342,7 @@ export const en = {
   "tasks.no_chained_tasks_yet": "No chained tasks yet",
   "tasks.remove_label": "Remove",
   "tasks.chain_task_removed": "Chain task removed",
-  "tasks.already_chained_from": '"{name}" is already chained from: {parents}. A chained task can\'t chain further tasks itself.',
-  "tasks.already_chained_from_other":
-    '"{name}" is already chained from another task and can\'t chain further tasks itself.',
+  "tasks.already_chained_from": '"{name}" is already chained from: {parents}.',
   "tasks.no_eligible_tasks": "No eligible tasks",
   "tasks.add_chain_task_btn": "Add a chain task…",
   "tasks.choose_chain_task_title": "Choose a chain task",
@@ -365,6 +363,7 @@ export const en = {
     'When "{name}" is completed, each chained task below is spawned onto the board as a one-off. "Same person" assigns it directly to whoever just completed this one; "different person" hands it to whoever the balancer says is fairest, never the completer. Picking a task below adds it right away — there\'s no separate save step.',
   "tasks.pick_weekday_weekly_task": "Pick at least one weekday for a weekly task",
   "tasks.task_saved": "Task saved",
+  "tasks.draft_restored_toast": "Restored your unsaved draft from earlier",
   "tasks.delete_task_title": "Delete task",
   "tasks.delete_task_message": 'Delete "{name}"? Past points earned from it are kept.',
   "tasks.task_deleted": "Task deleted",
@@ -386,6 +385,8 @@ export const en = {
   "eg.nothing_to_create": "Nothing to create",
   "eg.not_grouped": "Not grouped",
   "eg.grouped": "Grouped",
+  "eg.swap_task_title": "Swap task",
+  "eg.swap_task_aria": "Swap out {name} for a different task, just for this trigger",
   "eg.created_toast": {
     one: 'Created {n} task for "{name}"',
     other: 'Created {n} tasks for "{name}"',

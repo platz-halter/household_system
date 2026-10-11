@@ -42,8 +42,75 @@ let timezoneCache = "UTC";
 // board.js's status filter / home.js's search state) — switching to
 // Calendar, visiting another page via the bottom nav, then coming back
 // shouldn't reset either the chosen view or which month was showing.
-const taskViewState = { view: "list" };
+const taskViewState = { view: "list", q: "", categoryId: "" };
 let calendarMonth = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+let taskSearchDebounceTimer = null;
+
+function debounce(fn, delay) {
+  return (...args) => {
+    clearTimeout(taskSearchDebounceTimer);
+    taskSearchDebounceTimer = setTimeout(() => fn(...args), delay);
+  };
+}
+
+// A forced re-login (session expiry, including mid-save — see api.js's
+// 401 handler, a hard `window.location.assign("/login")`) wipes every
+// in-memory module/DOM state instantly, with no chance for this page's
+// own JS to react. The New Task form specifically was the reported pain
+// point: fill it out, get timed out, lose all of it. Auto-saving to
+// localStorage as the user types survives that redirect for free (it's
+// not in-memory state, and a forced navigation runs no cleanup JS to
+// clear it either) — the only two places that DO explicitly clear it
+// are a successful save and picking up a restored draft that then gets
+// abandoned by typing something new (the next debounced save just
+// overwrites it). Deliberately NOT covering every field (categories,
+// pin) — the fields people actually lose sleep over re-typing are the
+// name/description/points ones, and restoring category/pin selections
+// too risks silently resurrecting a stale pin choice onto a form the
+// user no longer recognizes as "the same draft."
+const TASK_DRAFT_KEY = "hs-new-task-draft";
+let taskDraftDebounceTimer = null;
+
+function saveTaskDraft(body) {
+  clearTimeout(taskDraftDebounceTimer);
+  taskDraftDebounceTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(
+        TASK_DRAFT_KEY,
+        JSON.stringify({
+          name: body.querySelector("#f-name").value,
+          description: body.querySelector("#f-description").value,
+          points: body.querySelector("#f-points").value,
+          times_per_day: body.querySelector("#f-times").value,
+          recurrence: body.querySelector("#f-recurrence").value,
+          weekdays: [...(body.querySelector("#f-weekdays")?.querySelectorAll(".weekday-pill.on") || [])].map((el) =>
+            Number(el.dataset.day)
+          ),
+        })
+      );
+    } catch {
+      /* localStorage unavailable (private mode, quota) — draft just won't survive, same as today */
+    }
+  }, 400);
+}
+
+function loadTaskDraft() {
+  try {
+    const raw = localStorage.getItem(TASK_DRAFT_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearTaskDraft() {
+  clearTimeout(taskDraftDebounceTimer);
+  try {
+    localStorage.removeItem(TASK_DRAFT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
 
 export async function renderTasks(container) {
   const writable = canWrite();
@@ -177,9 +244,46 @@ async function renderTaskView(container, writable) {
     });
     await renderCalendar(root);
   } else {
-    root.innerHTML = `<div id="task-list" class="stack"></div>`;
+    root.innerHTML = `
+      <div class="search-bar" style="margin-bottom: var(--space-3);">
+        ${icons.search}
+        <input type="search" id="task-search-input" placeholder="${escapeAttr(t("common.search_tasks_placeholder"))}" value="${escapeAttr(taskViewState.q)}" />
+      </div>
+      <div class="chip-row" id="task-filter-chips" style="margin-bottom: var(--space-3);"></div>
+      <div id="task-list" class="stack"></div>
+    `;
+    root.querySelector("#task-search-input").addEventListener(
+      "input",
+      debounce((e) => {
+        taskViewState.q = e.target.value;
+        loadTasks(container, writable);
+      }, 250)
+    );
+    renderTaskFilterChips(root, container, writable);
     await loadTasks(container, writable);
   }
+}
+
+function renderTaskFilterChips(root, container, writable) {
+  const chipsRoot = root.querySelector("#task-filter-chips");
+  if (!chipsRoot) return;
+  const chips = [{ id: "", label: t("common.all") }, ...categoriesCache.map((c) => ({
+    id: String(c.id),
+    label: c.icon ? `${c.icon} ${c.name}` : c.name,
+  }))];
+  chipsRoot.innerHTML = chips
+    .map(
+      (c) =>
+        `<span class="chip${String(taskViewState.categoryId) === c.id ? " chip-active" : ""}" data-cat="${escapeAttr(c.id)}">${escapeHtml(c.label)}</span>`
+    )
+    .join("");
+  chipsRoot.querySelectorAll(".chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      taskViewState.categoryId = chip.dataset.cat;
+      renderTaskFilterChips(root, container, writable);
+      loadTasks(container, writable);
+    });
+  });
 }
 
 function isSameLocalDay(a, b) {
@@ -315,9 +419,28 @@ async function loadTasks(container, writable) {
     return;
   }
 
+  // tasksCache stays the FULL, unfiltered set — the chain-link picker,
+  // the event-group root picker, and the "From task" lookups elsewhere
+  // on this page all read it expecting every task to be there, not just
+  // whatever the search box/category chip currently has visible.
   tasksCache = tasks;
+
+  let filtered = tasks;
+  if (taskViewState.q) {
+    const q = taskViewState.q.toLowerCase();
+    filtered = filtered.filter((task) => task.name.toLowerCase().includes(q));
+  }
+  if (taskViewState.categoryId) {
+    filtered = filtered.filter((task) => task.categories.some((c) => String(c.id) === taskViewState.categoryId));
+  }
+
+  if (filtered.length === 0) {
+    root.innerHTML = `<div class="empty-state">${escapeHtml(t("common.no_tasks_match"))}</div>`;
+    return;
+  }
+
   root.innerHTML = "";
-  tasks.forEach((task) => root.appendChild(taskRow(task, container, writable)));
+  filtered.forEach((task) => root.appendChild(taskRow(task, container, writable)));
 }
 
 function scheduleLabel(task) {
@@ -423,7 +546,14 @@ function taskRow(task, container, writable) {
   return row;
 }
 
-function openModalShell(titleText) {
+// `onDismiss`, when given, fires ONLY for a user-initiated close (the X
+// button or tapping the backdrop) — never for the caller's own `close()`
+// (used e.g. right after a successful save). openTaskModal uses this to
+// clear an in-progress New Task draft when the user explicitly walks
+// away from it, so a later "New Task" doesn't keep re-offering a draft
+// they already dismissed — while a forced session-expiry redirect (no
+// cleanup JS runs at all) still leaves the draft intact either way.
+function openModalShell(titleText, { onDismiss } = {}) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
@@ -437,9 +567,13 @@ function openModalShell(titleText) {
   `;
   document.body.appendChild(overlay);
   const close = () => overlay.remove();
-  overlay.querySelector("#modal-close").addEventListener("click", close);
+  const dismiss = () => {
+    onDismiss?.();
+    close();
+  };
+  overlay.querySelector("#modal-close").addEventListener("click", dismiss);
   overlay.addEventListener("click", (e) => {
-    if (e.target === overlay) close();
+    if (e.target === overlay) dismiss();
   });
   return { overlay, body: overlay.querySelector("#modal-body"), close };
 }
@@ -841,29 +975,19 @@ async function initChainLinksSection(body, task, writable) {
     }
   }
 
-  // A task that's already someone else's chain task can't itself chain
-  // further tasks (chaining is capped at one level — see
-  // crud.create_chain_link) — shown as an explanation instead of just
-  // letting the "add" control fail server-side.
-  async function renderCappedNotice() {
-    // `.hidden` CSS class, not the native `hidden` attribute — `.btn`'s
-    // own `display: inline-flex` otherwise wins the cascade over the
-    // browser's built-in `[hidden]` rule at equal specificity, and the
-    // button stays visually shown despite the attribute being set (see
-    // notifications.js's refreshNotificationBadge for the same fix,
-    // caught the same way).
-    childBtn.classList.add("hidden");
-    sameUserEl.classList.add("hidden");
-    // refresh() (and so this) can run more than once — e.g. removing an
-    // existing link re-triggers it — so reuse one notice element rather
-    // than inserting a new <p> after childBtn every time.
+  // A task that's already someone else's chain child can still chain
+  // its own children now (chaining isn't capped at one level anymore —
+  // see crud.create_chain_link) — shown as an informational note above
+  // the picker rather than blocking it the way the old one-level cap
+  // used to.
+  async function renderChainedFromNotice() {
     let notice = body.querySelector("#chain-capped-notice");
     if (!notice) {
       notice = document.createElement("p");
       notice.id = "chain-capped-notice";
       notice.className = "muted";
       notice.style.fontSize = "var(--font-size-xs)";
-      childBtn.insertAdjacentElement("afterend", notice);
+      childBtn.insertAdjacentElement("beforebegin", notice);
     }
     let parents = [];
     try {
@@ -874,7 +998,35 @@ async function initChainLinksSection(body, task, writable) {
     const names = parents.map((p) => p.parent_task_name).join(", ");
     notice.textContent = names
       ? t("tasks.already_chained_from", { name: task.name, parents: names })
-      : t("tasks.already_chained_from_other", { name: task.name });
+      : "";
+  }
+
+  // Every ancestor of `task` (its parent, its parent's parent, ...) —
+  // mirrors crud._chain_ancestors so the picker can proactively exclude
+  // them: chaining one in as a CHILD of `task` would close a cycle
+  // (ancestor -> ... -> task -> ancestor). The backend's own
+  // create_chain_link check catches this regardless, but filtering it
+  // out here avoids a round-trip just to find out it's rejected.
+  // Single-parent rule means this is normally a single walk up one
+  // parent at a time, not a general graph search.
+  async function collectAncestorIds(taskId) {
+    const ancestors = new Set();
+    const seen = new Set([taskId]);
+    let current = taskId;
+    while (true) {
+      let parents = [];
+      try {
+        parents = await api.get(`${HB}/tasks/${current}/chain-parents`);
+      } catch {
+        break;
+      }
+      const next = parents.find((p) => !seen.has(p.parent_task_id));
+      if (!next) break;
+      ancestors.add(next.parent_task_id);
+      seen.add(next.parent_task_id);
+      current = next.parent_task_id;
+    }
+    return ancestors;
   }
 
   async function refresh() {
@@ -918,17 +1070,21 @@ async function initChainLinksSection(body, task, writable) {
     }
 
     if (task.is_chain_child) {
-      await renderCappedNotice();
-      return;
+      await renderChainedFromNotice();
     }
 
-    // Excludes this task itself, any task already chained to it, and any
-    // task that's already someone else's chain child — chaining is
-    // capped at one level (see crud.create_chain_link), so a task that's
-    // already a chain child can't be picked as a child here either.
+    // Excludes this task itself, any task already chained to it, any
+    // task that's already someone else's chain child (single-parent
+    // rule — see crud.create_chain_link), and any of this task's own
+    // ANCESTORS (picking one in as a child would close a cycle).
     const linkedChildIds = new Set(links.map((l) => l.child_task_id));
+    const ancestorIds = task.is_chain_child ? await collectAncestorIds(task.id) : new Set();
     eligibleChildren = tasksCache.filter(
-      (task2) => task2.id !== task.id && !linkedChildIds.has(task2.id) && !task2.is_chain_child
+      (task2) =>
+        task2.id !== task.id &&
+        !linkedChildIds.has(task2.id) &&
+        !task2.is_chain_child &&
+        !ancestorIds.has(task2.id)
     );
     childBtn.disabled = !writable || eligibleChildren.length === 0;
     childBtn.innerHTML =
@@ -937,7 +1093,7 @@ async function initChainLinksSection(body, task, writable) {
         : `${icons.plus}<span>${escapeHtml(t("tasks.add_chain_task_btn"))}</span>`;
   }
 
-  if (writable && !task.is_chain_child) {
+  if (writable) {
     childBtn.addEventListener("click", () => {
       openTaskPickerModal({
         tasks: eligibleChildren,
@@ -947,7 +1103,7 @@ async function initChainLinksSection(body, task, writable) {
         onSelect: addChainLink,
       });
     });
-  } else if (!task.is_chain_child) {
+  } else {
     childBtn.disabled = true;
     sameUserEl.disabled = true;
   }
@@ -956,13 +1112,17 @@ async function initChainLinksSection(body, task, writable) {
 }
 
 async function openTaskModal(container, writable, task = null) {
+  // Only for a brand-new task — restoring a draft onto an EXISTING
+  // task's edit form risks silently overwriting fields with stale
+  // values from an unrelated earlier draft.
+  const draft = task ? null : loadTaskDraft();
   const selectedCats = new Set((task?.categories || []).map((c) => c.id));
-  const selectedWeekdays = new Set(task?.weekdays || []);
+  const selectedWeekdays = new Set(draft?.weekdays?.length ? draft.weekdays : task?.weekdays || []);
   // Manual is the default for a brand-new task (task is null here) — most
   // new tasks created lately are event-group roots/chain links, which
   // need manual specifically (see Recurrence.manual's own docstring);
   // picking daily/weekly/monthly is still one tap away, same as before.
-  const recurrence = task?.recurrence || "manual";
+  const recurrence = draft?.recurrence || task?.recurrence || "manual";
   const weekdayLabels = WEEKDAY_LABELS();
   const pinnable = pinnableUsers(await loadUsers(true));
   const canEditPin = isAdmin();
@@ -991,26 +1151,30 @@ async function openTaskModal(container, writable, task = null) {
   }
   const canDelete = Boolean(task) && (isAdmin() || (meCache && task.created_by_id === meCache.id));
 
-  const { body, close } = openModalShell(task ? t("tasks.edit_task_title") : t("tasks.new_task_title"));
+  const { body, close } = openModalShell(task ? t("tasks.edit_task_title") : t("tasks.new_task_title"), {
+    onDismiss: () => {
+      if (!task) clearTaskDraft();
+    },
+  });
 
   body.innerHTML = `
     <div class="stack">
       <div class="field">
         <label for="f-name">${escapeHtml(t("tasks.name_label"))}</label>
-        <input class="input" id="f-name" value="${escapeAttr(task?.name || "")}" required />
+        <input class="input" id="f-name" value="${escapeAttr(draft?.name ?? task?.name ?? "")}" required />
       </div>
       <div class="field">
         <label for="f-description">${escapeHtml(t("common.description_label"))}</label>
-        <textarea class="input" id="f-description" rows="2">${escapeHtml(task?.description || "")}</textarea>
+        <textarea class="input" id="f-description" rows="2">${escapeHtml(draft?.description ?? task?.description ?? "")}</textarea>
       </div>
       <div class="field-row">
         <div class="field">
           <label for="f-points">${escapeHtml(t("common.points_label"))}</label>
-          <input class="input" type="number" min="0" id="f-points" value="${task?.points ?? 1}" />
+          <input class="input" type="number" min="0" id="f-points" value="${draft?.points ?? task?.points ?? 1}" />
         </div>
         <div class="field">
           <label for="f-times">${escapeHtml(t("tasks.times_per_day_label"))}</label>
-          <input class="input" type="number" min="1" id="f-times" value="${task?.times_per_day ?? 1}" />
+          <input class="input" type="number" min="1" id="f-times" value="${draft?.times_per_day ?? task?.times_per_day ?? 1}" />
         </div>
       </div>
 
@@ -1113,8 +1277,16 @@ async function openTaskModal(container, writable, task = null) {
       if (selectedWeekdays.has(day)) selectedWeekdays.delete(day);
       else selectedWeekdays.add(day);
       pill.classList.toggle("on");
+      if (!task) saveTaskDraft(body);
     });
   });
+
+  if (!task) {
+    if (draft) showToast(t("tasks.draft_restored_toast"), "info");
+    ["#f-name", "#f-description", "#f-points", "#f-times", "#f-recurrence"].forEach((sel) => {
+      body.querySelector(sel).addEventListener("input", () => saveTaskDraft(body));
+    });
+  }
 
   body.querySelectorAll("#f-categories .chip").forEach((chip) => {
     chip.addEventListener("click", () => {
@@ -1176,6 +1348,7 @@ async function openTaskModal(container, writable, task = null) {
         await api.post(`${HB}/tasks`, payload);
       }
       showToast(t("tasks.task_saved"), "success");
+      if (!task) clearTaskDraft();
       invalidateAllTasksCache();
       close();
       loadTasks(container, writable);

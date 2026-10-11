@@ -35,6 +35,7 @@ from household_service.schemas import (
     EventGroupOut,
     EventGroupPreviewItem,
     EventGroupPreviewRequest,
+    EventGroupTriggerIn,
     EventGroupRunCleanup,
     EventGroupTriggerResult,
     HouseholdSettingsOut,
@@ -584,6 +585,7 @@ async def delete_event_group(
 @app.post("/event-groups/{group_id}/trigger", response_model=EventGroupTriggerResult)
 async def trigger_event_group(
     group_id: int,
+    body: EventGroupTriggerIn | None = None,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(can_write),
 ):
@@ -594,7 +596,12 @@ async def trigger_event_group(
         )
     me = await _self(db, user)
     try:
-        run, todos = await crud.trigger_event_group(db, group, me)
+        run, todos = await crud.trigger_event_group(
+            db,
+            group,
+            me,
+            override_root_task_ids=body.root_task_ids if body else None,
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)

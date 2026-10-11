@@ -10,7 +10,8 @@ import { api } from "./api.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
 import { navigate } from "./router.js";
-import { escapeHtml } from "./util.js";
+import { escapeHtml, escapeAttr } from "./util.js";
+import { openTaskPickerModal } from "./taskPicker.js";
 import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -99,6 +100,15 @@ export function openEventGroupPickerModal({ onSelect }) {
 // the modal closes — board.js uses it to refresh the todo list; the
 // Tasks page's own event-group list doesn't change on a trigger, so it
 // has nothing to pass here.
+//
+// `rootTaskIds` is a LOCAL, mutable working copy of the group's own
+// saved roots — swapping one (user request: "ability to swap out one
+// task before creation[, which] doesn't modify the event group on next
+// creation") only ever changes this in-memory array and what gets sent
+// to the trigger call (EventGroupTriggerIn.root_task_ids), never the
+// saved EventGroup/EventGroupTask rows — closing this modal (confirm OR
+// cancel) discards it either way, so the group's normal roots are
+// exactly what the NEXT trigger (manual or scheduled) uses again.
 export function openTriggerConfirmModal(group, { onTriggered } = {}) {
   const { body, close } = openOverlay(t("eg.trigger_title", { name: group.name }));
   body.innerHTML = `
@@ -109,15 +119,33 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
     </div>
   `;
 
-  (async () => {
+  let rootTaskIds = group.roots.map((r) => r.task_id);
+  let swapPickerData = null; // lazy-fetched — only needed once a swap is actually attempted
+
+  async function loadSwapPickerData() {
+    if (swapPickerData) return swapPickerData;
+    try {
+      const [tasks, categories] = await Promise.all([
+        api.get(`${HB}/tasks?active=true`),
+        api.get(`${HB}/categories`),
+      ]);
+      swapPickerData = { tasks, categories };
+    } catch {
+      swapPickerData = { tasks: [], categories: [] };
+    }
+    return swapPickerData;
+  }
+
+  async function renderPreview() {
+    const previewRoot = body.querySelector("#eg-trigger-preview");
     let items = [];
     try {
       items = await api.post(`${HB}/event-groups/preview`, {
-        root_task_ids: group.roots.map((r) => r.task_id),
+        root_task_ids: rootTaskIds,
         excluded_task_ids: group.excluded_task_ids,
       });
     } catch {
-      body.querySelector("#eg-trigger-preview").innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.couldnt_load_preview"))}</div>`;
+      previewRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.couldnt_load_preview"))}</div>`;
       return;
     }
 
@@ -126,7 +154,7 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
     // it's completed — see crud._spawn_chain_children_on_creation), so
     // every row gets the same "Created now"; "Chained from" is just
     // lineage, not a timing claim the way "After: X" used to read.
-    body.querySelector("#eg-trigger-preview").innerHTML = items.length
+    previewRoot.innerHTML = items.length
       ? items
           .map(
             (item) => `
@@ -135,7 +163,7 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
           <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
           ${
             item.is_root
-              ? ""
+              ? `<button class="btn btn-icon" data-swap-root="${item.task_id}" aria-label="${escapeAttr(t("eg.swap_task_aria", { name: item.task_name }))}" title="${escapeAttr(t("eg.swap_task_title"))}">${icons.swap}</button>`
               : `<span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
                  <span class="badge ${item.excluded ? "badge-neutral" : "badge-info"}">${item.excluded ? escapeHtml(t("eg.not_grouped")) : escapeHtml(t("eg.grouped"))}</span>`
           }
@@ -144,22 +172,49 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
           .join("")
       : `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("eg.nothing_to_create"))}</span>`;
 
+    previewRoot.querySelectorAll("[data-swap-root]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const currentTaskId = Number(btn.dataset.swapRoot);
+        const { tasks, categories } = await loadSwapPickerData();
+        const candidates = tasks.filter(
+          (candidate) =>
+            !candidate.is_chain_child &&
+            (candidate.id === currentTaskId || !rootTaskIds.includes(candidate.id))
+        );
+        openTaskPickerModal({
+          tasks: candidates,
+          categories,
+          title: t("eg.swap_task_title"),
+          onSelect: (picked) => {
+            const index = rootTaskIds.indexOf(currentTaskId);
+            if (index !== -1) rootTaskIds[index] = picked.id;
+            renderPreview();
+          },
+        });
+      });
+    });
+
     const confirmBtn = body.querySelector("#eg-trigger-confirm");
     confirmBtn.disabled = items.filter((i) => i.is_root).length === 0;
+  }
 
-    confirmBtn.addEventListener("click", async () => {
-      confirmBtn.disabled = true;
-      try {
-        const result = await api.post(`${HB}/event-groups/${group.id}/trigger`);
-        const count = result.todos.length;
-        showToast(t("eg.created_toast", { n: count, count, name: group.name }), "success");
-        close();
-        onTriggered?.(result);
-      } catch {
-        // api.js already showed a toast — e.g. a root went inactive since
-        // this group was saved (re-validated server-side at trigger time).
-        confirmBtn.disabled = false;
-      }
-    });
-  })();
+  renderPreview();
+
+  body.querySelector("#eg-trigger-confirm").addEventListener("click", async () => {
+    const confirmBtn = body.querySelector("#eg-trigger-confirm");
+    confirmBtn.disabled = true;
+    try {
+      const result = await api.post(`${HB}/event-groups/${group.id}/trigger`, {
+        root_task_ids: rootTaskIds,
+      });
+      const count = result.todos.length;
+      showToast(t("eg.created_toast", { n: count, count, name: group.name }), "success");
+      close();
+      onTriggered?.(result);
+    } catch {
+      // api.js already showed a toast — e.g. a root went inactive since
+      // this group was saved (re-validated server-side at trigger time).
+      confirmBtn.disabled = false;
+    }
+  });
 }
