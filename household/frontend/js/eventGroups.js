@@ -16,14 +16,17 @@ import { t } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
 
-function openOverlay(titleText) {
+function openOverlay(titleText, { extraHeaderHtml = "" } = {}) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2>${escapeHtml(titleText)}</h2>
-        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
+        <div class="row" style="gap: var(--space-2);">
+          ${extraHeaderHtml}
+          <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeHtml(t("common.close"))}">${icons.close}</button>
+        </div>
       </div>
       <div id="modal-body"></div>
     </div>
@@ -110,7 +113,9 @@ export function openEventGroupPickerModal({ onSelect }) {
 // cancel) discards it either way, so the group's normal roots are
 // exactly what the NEXT trigger (manual or scheduled) uses again.
 export function openTriggerConfirmModal(group, { onTriggered } = {}) {
-  const { body, close } = openOverlay(t("eg.trigger_title", { name: group.name }));
+  const { body, close, overlay } = openOverlay(t("eg.trigger_title", { name: group.name }), {
+    extraHeaderHtml: `<button class="btn btn-icon btn-ghost" id="eg-swap-mode-toggle" aria-label="${escapeAttr(t("eg.swap_mode_aria"))}" title="${escapeAttr(t("eg.swap_mode_title"))}" aria-pressed="false">${icons.edit}</button>`,
+  });
   body.innerHTML = `
     <p class="muted" style="font-size: var(--font-size-sm); margin-top: 0;">${escapeHtml(t("eg.this_creates"))}</p>
     <div id="eg-trigger-preview" class="stack"><div class="skeleton" style="height: 40px;"></div></div>
@@ -121,6 +126,18 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
 
   let rootTaskIds = group.roots.map((r) => r.task_id);
   let swapPickerData = null; // lazy-fetched — only needed once a swap is actually attempted
+  // Off by default — a root's swap button is only shown once the user
+  // explicitly asks for it via the pencil icon next to Close, so the
+  // normal, common case (just confirm and create) stays uncluttered.
+  let editMode = false;
+  const editToggleBtn = overlay.querySelector("#eg-swap-mode-toggle");
+  editToggleBtn.addEventListener("click", () => {
+    editMode = !editMode;
+    editToggleBtn.classList.toggle("btn-ghost", !editMode);
+    editToggleBtn.classList.toggle("btn-primary", editMode);
+    editToggleBtn.setAttribute("aria-pressed", String(editMode));
+    body.querySelectorAll("[data-swap-root]").forEach((btn) => btn.classList.toggle("hidden", !editMode));
+  });
 
   async function loadSwapPickerData() {
     if (swapPickerData) return swapPickerData;
@@ -154,19 +171,27 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
     // it's completed — see crud._spawn_chain_children_on_creation), so
     // every row gets the same "Created now"; "Chained from" is just
     // lineage, not a timing claim the way "After: X" used to read.
+    // A root row stays one line (title + swap button); a descendant's
+    // badges sit on their own wrapping row below the title instead of
+    // sharing its line, same overflow fix as tasks.js's own preview.
     previewRoot.innerHTML = items.length
       ? items
-          .map(
-            (item) => `
-        <div class="eg-preview-row${item.is_root ? "" : " eg-preview-descendant"}">
+          .map((item) =>
+            item.is_root
+              ? `
+        <div class="eg-preview-row">
           <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
           <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
-          ${
-            item.is_root
-              ? `<button class="btn btn-icon" data-swap-root="${item.task_id}" aria-label="${escapeAttr(t("eg.swap_task_aria", { name: item.task_name }))}" title="${escapeAttr(t("eg.swap_task_title"))}">${icons.swap}</button>`
-              : `<span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
-                 <span class="badge ${item.excluded ? "badge-neutral" : "badge-info"}">${item.excluded ? escapeHtml(t("eg.not_grouped")) : escapeHtml(t("eg.grouped"))}</span>`
-          }
+          <button class="btn btn-icon${editMode ? "" : " hidden"}" data-swap-root="${item.task_id}" aria-label="${escapeAttr(t("eg.swap_task_aria", { name: item.task_name }))}" title="${escapeAttr(t("eg.swap_task_title"))}">${icons.swap}</button>
+        </div>`
+              : `
+        <div class="eg-preview-row eg-preview-descendant">
+          <div class="eg-preview-top"><span class="eg-preview-title">${escapeHtml(item.task_name)}</span></div>
+          <div class="eg-badge-row">
+            <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
+            <span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
+            <span class="badge ${item.excluded ? "badge-neutral" : "badge-info"}">${item.excluded ? escapeHtml(t("eg.not_grouped")) : escapeHtml(t("eg.grouped"))}</span>
+          </div>
         </div>`
           )
           .join("")

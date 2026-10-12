@@ -3385,7 +3385,9 @@ async def mark_report_paid(db: AsyncSession, report: Report, paid: bool) -> Repo
     return report
 
 
-async def run_scheduled_auto_report_if_due(db: AsyncSession) -> Report | None:
+async def run_scheduled_auto_report_if_due(
+    db: AsyncSession, *, now: datetime | None = None
+) -> Report | None:
     """Called hourly by household_service.scheduler. Not a weekday/hour
     match like the nudge — a "catch up" check instead: due whenever
     auto-generation is on and the most recently COMPLETED week (the one
@@ -3394,12 +3396,26 @@ async def run_scheduled_auto_report_if_due(db: AsyncSession) -> Report | None:
     was down right when the week rolled over, instead of silently
     missing that week forever. If an admin already generated that exact
     week's report manually, this just stamps it as done instead of
-    generating a duplicate PDF."""
+    generating a duplicate PDF.
+
+    "Today"/"the current week" are HouseholdSettings.timezone's local
+    calendar day, not raw UTC's (same user report as the event-group
+    schedule's and weekly nudge's own fix) — reading raw UTC here meant
+    the previous week could flip to "completed" as early as UTC
+    midnight, hours before the household's own local midnight, so the
+    report generated too early relative to what the admin configured
+    week_start_weekday to mean.
+
+    `now` is injectable (any aware datetime — UTC in practice), same
+    reasoning as run_scheduled_event_groups_if_due's own `now` param:
+    lets a test or an on-demand check cross a local week boundary
+    without waiting for the real clock to get there."""
     settings = await get_settings_row(db)
     if not settings.auto_report_enabled:
         return None
 
-    today = datetime.now(UTC).date()
+    now = now or datetime.now(UTC)
+    today = now.astimezone(ZoneInfo(settings.timezone)).date()
     current_week_start, _ = week_bounds(today, settings.week_start_weekday)
     last_week_start = current_week_start - timedelta(days=7)
     last_week_end = current_week_start - timedelta(days=1)

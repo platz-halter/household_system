@@ -2,7 +2,7 @@ import { CONFIG } from "./config.js";
 import { api } from "./api.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
-import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_NAMES } from "./util.js";
+import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_NAMES, wireToggle, isToggleOn } from "./util.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { t } from "./i18n.js";
 
@@ -383,8 +383,9 @@ async function loadSchedule(container) {
       : t("admin.hasnt_run_yet");
 
     root.innerHTML = `
-      <div class="field">
-        <label class="row"><input type="checkbox" id="schedule-enabled" ${settings.nudge_weekday !== null ? "checked" : ""} /> <span>${escapeHtml(t("admin.also_send_automatically"))}</span></label>
+      <div class="toggle-row">
+        <span class="toggle-row-label" id="schedule-enabled-label">${escapeHtml(t("admin.also_send_automatically"))}</span>
+        <button type="button" class="toggle-switch" id="schedule-enabled" role="switch" aria-checked="${settings.nudge_weekday !== null ? "true" : "false"}" aria-labelledby="schedule-enabled-label"></button>
       </div>
       <div class="field-row" id="schedule-fields" style="margin-top: var(--space-2); ${settings.nudge_weekday !== null ? "" : "display:none;"}">
         <div class="field">
@@ -406,14 +407,16 @@ async function loadSchedule(container) {
       </div>
     `;
 
-    const enabledCheckbox = root.querySelector("#schedule-enabled");
+    const enabledToggle = root.querySelector("#schedule-enabled");
     const fields = root.querySelector("#schedule-fields");
-    enabledCheckbox.addEventListener("change", () => {
-      fields.style.display = enabledCheckbox.checked ? "" : "none";
+    wireToggle(enabledToggle, {
+      onChange: (on) => {
+        fields.style.display = on ? "" : "none";
+      },
     });
 
     root.querySelector("#schedule-save").addEventListener("click", async () => {
-      const enabled = enabledCheckbox.checked;
+      const enabled = isToggleOn(enabledToggle);
       try {
         await patchSettings({
           nudge_weekday: enabled ? Number(root.querySelector("#schedule-weekday").value) : null,
@@ -440,8 +443,9 @@ async function loadOverdueCleanup(container) {
     const enabled = settings.overdue_delete_after_days !== null;
 
     root.innerHTML = `
-      <div class="field">
-        <label class="row"><input type="checkbox" id="overdue-enabled" ${enabled ? "checked" : ""} /> <span>${escapeHtml(t("admin.automatically_delete_overdue"))}</span></label>
+      <div class="toggle-row">
+        <span class="toggle-row-label" id="overdue-enabled-label">${escapeHtml(t("admin.automatically_delete_overdue"))}</span>
+        <button type="button" class="toggle-switch" id="overdue-enabled" role="switch" aria-checked="${enabled ? "true" : "false"}" aria-labelledby="overdue-enabled-label"></button>
       </div>
       <div class="field" id="overdue-fields" style="margin-top: var(--space-2); ${enabled ? "" : "display:none;"}">
         <label for="overdue-days">${escapeHtml(t("admin.after_days_label"))}</label>
@@ -453,14 +457,16 @@ async function loadOverdueCleanup(container) {
       </div>
     `;
 
-    const enabledCheckbox = root.querySelector("#overdue-enabled");
+    const enabledToggle = root.querySelector("#overdue-enabled");
     const fields = root.querySelector("#overdue-fields");
-    enabledCheckbox.addEventListener("change", () => {
-      fields.style.display = enabledCheckbox.checked ? "" : "none";
+    wireToggle(enabledToggle, {
+      onChange: (on) => {
+        fields.style.display = on ? "" : "none";
+      },
     });
 
     root.querySelector("#overdue-save").addEventListener("click", async () => {
-      const on = enabledCheckbox.checked;
+      const on = isToggleOn(enabledToggle);
       const days = Number(root.querySelector("#overdue-days").value || 0);
       if (on && days < 1) {
         showToast(t("admin.enter_at_least_1_day"), "warning");
@@ -552,11 +558,9 @@ async function loadAutoReport(container) {
       ? t("admin.last_auto_generated", { date: settings.last_auto_report_period })
       : t("admin.hasnt_run_yet");
     root.innerHTML = `
-      <div class="field">
-        <label class="row">
-          <input type="checkbox" id="auto-report-enabled" ${settings.auto_report_enabled ? "checked" : ""} />
-          <span>${escapeHtml(t("admin.auto_generate_label"))}</span>
-        </label>
+      <div class="toggle-row">
+        <span class="toggle-row-label" id="auto-report-enabled-label">${escapeHtml(t("admin.auto_generate_label"))}</span>
+        <button type="button" class="toggle-switch" id="auto-report-enabled" role="switch" aria-checked="${settings.auto_report_enabled ? "true" : "false"}" aria-labelledby="auto-report-enabled-label"></button>
       </div>
       <div class="row" style="margin-top: var(--space-2);">
         <span class="muted" style="font-size: var(--font-size-xs); flex: 1;">${escapeHtml(lastAuto)}</span>
@@ -565,7 +569,7 @@ async function loadAutoReport(container) {
     `;
     root.querySelector("#auto-report-save").addEventListener("click", async () => {
       try {
-        await patchSettings({ auto_report_enabled: root.querySelector("#auto-report-enabled").checked });
+        await patchSettings({ auto_report_enabled: isToggleOn(root.querySelector("#auto-report-enabled")) });
         showToast(t("common.saved_toast"), "success");
       } catch {
         /* api.js already showed a toast */

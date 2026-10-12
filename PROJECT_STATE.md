@@ -183,6 +183,77 @@ below).
     `env()` inset, with no simulation support — so that fix, while
     plausible, was never actually confirmed against real device
     behavior either.
+- 1.2.0 also picked up a ninth round: the weekly auto-report
+  (`crud.run_scheduled_auto_report_if_due`) read raw UTC to decide
+  which week had just completed, the same local-vs-UTC gap the
+  event-group schedule and weekly nudge each already had their own
+  round fixed — a household west of UTC could get its report for the
+  still-ongoing week hours before that week was actually over
+  locally. Fixed the same way (read `HouseholdSettings.timezone`'s
+  local calendar day instead); gained an injectable `now` param for
+  the same testability reason `run_scheduled_event_groups_if_due`
+  already has one. Live-verified against an isolated `household_sim`
+  database (a scenario straddling the UTC/local day boundary;
+  dropped afterward).
+  - **The bigger piece of this round**: the Task and Event Group
+    create/edit dialogs were completely redesigned as mobile-first,
+    multi-page wizards (2 pages for a new task, 3 for an existing one
+    with a Chain tasks page; 2 for an Event Group), on direct user
+    feedback that both looked cramped on mobile and some Event Group
+    preview text was overflowing/unreadable. Each page groups related
+    fields (Basics+Schedule / Who & options / Chain tasks) rather than
+    splitting every field onto its own screen, which an earlier,
+    rejected draft of this redesign left feeling too sparse. The
+    modal shell itself (`.modal`/`.modal-overlay`) is untouched — a
+    page taller than the viewport still falls back to its existing
+    scroll, it just shouldn't need to in ordinary use. The Event
+    Group preview's root rows moved from chips to full-width rows
+    (clean ellipsis truncation instead of chip-wrapping), and a
+    descendant's badges ("Created now", "Chained from: X") now sit on
+    their own wrapping row below the title instead of sharing its
+    line — the actual source of the reported overflow. The same badge
+    fix was applied to the OTHER event-group preview renderer, in the
+    trigger-confirm modal (`eventGroups.js`), which had the identical
+    bug. That modal also gained a pencil icon in its header, next to
+    Close — user request — that toggles an edit mode revealing each
+    root's swap-for-a-different-task button (hidden by default now,
+    rather than always visible on every row). Every `<input
+    type="checkbox">` across the household frontend (ramp-up, active,
+    schedule-enabled, the New Todo form's "also create chain task",
+    and three in the Admin panel) was replaced with a real `<button
+    role="switch" aria-checked>` toggle-switch component (`.toggle-
+    switch` in components.css, `wireToggle`/`isToggleOn` in
+    `util.js`, now shared cross-file rather than duplicated) — bigger
+    tap target, clearer on/off state, same user request ("make
+    checkboxes in the whole design look better... mobile optimized").
+    Points/Times-per-day/Bonus-points gained a `±` stepper control
+    alongside the still-directly-editable number input.
+  - **A real overflow bug found and fixed during live verification,
+    not assumed away**: the Task wizard's Points/Times-per-day row
+    (a `.field-row` 2-column CSS grid) pushed the second column off
+    the right edge of a phone-width viewport. Root cause: a `1fr`
+    grid track's implicit minimum width is `auto` (≈ its item's own
+    min-content size), and a bare `<input type="number">`'s
+    browser-default intrinsic width is wide enough to force both
+    tracks past the container — `min-width: 0` on the flex children
+    inside `.stepper` doesn't help, because that override only
+    affects THEIR OWN flex layout, not what the grid reports as the
+    outer `.field` grid item's min-content. Fixed with `.field-row >
+    .field { min-width: 0; }`. Caught by actually screenshotting a
+    live, token-authenticated render of the real app (headless
+    Chromium via CDP, serving the edited source through a throwaway
+    SPA-fallback static server against the real backend containers)
+    — not by reasoning about the CSS alone, which had missed it
+    twice. Chromium/CDP navigation, which hung indefinitely and was
+    abandoned earlier this session (see the eighth round above), is
+    confirmed working again this round — that failure was environmental,
+    not a lasting limitation.
+  - Scope note: the checkbox-to-toggle-switch change covers the
+    household frontend only, since that's what this round's feedback
+    was about — `storage/frontend` still has its own plain checkboxes
+    (its own independent, deliberately-not-shared `js/` directory —
+    see "Frontend conventions" below), left alone rather than reached
+    into unprompted.
 - 1.1.0 adds **chained tasks**: completing one task can auto-spawn
   others onto the board as one-off todos, so a parent chore like "Set
   the table" can define child chores like "Clear the table" that only

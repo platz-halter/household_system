@@ -47,6 +47,27 @@ export function WEEKDAY_NAMES() {
 // just not for the first instant.
 const SKELETON_DELAY_MS = 200;
 
+// A real <button role="switch" aria-checked> in place of a plain
+// <input type="checkbox"> — bigger tap target, and a mobile toggle
+// reads more clearly than a tiny square (user feedback: "make
+// checkboxes in the whole design look better and make them mobile
+// optimized"). State lives entirely in the `aria-checked` attribute,
+// so there's nothing else to keep in sync; styling is `.toggle-switch`
+// in components.css. Shared here rather than duplicated per file,
+// since every settings-style on/off control across the app (tasks.js,
+// board.js, admin.js) now uses this same control.
+export function wireToggle(btn, { onChange } = {}) {
+  btn.addEventListener("click", () => {
+    const next = btn.getAttribute("aria-checked") !== "true";
+    btn.setAttribute("aria-checked", String(next));
+    onChange?.(next);
+  });
+}
+
+export function isToggleOn(btn) {
+  return btn?.getAttribute("aria-checked") === "true";
+}
+
 export function showSkeletonAfterDelay(root, html, delayMs = SKELETON_DELAY_MS) {
   const timer = setTimeout(() => {
     root.innerHTML = html;

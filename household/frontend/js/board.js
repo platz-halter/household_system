@@ -7,7 +7,7 @@ import { showConfirmDialog } from "./confirmDialog.js";
 import { openTaskPickerModal } from "./taskPicker.js";
 import { takeoverControl } from "./takeover.js";
 import { openEventGroupPickerModal, openTriggerConfirmModal } from "./eventGroups.js";
-import { escapeHtml, escapeAttr, dueBadge, initials, showSkeletonAfterDelay } from "./util.js";
+import { escapeHtml, escapeAttr, dueBadge, initials, showSkeletonAfterDelay, wireToggle, isToggleOn } from "./util.js";
 import { t, getLocale } from "./i18n.js";
 
 const HB = CONFIG.HOUSEHOLD_BASE;
@@ -557,8 +557,11 @@ async function openTodoModal(container) {
           </button>
         </div>
         <div class="field hidden" id="t-chain-field">
-          <label class="row"><input type="checkbox" id="t-spawn-chain" checked /> <span>${escapeHtml(t("board.also_create_chain"))}</span></label>
-          <p class="muted" id="t-chain-preview" style="font-size: var(--font-size-xs); margin: 4px 0 0 24px;"></p>
+          <div class="toggle-row">
+            <span class="toggle-row-label" id="t-spawn-chain-label">${escapeHtml(t("board.also_create_chain"))}</span>
+            <button type="button" class="toggle-switch" id="t-spawn-chain" role="switch" aria-checked="true" aria-labelledby="t-spawn-chain-label"></button>
+          </div>
+          <p class="muted" id="t-chain-preview" style="font-size: var(--font-size-xs); margin: 4px 0 0;"></p>
         </div>
         <div class="field">
           <label for="t-title">${escapeHtml(t("board.title_label"))}</label>
@@ -621,17 +624,22 @@ async function openTodoModal(container) {
   // instance of that task's occurrence.
   let selectedSourceTaskId = null;
   const chainFieldEl = overlay.querySelector("#t-chain-field");
-  const spawnChainCheckbox = overlay.querySelector("#t-spawn-chain");
+  const spawnChainToggle = overlay.querySelector("#t-spawn-chain");
   const chainPreviewEl = overlay.querySelector("#t-chain-preview");
   // Discards a stale fetch's result if picking task A, then quickly
   // picking task B before A's own GET /chain-links lands — without
-  // this, A's chain task names could render under B's checkbox.
+  // this, A's chain task names could render under B's toggle.
   let chainLinksSeq = 0;
   function renderChainPreview(links) {
-    chainPreviewEl.textContent = spawnChainCheckbox.checked
+    chainPreviewEl.textContent = isToggleOn(spawnChainToggle)
       ? t("board.will_also_create", { names: links.map((l) => l.child_task_name).join(", ") })
       : "";
   }
+  // Reassigned per task pick (below), same reasoning plain DOM code
+  // would reach for a reassignable `.onchange` — wireToggle itself is
+  // only ever wired once.
+  let onChainToggleChange = () => {};
+  wireToggle(spawnChainToggle, { onChange: () => onChainToggleChange() });
   overlay.querySelector("#t-task-btn").addEventListener("click", () => {
     openTaskPickerModal({
       tasks,
@@ -657,12 +665,12 @@ async function openTodoModal(container) {
           ? String(task.pinned_user_id)
           : "";
 
-        // The checkbox only matters — and only shows — when the picked
+        // The toggle only matters — and only shows — when the picked
         // task actually has a chain task to skip; nothing to deactivate
-        // otherwise. Defaults checked (spawn) every time a new task is
-        // picked, so an earlier uncheck doesn't silently carry over to
-        // a different task.
-        spawnChainCheckbox.checked = true;
+        // otherwise. Defaults on (spawn) every time a new task is
+        // picked, so an earlier toggle-off doesn't silently carry over
+        // to a different task.
+        spawnChainToggle.setAttribute("aria-checked", "true");
         chainFieldEl.classList.add("hidden");
         chainPreviewEl.textContent = "";
         const seq = ++chainLinksSeq;
@@ -676,7 +684,7 @@ async function openTodoModal(container) {
           if (seq !== chainLinksSeq) return; // a newer pick already landed
           chainFieldEl.classList.toggle("hidden", links.length === 0);
           renderChainPreview(links);
-          spawnChainCheckbox.onchange = () => renderChainPreview(links);
+          onChainToggleChange = () => renderChainPreview(links);
         }
       },
     });
@@ -698,7 +706,7 @@ async function openTodoModal(container) {
       due_in_days: dueRaw === "" ? null : Number(dueRaw),
       assigned_to_id: assigneeRaw === "" ? null : Number(assigneeRaw),
       source_task_id: selectedSourceTaskId,
-      spawn_chain_children: spawnChainCheckbox.checked,
+      spawn_chain_children: isToggleOn(spawnChainToggle),
     };
 
     try {

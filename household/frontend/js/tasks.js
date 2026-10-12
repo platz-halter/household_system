@@ -6,7 +6,7 @@ import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { openTaskPickerModal } from "./taskPicker.js";
 import { openTriggerConfirmModal } from "./eventGroups.js";
-import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS } from "./util.js";
+import { escapeHtml, escapeAttr, showSkeletonAfterDelay, WEEKDAY_LABELS, wireToggle, isToggleOn } from "./util.js";
 import { t, getLocale } from "./i18n.js";
 import { invalidateAllTasksCache } from "./home.js";
 
@@ -217,6 +217,23 @@ async function loadUsers(force = false) {
 // else for exactly that case.
 function pinnableUsers(users) {
   return users.filter((u) => u.role !== "viewer");
+}
+
+// Wires a `.stepper`'s ± buttons to the number input beside them —
+// the input itself stays real and directly editable (still what
+// draft-autosave and the save payload read); the buttons just nudge
+// its value and fire a real "input" event so every existing listener
+// reacts exactly as if the user had typed the new value.
+function wireStepper(stepper, { min = 0 } = {}) {
+  if (!stepper) return;
+  const input = stepper.querySelector("input");
+  stepper.querySelectorAll("button[data-step]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const delta = Number(btn.dataset.step);
+      input.value = Math.max(min, (Number(input.value) || 0) + delta);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  });
 }
 
 async function renderTaskView(container, writable) {
@@ -553,14 +570,17 @@ function taskRow(task, container, writable) {
 // away from it, so a later "New Task" doesn't keep re-offering a draft
 // they already dismissed — while a forced session-expiry redirect (no
 // cleanup JS runs at all) still leaves the draft intact either way.
-function openModalShell(titleText, { onDismiss } = {}) {
+function openModalShell(titleText, { onDismiss, extraHeaderHtml = "" } = {}) {
   const overlay = document.createElement("div");
   overlay.className = "modal-overlay";
   overlay.innerHTML = `
     <div class="modal" role="dialog" aria-modal="true">
       <div class="modal-header">
         <h2>${escapeHtml(titleText)}</h2>
-        <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeAttr(t("common.close"))}">${icons.close}</button>
+        <div class="row" style="gap: var(--space-2);">
+          ${extraHeaderHtml}
+          <button class="btn btn-icon btn-ghost" id="modal-close" aria-label="${escapeAttr(t("common.close"))}">${icons.close}</button>
+        </div>
       </div>
       <div id="modal-body"></div>
     </div>
@@ -646,6 +666,15 @@ function openCategoryModal(container, writable, category = null) {
 // ordered array (not a Set) so position is preserved on save, same as
 // the chain-link picker's "pick = add, right away" flow — there's no
 // separate confirm step for adding a root either.
+// A 2-page wizard (Name & tasks / Preview & schedule) — redesigned
+// alongside the Task modal on the same feedback ("cramped... cause
+// some text to be unreadable/overflowing over multiple lines"). Roots
+// moved from chips to full-width rows (a long name truncates cleanly
+// with an ellipsis instead of wrapping inside a pill), and a preview
+// descendant's badges now sit on their own wrapping line below the
+// title instead of squeezed onto the same line as it — see
+// .eg-preview-row's own comment in components.css for the full
+// before/after.
 async function openEventGroupModal(container, writable, group = null) {
   await ensureTasksCache();
   const timezone = timezoneCache;
@@ -675,17 +704,32 @@ async function openEventGroupModal(container, writable, group = null) {
   let lastPreviewTaskIds = new Set();
   let previewSeq = 0;
 
-  const { body, close } = openModalShell(group ? t("tasks.edit_event_group_title") : t("tasks.new_event_group_title"));
+  const { body, close, overlay } = openModalShell(group ? t("tasks.edit_event_group_title") : t("tasks.new_event_group_title"), {
+    extraHeaderHtml:
+      group && writable
+        ? `<button class="btn btn-icon btn-ghost" id="eg-delete" aria-label="${escapeAttr(t("tasks.delete_event_group_title"))}" title="${escapeAttr(t("tasks.delete_event_group_title"))}">${icons.trash}</button>`
+        : "",
+  });
+
+  const lastPage = 2;
 
   body.innerHTML = `
-    <div class="stack">
+    <div class="wizard-dots">
+      <span class="wizard-dot on" data-dot="1"></span>
+      <span class="wizard-dot" data-dot="2"></span>
+    </div>
+
+    <div class="wizard-page" data-page="1">
+      <p class="wizard-step-title">${escapeHtml(t("tasks.eg_step_tasks_title"))}</p>
+      <p class="wizard-step-sub">${escapeHtml(t("tasks.eg_step_tasks_sub"))}</p>
+
       <div class="field">
         <label for="eg-name">${escapeHtml(t("tasks.name_label"))}</label>
         <input class="input" id="eg-name" value="${escapeAttr(group?.name || "")}" required />
       </div>
-      <div class="field">
+      <div class="field" style="margin-top: var(--space-5);">
         <label>${escapeHtml(t("tasks.eg_tasks_in_group_label"))}</label>
-        <div class="chip-row" id="eg-roots" style="margin-bottom: var(--space-2);"></div>
+        <div class="stack" id="eg-roots" style="margin: var(--space-2) 0; gap: var(--space-2);"></div>
         ${
           writable
             ? `<button type="button" class="btn btn-ghost btn-block" id="eg-add-root-btn" style="justify-content: center;">
@@ -694,44 +738,70 @@ async function openEventGroupModal(container, writable, group = null) {
             : ""
         }
       </div>
-      <div class="field">
-        <label>${escapeHtml(t("tasks.eg_preview_label"))}</label>
-        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
-          ${escapeHtml(t("tasks.eg_preview_desc"))}
-        </p>
-        <div id="eg-preview-list" class="stack"></div>
+    </div>
+
+    <div class="wizard-page" data-page="2" style="display: none;">
+      <p class="wizard-step-title">${escapeHtml(t("tasks.eg_step_preview_title"))}</p>
+      <p class="wizard-step-sub">${escapeHtml(t("tasks.eg_step_preview_sub"))}</p>
+
+      <p class="wizard-sub-head">${escapeHtml(t("tasks.eg_preview_label"))}</p>
+      <p class="muted" style="font-size: var(--font-size-xs); margin: -8px 0 var(--space-3);">
+        ${escapeHtml(t("tasks.eg_preview_desc"))}
+      </p>
+      <div id="eg-preview-list" class="stack"></div>
+
+      <div class="toggle-row" style="margin-top: var(--space-6);">
+        <span class="toggle-row-label" id="eg-schedule-label">${escapeHtml(t("tasks.eg_auto_trigger_label"))}</span>
+        <button type="button" class="toggle-switch" id="eg-schedule-enabled" role="switch" aria-checked="${group?.schedule_recurrence ? "true" : "false"}" aria-labelledby="eg-schedule-label" ${writable ? "" : "disabled"}></button>
       </div>
-      <div class="field">
-        <label class="row">
-          <input type="checkbox" id="eg-schedule-enabled" ${group?.schedule_recurrence ? "checked" : ""} ${writable ? "" : "disabled"} />
-          <span>${escapeHtml(t("tasks.eg_auto_trigger_label"))}</span>
-        </label>
-        <div id="eg-schedule-fields" style="margin-top: var(--space-2); ${group?.schedule_recurrence ? "" : "display:none;"}">
-          <label for="eg-schedule-recurrence">${escapeHtml(t("tasks.eg_repeats_label"))}</label>
-          <select class="select" id="eg-schedule-recurrence" ${writable ? "" : "disabled"}>
-            <option value="daily" ${(group?.schedule_recurrence ?? "daily") === "daily" ? "selected" : ""}>${escapeHtml(t("common.recurrence_daily"))}</option>
-            <option value="weekly" ${group?.schedule_recurrence === "weekly" ? "selected" : ""}>${escapeHtml(t("tasks.eg_specific_weekdays"))}</option>
-          </select>
-          <div class="weekday-picker" id="eg-schedule-weekdays" style="margin-top: var(--space-2); ${group?.schedule_recurrence === "weekly" ? "" : "display:none;"}">
-            ${weekdayLabels.map((label, i) => `<div class="weekday-pill${(group?.schedule_weekdays || []).includes(i) ? " on" : ""}" data-day="${i}">${escapeHtml(label)}</div>`).join("")}
-          </div>
-          <label for="eg-schedule-hour" style="margin-top: var(--space-2); display: block;">${escapeHtml(t("common.at_tz_label", { tz: timezone }))}</label>
-          <select class="select" id="eg-schedule-hour" ${writable ? "" : "disabled"}>
-            ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${(group?.schedule_hour ?? 18) === h ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("")}
-          </select>
-          <p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">
-            ${escapeHtml(t("tasks.eg_schedule_note", { tz: timezone }))}
-          </p>
+      <div id="eg-schedule-fields" style="margin-top: var(--space-3); ${group?.schedule_recurrence ? "" : "display:none;"}">
+        <label for="eg-schedule-recurrence">${escapeHtml(t("tasks.eg_repeats_label"))}</label>
+        <select class="select" id="eg-schedule-recurrence" ${writable ? "" : "disabled"}>
+          <option value="daily" ${(group?.schedule_recurrence ?? "daily") === "daily" ? "selected" : ""}>${escapeHtml(t("common.recurrence_daily"))}</option>
+          <option value="weekly" ${group?.schedule_recurrence === "weekly" ? "selected" : ""}>${escapeHtml(t("tasks.eg_specific_weekdays"))}</option>
+        </select>
+        <div class="weekday-picker" id="eg-schedule-weekdays" style="margin-top: var(--space-2); ${group?.schedule_recurrence === "weekly" ? "" : "display:none;"}">
+          ${weekdayLabels.map((label, i) => `<div class="weekday-pill${(group?.schedule_weekdays || []).includes(i) ? " on" : ""}" data-day="${i}">${escapeHtml(label)}</div>`).join("")}
         </div>
+        <label for="eg-schedule-hour" style="margin-top: var(--space-3); display: block;">${escapeHtml(t("common.at_tz_label", { tz: timezone }))}</label>
+        <select class="select" id="eg-schedule-hour" ${writable ? "" : "disabled"}>
+          ${Array.from({ length: 24 }, (_, h) => `<option value="${h}" ${(group?.schedule_hour ?? 18) === h ? "selected" : ""}>${String(h).padStart(2, "0")}:00</option>`).join("")}
+        </select>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">
+          ${escapeHtml(t("tasks.eg_schedule_note", { tz: timezone }))}
+        </p>
       </div>
     </div>
+
     <div class="modal-footer">
-      ${group && writable ? `<button class="btn btn-danger" id="eg-delete">${icons.trash}</button>` : ""}
-      ${writable ? `<button class="btn btn-primary grow" id="eg-save">${escapeHtml(t("common.save"))}</button>` : ""}
+      <button type="button" class="btn btn-ghost" id="eg-back" disabled>${escapeHtml(t("common.back"))}</button>
+      <button type="button" class="btn btn-primary" id="eg-primary">${escapeHtml(t("common.next"))}</button>
     </div>
   `;
 
-  function renderRootChips() {
+  let currentPage = 1;
+  const backBtn = body.querySelector("#eg-back");
+  const primaryBtn = body.querySelector("#eg-primary");
+
+  function showPage(n) {
+    currentPage = n;
+    body.querySelectorAll(".wizard-page").forEach((p) => {
+      p.style.display = Number(p.dataset.page) === n ? "" : "none";
+    });
+    body.querySelectorAll(".wizard-dot").forEach((d) => {
+      d.classList.toggle("on", Number(d.dataset.dot) <= n);
+    });
+    backBtn.disabled = n === 1;
+    const isLast = n === lastPage;
+    primaryBtn.style.display = !writable && isLast ? "none" : "";
+    primaryBtn.textContent = isLast ? t("common.save") : t("common.next");
+  }
+
+  backBtn.addEventListener("click", () => {
+    if (currentPage > 1) showPage(currentPage - 1);
+  });
+
+  function renderRootRows() {
     const root = body.querySelector("#eg-roots");
     if (selectedRoots.length === 0 && flaggedRoots.length === 0) {
       root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.no_tasks_yet_add"))}</span>`;
@@ -740,17 +810,17 @@ async function openEventGroupModal(container, writable, group = null) {
     root.innerHTML = [
       ...selectedRoots.map(
         (r) => `
-        <span class="chip chip-active" data-id="${r.id}">
-          ${escapeHtml(r.name)}
-          ${writable ? `<button type="button" aria-label="${escapeAttr(t("tasks.remove_aria", { name: r.name }))}" data-remove="${r.id}">&times;</button>` : ""}
-        </span>`
+        <div class="list-row eg-root-row" data-id="${r.id}">
+          <div class="list-row-body"><div class="list-row-title">${escapeHtml(r.name)}</div></div>
+          ${writable ? `<button type="button" class="btn btn-icon btn-ghost" aria-label="${escapeAttr(t("tasks.remove_aria", { name: r.name }))}" data-remove="${r.id}">${icons.close}</button>` : ""}
+        </div>`
       ),
       ...flaggedRoots.map(
         (r) => `
-        <span class="chip" data-id="${r.id}" title="${escapeAttr(t("tasks.not_eligible_title"))}" style="opacity: 0.6;">
-          ${escapeHtml(r.name)} ⚠
-          ${writable ? `<button type="button" aria-label="${escapeAttr(t("tasks.remove_aria", { name: r.name }))}" data-remove="${r.id}">&times;</button>` : ""}
-        </span>`
+        <div class="list-row eg-root-row flagged" data-id="${r.id}" title="${escapeAttr(t("tasks.not_eligible_title"))}">
+          <div class="list-row-body"><div class="list-row-title">⚠ ${escapeHtml(r.name)}</div></div>
+          ${writable ? `<button type="button" class="btn btn-icon btn-ghost" aria-label="${escapeAttr(t("tasks.remove_aria", { name: r.name }))}" data-remove="${r.id}">${icons.close}</button>` : ""}
+        </div>`
       ),
     ].join("");
     root.querySelectorAll("button[data-remove]").forEach((btn) => {
@@ -759,7 +829,7 @@ async function openEventGroupModal(container, writable, group = null) {
         const id = Number(btn.dataset.remove);
         selectedRoots = selectedRoots.filter((r) => r.id !== id);
         flaggedRoots = flaggedRoots.filter((r) => r.id !== id);
-        renderRootChips();
+        renderRootRows();
         refreshPreview();
       });
     });
@@ -783,29 +853,33 @@ async function openEventGroupModal(container, writable, group = null) {
         const checked = !excludedIds.has(item.task_id);
         return `
           <div class="eg-preview-row eg-preview-descendant">
-            <label class="row" style="gap: var(--space-2); flex: 1; min-width: 0;">
-              <input type="checkbox" data-task-id="${item.task_id}" ${checked ? "checked" : ""} ${writable ? "" : "disabled"} />
+            <div class="eg-preview-top">
+              ${writable ? `<button type="button" class="toggle-switch toggle-sm" data-task-id="${item.task_id}" role="switch" aria-checked="${checked ? "true" : "false"}" aria-label="${escapeAttr(t("tasks.eg_toggle_include_aria", { name: item.task_name }))}"></button>` : ""}
               <span class="eg-preview-title">${escapeHtml(item.task_name)}</span>
-            </label>
-            <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
-            <span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
+            </div>
+            <div class="eg-badge-row">
+              <span class="badge badge-success">${escapeHtml(t("common.created_now_badge"))}</span>
+              <span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: item.parent_task_name }))}</span>
+            </div>
           </div>`;
       })
       .join("");
 
     if (!writable) return;
-    previewRoot.querySelectorAll("input[type=checkbox][data-task-id]").forEach((cb) => {
-      cb.addEventListener("change", () => {
-        const id = Number(cb.dataset.taskId);
-        if (cb.checked) excludedIds.delete(id);
-        else excludedIds.add(id);
-        // The one-level chain cap still allows the SAME task to be
-        // chained from two different roots in this group (A->X, B->X) —
-        // both checkboxes are the same EventGroupExclusion row, so they
-        // must always agree rather than drifting independently.
-        previewRoot.querySelectorAll(`input[data-task-id="${id}"]`).forEach((other) => {
-          other.checked = cb.checked;
-        });
+    previewRoot.querySelectorAll("[data-task-id]").forEach((toggleBtn) => {
+      wireToggle(toggleBtn, {
+        onChange: (on) => {
+          const id = Number(toggleBtn.dataset.taskId);
+          if (on) excludedIds.delete(id);
+          else excludedIds.add(id);
+          // The chain cap lift still allows the SAME task to be chained
+          // from two different roots in this group (A->X, B->X) — both
+          // toggles are the same EventGroupExclusion row, so they must
+          // always agree rather than drifting independently.
+          previewRoot.querySelectorAll(`[data-task-id="${id}"]`).forEach((other) => {
+            other.setAttribute("aria-checked", String(on));
+          });
+        },
       });
     });
   }
@@ -836,15 +910,17 @@ async function openEventGroupModal(container, writable, group = null) {
   }
 
   const selectedScheduleWeekdays = new Set(group?.schedule_weekdays || []);
+  const scheduleEnabledBtn = body.querySelector("#eg-schedule-enabled");
+  const scheduleFieldsEl = body.querySelector("#eg-schedule-fields");
 
   if (writable) {
-    const scheduleEnabledEl = body.querySelector("#eg-schedule-enabled");
-    const scheduleFieldsEl = body.querySelector("#eg-schedule-fields");
     const scheduleRecurrenceEl = body.querySelector("#eg-schedule-recurrence");
     const scheduleWeekdaysEl = body.querySelector("#eg-schedule-weekdays");
 
-    scheduleEnabledEl.addEventListener("change", () => {
-      scheduleFieldsEl.style.display = scheduleEnabledEl.checked ? "" : "none";
+    wireToggle(scheduleEnabledBtn, {
+      onChange: (on) => {
+        scheduleFieldsEl.style.display = on ? "" : "none";
+      },
     });
     scheduleRecurrenceEl.addEventListener("change", () => {
       scheduleWeekdaysEl.style.display = scheduleRecurrenceEl.value === "weekly" ? "" : "none";
@@ -870,29 +946,30 @@ async function openEventGroupModal(container, writable, group = null) {
         onSelect: (task) => {
           if (!task) return;
           selectedRoots.push({ id: task.id, name: task.name });
-          renderRootChips();
+          renderRootRows();
           refreshPreview();
         },
       });
     });
   }
 
-  renderRootChips();
+  renderRootRows();
   await refreshPreview();
+  showPage(1);
 
-  if (!writable) return;
-
-  body.querySelector("#eg-save").addEventListener("click", async () => {
+  async function doSave() {
     const name = body.querySelector("#eg-name").value.trim();
     if (!name) {
       showToast(t("common.name_required"), "warning");
+      showPage(1);
       return;
     }
     if (selectedRoots.length === 0) {
       showToast(t("tasks.add_at_least_one_task"), "warning");
+      showPage(1);
       return;
     }
-    const scheduleEnabled = body.querySelector("#eg-schedule-enabled").checked;
+    const scheduleEnabled = isToggleOn(scheduleEnabledBtn);
     const scheduleRecurrence = scheduleEnabled ? body.querySelector("#eg-schedule-recurrence").value : null;
     const scheduleWeekdays = scheduleRecurrence === "weekly" ? [...selectedScheduleWeekdays].sort((a, b) => a - b) : null;
     if (scheduleRecurrence === "weekly" && scheduleWeekdays.length === 0) {
@@ -923,10 +1000,18 @@ async function openEventGroupModal(container, writable, group = null) {
     } catch {
       /* api.js already showed a toast */
     }
+  }
+
+  primaryBtn.addEventListener("click", () => {
+    if (currentPage < lastPage) {
+      showPage(currentPage + 1);
+      return;
+    }
+    if (writable) doSave();
   });
 
-  if (group) {
-    body.querySelector("#eg-delete").addEventListener("click", async () => {
+  if (group && writable) {
+    overlay.querySelector("#eg-delete").addEventListener("click", async () => {
       const ok = await showConfirmDialog({
         title: t("tasks.delete_event_group_title"),
         message: t("tasks.delete_event_group_message", { name: group.name }),
@@ -1111,6 +1196,18 @@ async function initChainLinksSection(body, task, writable) {
   await refresh();
 }
 
+// A 2-page wizard for a brand-new task (Basics / Who & options), 3
+// for an existing one (+ Chain tasks) — redesigned from one long flat
+// form on explicit user feedback ("looks very cramped... fill up the
+// pages more, the current concept looks too empty, we need to find a
+// balance"). Each page groups fields that are actually related
+// (what & how often / who & extra rules / chain reactions) rather than
+// splitting every individual field onto its own screen, which is what
+// made an earlier draft of this feel sparse. The modal shell itself
+// (openModalShell/.modal) is untouched — a page that ends up taller
+// than the viewport (a very long description, a big font-size
+// accessibility setting) still falls back to the shell's own scroll,
+// it just shouldn't need to in ordinary use.
 async function openTaskModal(container, writable, task = null) {
   // Only for a brand-new task — restoring a draft onto an EXISTING
   // task's edit form risks silently overwriting fields with stale
@@ -1151,36 +1248,62 @@ async function openTaskModal(container, writable, task = null) {
   }
   const canDelete = Boolean(task) && (isAdmin() || (meCache && task.created_by_id === meCache.id));
 
-  const { body, close } = openModalShell(task ? t("tasks.edit_task_title") : t("tasks.new_task_title"), {
+  // Moved out of the footer and into the header (next to Close) now
+  // that the footer is the wizard's own Back/Next/Save nav — deleting
+  // isn't a per-page action, it applies to the whole task regardless
+  // of which page is showing.
+  const { body, close, overlay } = openModalShell(task ? t("tasks.edit_task_title") : t("tasks.new_task_title"), {
     onDismiss: () => {
       if (!task) clearTaskDraft();
     },
+    extraHeaderHtml: canDelete
+      ? `<button class="btn btn-icon btn-ghost" id="f-delete" aria-label="${escapeAttr(t("tasks.delete_task_title"))}" title="${escapeAttr(t("tasks.delete_task_title"))}">${icons.trash}</button>`
+      : "",
   });
 
+  const lastPage = task ? 3 : 2;
+
   body.innerHTML = `
-    <div class="stack">
+    <div class="wizard-dots">
+      <span class="wizard-dot on" data-dot="1"></span>
+      <span class="wizard-dot" data-dot="2"></span>
+      ${task ? `<span class="wizard-dot" data-dot="3"></span>` : ""}
+    </div>
+
+    <div class="wizard-page" data-page="1">
+      <p class="wizard-step-title">${escapeHtml(t("tasks.step_basics_title"))}</p>
+      <p class="wizard-step-sub">${escapeHtml(t("tasks.step_basics_sub"))}</p>
+
       <div class="field">
         <label for="f-name">${escapeHtml(t("tasks.name_label"))}</label>
         <input class="input" id="f-name" value="${escapeAttr(draft?.name ?? task?.name ?? "")}" required />
       </div>
-      <div class="field">
+      <div class="field" style="margin-top: var(--space-4);">
         <label for="f-description">${escapeHtml(t("common.description_label"))}</label>
-        <textarea class="input" id="f-description" rows="2">${escapeHtml(draft?.description ?? task?.description ?? "")}</textarea>
+        <textarea class="input" id="f-description" rows="3">${escapeHtml(draft?.description ?? task?.description ?? "")}</textarea>
       </div>
-      <div class="field-row">
+      <div class="field-row" style="margin-top: var(--space-4);">
         <div class="field">
-          <label for="f-points">${escapeHtml(t("common.points_label"))}</label>
-          <input class="input" type="number" min="0" id="f-points" value="${draft?.points ?? task?.points ?? 1}" />
+          <label id="f-points-label">${escapeHtml(t("common.points_label"))}</label>
+          <div class="stepper">
+            <button type="button" data-step="-1" aria-label="${escapeAttr(t("tasks.decrease_aria", { field: t("common.points_label") }))}">&minus;</button>
+            <input type="number" min="0" id="f-points" value="${draft?.points ?? task?.points ?? 1}" aria-labelledby="f-points-label" />
+            <button type="button" data-step="1" aria-label="${escapeAttr(t("tasks.increase_aria", { field: t("common.points_label") }))}">+</button>
+          </div>
         </div>
         <div class="field">
-          <label for="f-times">${escapeHtml(t("tasks.times_per_day_label"))}</label>
-          <input class="input" type="number" min="1" id="f-times" value="${draft?.times_per_day ?? task?.times_per_day ?? 1}" />
+          <label id="f-times-label">${escapeHtml(t("tasks.times_per_day_label"))}</label>
+          <div class="stepper">
+            <button type="button" data-step="-1" aria-label="${escapeAttr(t("tasks.decrease_aria", { field: t("tasks.times_per_day_label") }))}">&minus;</button>
+            <input type="number" min="1" id="f-times" value="${draft?.times_per_day ?? task?.times_per_day ?? 1}" aria-labelledby="f-times-label" />
+            <button type="button" data-step="1" aria-label="${escapeAttr(t("tasks.increase_aria", { field: t("tasks.times_per_day_label") }))}">+</button>
+          </div>
         </div>
       </div>
 
+      <p class="wizard-sub-head" id="f-recurrence-heading">${escapeHtml(t("tasks.eg_repeats_label"))}</p>
       <div class="field">
-        <label for="f-recurrence">${escapeHtml(t("tasks.eg_repeats_label"))}</label>
-        <select class="select" id="f-recurrence">
+        <select class="select" id="f-recurrence" aria-labelledby="f-recurrence-heading">
           <option value="daily" ${recurrence === "daily" ? "selected" : ""}>${escapeHtml(t("tasks.daily_option"))}</option>
           <option value="weekly" ${recurrence === "weekly" ? "selected" : ""}>${escapeHtml(t("tasks.weekly_option"))}</option>
           <option value="monthly" ${recurrence === "monthly" ? "selected" : ""}>${escapeHtml(t("common.recurrence_monthly"))}</option>
@@ -1190,22 +1313,13 @@ async function openTaskModal(container, writable, task = null) {
           ${weekdayLabels.map((label, i) => `<div class="weekday-pill${selectedWeekdays.has(i) ? " on" : ""}" data-day="${i}">${escapeHtml(label)}</div>`).join("")}
         </div>
       </div>
+    </div>
 
-      <div class="field" id="f-pinned-field" style="${pinEligible ? "" : "display:none;"}">
-        <label for="f-pinned-user">${escapeHtml(t("tasks.pinned_label"))}</label>
-        <select class="select" id="f-pinned-user" ${canEditPin ? "" : "disabled"}>
-          <option value="">${escapeHtml(t("tasks.pinned_none"))}</option>
-          ${pinnable
-            .map(
-              (u) =>
-                `<option value="${u.id}" ${task?.pinned_user_id === u.id ? "selected" : ""}>${escapeAttr(u.display_name)}</option>`
-            )
-            .join("")}
-        </select>
-        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
-          ${escapeHtml(t("tasks.pinned_desc"))}${!canEditPin ? ` ${escapeHtml(t("tasks.pinned_admin_only_note"))}` : ""}
-        </p>
-      </div>
+    <div class="wizard-page" data-page="2" style="display: none;">
+      <p class="wizard-step-title">${escapeHtml(t("tasks.step_who_title"))}</p>
+      <p class="wizard-step-sub">${escapeHtml(t("tasks.step_who_sub"))}</p>
+
+      <div class="wizard-recap" id="f-recap"></div>
 
       <div class="field">
         <label>${escapeHtml(t("tasks.categories_label"))}</label>
@@ -1223,44 +1337,107 @@ async function openTaskModal(container, writable, task = null) {
         </div>
       </div>
 
-      <div class="field">
-        <label class="row"><input type="checkbox" id="f-ramp-up" ${task?.ramp_up_enabled ? "checked" : ""} /> <span>${escapeHtml(t("tasks.ramp_up_label"))}</span></label>
-        <div class="field" id="f-ramp-up-points" style="margin-top: var(--space-2); ${task?.ramp_up_enabled ? "" : "display:none;"}">
-          <label for="f-bonus">${escapeHtml(t("tasks.bonus_points_label"))}</label>
-          <input class="input" type="number" min="0" id="f-bonus" value="${task?.ramp_up_bonus_points ?? 0}" />
-        </div>
-      </div>
-
-      <div class="field">
-        <label class="row"><input type="checkbox" id="f-active" ${task?.active !== false ? "checked" : ""} /> <span>${escapeHtml(t("tasks.active_label"))}</span></label>
-      </div>
-
-      ${
-        task
-          ? `<div class="field">
-        <label>${escapeHtml(t("tasks.chain_tasks_label"))}</label>
-        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 0;">
-          ${escapeHtml(t("tasks.chain_tasks_desc", { name: task.name }))}
+      <div class="field" id="f-pinned-field" style="margin-top: var(--space-4); ${pinEligible ? "" : "display:none;"}">
+        <label for="f-pinned-user">${escapeHtml(t("tasks.pinned_label"))}</label>
+        <select class="select" id="f-pinned-user" ${canEditPin ? "" : "disabled"}>
+          <option value="">${escapeHtml(t("tasks.pinned_none"))}</option>
+          ${pinnable
+            .map(
+              (u) =>
+                `<option value="${u.id}" ${task?.pinned_user_id === u.id ? "selected" : ""}>${escapeAttr(u.display_name)}</option>`
+            )
+            .join("")}
+        </select>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
+          ${escapeHtml(t("tasks.pinned_desc"))}${!canEditPin ? ` ${escapeHtml(t("tasks.pinned_admin_only_note"))}` : ""}
         </p>
-        <div class="stack" id="chain-link-list" style="margin-top: var(--space-2);"></div>
-        <div class="stack" style="margin-top: var(--space-2); gap: var(--space-2);">
-          <select class="select" id="chain-same-user-select">
-            <option value="false">${escapeHtml(t("tasks.different_person"))}</option>
-            <option value="true">${escapeHtml(t("tasks.same_person"))}</option>
-          </select>
-          <button type="button" class="btn btn-ghost btn-block" id="chain-child-btn" style="justify-content: center;">
-            ${icons.plus}<span>${escapeHtml(t("tasks.add_chain_task_btn"))}</span>
-          </button>
+      </div>
+
+      <p class="wizard-sub-head">${escapeHtml(t("tasks.bonus_points_label"))}</p>
+      <div class="toggle-row">
+        <span class="toggle-row-label" id="f-ramp-up-label">${escapeHtml(t("tasks.ramp_up_label"))}</span>
+        <button type="button" class="toggle-switch" id="f-ramp-up" role="switch" aria-checked="${task?.ramp_up_enabled ? "true" : "false"}" aria-labelledby="f-ramp-up-label"></button>
+      </div>
+      <div class="field" id="f-ramp-up-points" style="margin-top: var(--space-3); ${task?.ramp_up_enabled ? "" : "display:none;"}">
+        <label id="f-bonus-label">${escapeHtml(t("tasks.bonus_points_label"))}</label>
+        <div class="stepper">
+          <button type="button" data-step="-1" aria-label="${escapeAttr(t("tasks.decrease_aria", { field: t("tasks.bonus_points_label") }))}">&minus;</button>
+          <input type="number" min="0" id="f-bonus" value="${task?.ramp_up_bonus_points ?? 0}" aria-labelledby="f-bonus-label" />
+          <button type="button" data-step="1" aria-label="${escapeAttr(t("tasks.increase_aria", { field: t("tasks.bonus_points_label") }))}">+</button>
         </div>
-      </div>`
-          : ""
-      }
+      </div>
+
+      <div class="toggle-row" style="margin-top: var(--space-5);">
+        <span class="toggle-row-label" id="f-active-label">${escapeHtml(t("tasks.active_label"))}</span>
+        <button type="button" class="toggle-switch" id="f-active" role="switch" aria-checked="${task?.active !== false ? "true" : "false"}" aria-labelledby="f-active-label"></button>
+      </div>
     </div>
+
+    ${
+      task
+        ? `<div class="wizard-page" data-page="3" style="display: none;">
+      <p class="wizard-step-title">${escapeHtml(t("tasks.chain_tasks_label"))}</p>
+      <p class="wizard-step-sub">${escapeHtml(t("tasks.chain_tasks_desc", { name: task.name }))}</p>
+      <div class="stack" id="chain-link-list"></div>
+      <div class="stack" style="margin-top: var(--space-3); gap: var(--space-2);">
+        <select class="select" id="chain-same-user-select">
+          <option value="false">${escapeHtml(t("tasks.different_person"))}</option>
+          <option value="true">${escapeHtml(t("tasks.same_person"))}</option>
+        </select>
+        <button type="button" class="btn btn-ghost btn-block" id="chain-child-btn" style="justify-content: center;">
+          ${icons.plus}<span>${escapeHtml(t("tasks.add_chain_task_btn"))}</span>
+        </button>
+      </div>
+    </div>`
+        : ""
+    }
+
     <div class="modal-footer">
-      ${canDelete ? `<button class="btn btn-danger" id="f-delete">${icons.trash}</button>` : ""}
-      <button class="btn btn-primary grow" id="f-save">${escapeHtml(t("common.save"))}</button>
+      <button type="button" class="btn btn-ghost" id="f-back" disabled>${escapeHtml(t("common.back"))}</button>
+      <button type="button" class="btn btn-primary" id="f-primary">${escapeHtml(t("common.next"))}</button>
     </div>
   `;
+
+  let currentPage = 1;
+  const backBtn = body.querySelector("#f-back");
+  const primaryBtn = body.querySelector("#f-primary");
+
+  function updateRecap() {
+    const recapEl = body.querySelector("#f-recap");
+    if (!recapEl) return;
+    const name = body.querySelector("#f-name").value.trim() || t("tasks.new_task_title");
+    const points = Number(body.querySelector("#f-points").value || 0);
+    const rec = body.querySelector("#f-recurrence").value;
+    let scheduleText;
+    if (rec === "weekly") {
+      const days = [...selectedWeekdays].sort((a, b) => a - b).map((d) => weekdayLabels[d]);
+      scheduleText = days.length ? days.join(" ") : t("common.recurrence_weekly");
+    } else if (rec === "monthly") {
+      scheduleText = t("common.recurrence_monthly");
+    } else if (rec === "manual") {
+      scheduleText = t("tasks.manual_option");
+    } else {
+      scheduleText = t("common.recurrence_daily");
+    }
+    recapEl.innerHTML = `<strong>${escapeHtml(name)}</strong> · ${points} ${escapeHtml(t("common.pts"))} · ${escapeHtml(scheduleText)}`;
+  }
+
+  function showPage(n) {
+    currentPage = n;
+    body.querySelectorAll(".wizard-page").forEach((p) => {
+      p.style.display = Number(p.dataset.page) === n ? "" : "none";
+    });
+    body.querySelectorAll(".wizard-dot").forEach((d) => {
+      d.classList.toggle("on", Number(d.dataset.dot) <= n);
+    });
+    backBtn.disabled = n === 1;
+    primaryBtn.textContent = n === lastPage ? t("common.save") : t("common.next");
+    if (n === 2) updateRecap();
+  }
+
+  backBtn.addEventListener("click", () => {
+    if (currentPage > 1) showPage(currentPage - 1);
+  });
 
   const weekdayPicker = body.querySelector("#f-weekdays");
   body.querySelector("#f-recurrence").addEventListener("change", (e) => {
@@ -1297,26 +1474,33 @@ async function openTaskModal(container, writable, task = null) {
     });
   });
 
-  const rampCheckbox = body.querySelector("#f-ramp-up");
+  body.querySelectorAll(".stepper").forEach((stepper) => wireStepper(stepper, { min: Number(stepper.querySelector("input").min || 0) }));
+
+  const rampToggle = body.querySelector("#f-ramp-up");
   const rampPointsField = body.querySelector("#f-ramp-up-points");
-  rampCheckbox.addEventListener("change", () => {
-    rampPointsField.style.display = rampCheckbox.checked ? "" : "none";
+  wireToggle(rampToggle, {
+    onChange: (on) => {
+      rampPointsField.style.display = on ? "" : "none";
+    },
   });
+  wireToggle(body.querySelector("#f-active"));
 
   if (task) {
     initChainLinksSection(body, task, writable);
   }
 
-  body.querySelector("#f-save").addEventListener("click", async () => {
+  async function doSave() {
     const name = body.querySelector("#f-name").value.trim();
     if (!name) {
       showToast(t("common.name_required"), "warning");
+      showPage(1);
       return;
     }
     const newRecurrence = body.querySelector("#f-recurrence").value;
     const weekdays = newRecurrence === "weekly" ? [...selectedWeekdays].sort((a, b) => a - b) : null;
     if (newRecurrence === "weekly" && weekdays.length === 0) {
       showToast(t("tasks.pick_weekday_weekly_task"), "warning");
+      showPage(1);
       return;
     }
 
@@ -1326,11 +1510,11 @@ async function openTaskModal(container, writable, task = null) {
       name,
       description: body.querySelector("#f-description").value.trim() || null,
       points: Number(body.querySelector("#f-points").value || 0),
-      active: body.querySelector("#f-active").checked,
+      active: isToggleOn(body.querySelector("#f-active")),
       recurrence: newRecurrence,
       times_per_day: Number(body.querySelector("#f-times").value || 1),
       weekdays,
-      ramp_up_enabled: rampCheckbox.checked,
+      ramp_up_enabled: isToggleOn(rampToggle),
       ramp_up_bonus_points: Number(body.querySelector("#f-bonus").value || 0),
       category_ids: [...selectedCats],
       // Always included, explicit null when "No one" is picked — the
@@ -1355,10 +1539,18 @@ async function openTaskModal(container, writable, task = null) {
     } catch {
       /* api.js already showed a toast */
     }
+  }
+
+  primaryBtn.addEventListener("click", () => {
+    if (currentPage < lastPage) {
+      showPage(currentPage + 1);
+      return;
+    }
+    doSave();
   });
 
   if (canDelete) {
-    body.querySelector("#f-delete").addEventListener("click", async () => {
+    overlay.querySelector("#f-delete").addEventListener("click", async () => {
       const ok = await showConfirmDialog({
         title: t("tasks.delete_task_title"),
         message: t("tasks.delete_task_message", { name: task.name }),

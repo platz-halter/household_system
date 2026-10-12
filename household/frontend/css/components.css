@@ -135,6 +135,19 @@
   gap: var(--space-3);
 }
 
+/* `1fr` grid tracks default to a minimum of `auto` (≈ the item's own
+   min-content), so a `.field` whose content has a wide intrinsic size
+   (a bare <input type="number"> has a fairly wide browser default,
+   and nothing inside .stepper overrides THIS grid-level computation —
+   min-width:0 on the flex children only affects their own flex
+   layout, not what the grid reports as this item's min-content) can
+   force both tracks wider than the row and overflow the modal. Real,
+   reproduced bug: the Task wizard's Points/Times-per-day row pushed
+   "Times per day" off the right edge of a phone-width viewport.*/
+.field-row > .field {
+  min-width: 0;
+}
+
 /* --- Search bar --- */
 
 .search-bar {
@@ -829,21 +842,65 @@
   color: var(--color-text-muted);
 }
 
-/* --- Event group preview row (Tasks page create/edit modal) --- */
+/* --- Event group preview row (Tasks page create/edit modal, and the
+   trigger-confirm modal in eventGroups.js) ---
+   A root row stays one line (title + a single "Created now" badge —
+   never cramped to begin with). A descendant row used to put its
+   title AND up to two badges ("Created now", "Chained from: X") on
+   that same one line, which is what actually overflowed/wrapped
+   unreadably on a narrow phone — fixed by stacking it: the title (plus
+   an optional include/exclude toggle) on its own row, every badge
+   below it in its own wrapping row, so a badge never competes with
+   the title for horizontal space. */
 
 .eg-preview-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--space-2);
   padding: var(--space-2) 0;
   font-size: var(--font-size-sm);
 }
 
-.eg-preview-row.eg-preview-descendant { padding-left: var(--space-5); }
-
-.eg-preview-row .eg-preview-title { flex: 1; min-width: 0; }
-
 .eg-preview-row + .eg-preview-row { border-top: 1px solid var(--color-border); }
+
+.eg-preview-row .eg-preview-title { flex: 1; min-width: 0; font-weight: 600; }
+
+.eg-preview-row.eg-preview-descendant {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding-left: var(--space-4);
+  position: relative;
+}
+
+.eg-preview-row.eg-preview-descendant::before {
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  bottom: 2px;
+  width: 1.5px;
+  background: var(--color-border);
+}
+
+.eg-preview-top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.eg-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+/* --- Root/task rows in the Event Group modal and the "Add task"
+   picker — full-width rows, not chips, so a long name truncates
+   cleanly (ellipsis) instead of wrapping or squeezing inside a pill. */
+
+.eg-root-row.flagged { opacity: 0.6; }
 
 /* --- Weekday picker (Task schedule) --- */
 
@@ -870,6 +927,208 @@
   border-color: var(--color-accent);
   color: var(--color-accent-contrast);
 }
+
+/* --- Toggle switch — replaces a plain <input type="checkbox"> for
+   every on/off setting (ramp-up, active, event-group auto-trigger):
+   a real <button role="switch" aria-checked>, not a div, so it's
+   still a native interactive element for the keyboard/a11y tree. A
+   44x26px track with 48px of total tap area (via padding, not sizing
+   the track itself up) comfortably clears the 44px mobile touch-
+   target guideline a bare 18x18px checkbox never did. State lives
+   entirely in the `aria-checked` attribute — wireToggle() in tasks.js/
+   eventGroups.js flips it and nothing else, so the CSS selector below
+   is always in sync with what a screen reader announces. --- */
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 4px 0;
+}
+
+.toggle-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.toggle-switch {
+  width: 66px;
+  height: 44px;
+  flex-shrink: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  position: relative;
+}
+
+.toggle-switch::before {
+  content: "";
+  display: block;
+  width: 44px;
+  height: 26px;
+  margin: 9px 11px;
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+  transition: background-color var(--transition-fast);
+}
+
+.toggle-switch::after {
+  content: "";
+  position: absolute;
+  top: 12px;
+  left: 13px;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background: #ffffff;
+  box-shadow: var(--shadow-sm);
+  transition: transform var(--transition-fast);
+}
+
+.toggle-switch[aria-checked="true"]::before {
+  background: var(--color-accent);
+}
+
+.toggle-switch[aria-checked="true"]::after {
+  transform: translateX(20px);
+}
+
+/* A smaller variant for a dense context (the Event Group preview's
+   per-descendant include/exclude control) — its own self-contained
+   geometry rather than scaling the base variant's margins/offsets. */
+
+.toggle-switch.toggle-sm {
+  width: 40px;
+  height: 28px;
+}
+
+.toggle-switch.toggle-sm::before {
+  width: 28px;
+  height: 16px;
+  margin: 6px;
+}
+
+.toggle-switch.toggle-sm::after {
+  top: 8px;
+  left: 8px;
+  width: 12px;
+  height: 12px;
+}
+
+.toggle-switch.toggle-sm[aria-checked="true"]::after {
+  transform: translateX(12px);
+}
+
+/* --- Stepper — a touch-friendlier alternative to a bare
+   <input type="number"> for Points / Times per day / Bonus points.
+   The number itself stays a real <input> (still directly editable,
+   still what draft-autosave and the save payload read) — the ±
+   buttons just nudge its value and dispatch a real "input" event so
+   every existing listener reacts exactly as if the user had typed. */
+
+.stepper {
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  height: 44px;
+}
+
+.stepper button {
+  width: 44px;
+  flex-shrink: 0;
+  border: none;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-lg);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.stepper button:active { opacity: 0.6; }
+
+.stepper input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  border-left: 1px solid var(--color-border);
+  border-right: 1px solid var(--color-border);
+  text-align: center;
+  font-size: var(--font-size-md);
+  font-weight: 700;
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  -moz-appearance: textfield;
+}
+
+.stepper input::-webkit-outer-spin-button,
+.stepper input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* --- Wizard chrome (multi-page New/Edit Task and New/Edit Event
+   Group modals) — the modal shell itself (.modal-overlay/.modal)
+   is untouched, so every other modal keeps its current behavior;
+   this only adds a step-dot row and per-page title above content
+   each wizard modal already renders inside the shared #modal-body. */
+
+.wizard-dots {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-bottom: var(--space-4);
+}
+
+.wizard-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+}
+
+.wizard-dot.on { background: var(--color-accent); }
+
+.wizard-step-title {
+  font-size: var(--font-size-xl);
+  font-weight: 800;
+  margin: 0 0 4px;
+}
+
+.wizard-step-sub {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  margin: 0 0 var(--space-5);
+}
+
+.wizard-recap {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  font-size: var(--font-size-xs);
+  color: var(--color-text-muted);
+  margin-bottom: var(--space-5);
+}
+
+.wizard-recap strong { color: var(--color-text); }
+
+.wizard-sub-head {
+  font-size: var(--font-size-xs);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  margin: var(--space-6) 0 var(--space-3);
+}
+
+.wizard-sub-head:first-child { margin-top: 0; }
 
 /* --- Avatar chip (small, inline — assignee display on todo rows) --- */
 
