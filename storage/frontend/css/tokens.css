@@ -7,7 +7,15 @@
    ============================================================ */
 
 :root {
-  /* --- Base black & white palette (default / "light") --- */
+  /* `color-scheme` tells the browser's own UI (overscroll fill,
+     native form controls, Android edge-to-edge gesture-nav areas)
+     which palette to paint itself with — missing here the same way
+     it was missing from household/frontend/css/tokens.css, and the
+     same fix (kept in lockstep with that file, per this file's own
+     header above). See that file's copy of this comment for the
+     "white bar in dark mode" symptom this caused.
+     --- Base black & white palette (default / "light") --- */
+  color-scheme: light;
   --color-bg: #ffffff;
   --color-surface: #f7f7f7;
   --color-surface-raised: #ffffff;
@@ -68,6 +76,7 @@
 
 /* --- Dark theme (built in, ships alongside light) --- */
 [data-theme="dark"] {
+  color-scheme: dark;
   --color-bg: #0a0a0a;
   --color-surface: #161616;
   --color-surface-raised: #1e1e1e;

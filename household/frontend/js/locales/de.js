@@ -36,6 +36,7 @@ export const de = {
   "common.task_count": { one: "{n} Aufgabe", other: "{n} Aufgaben" },
   "common.todo_count": { one: "{n} Todo", other: "{n} Todos" },
   "common.couldnt_load_schedule": "Erinnerungszeitplan konnte nicht geladen werden",
+  "common.and_n_more": "+{n} weitere",
   "common.couldnt_load_reports": "Berichte konnten nicht geladen werden",
 
   "weekday.monday": "Montag",
@@ -378,10 +379,12 @@ export const de = {
   "tasks.task_deleted": "Aufgabe gelöscht",
   "tasks.pinned_label": "Immer zuweisen an",
   "tasks.pinned_none": "Niemand festgelegt",
+  "tasks.pinned_edit_btn": "Personen auswählen…",
   "tasks.pinned_desc":
-    "Diese Aufgabe gehört immer dieser Person — eine feste Haushaltsvereinbarung, keine Terminentscheidung. Bei einer wöchentlichen/monatlichen Aufgabe gibt der Ausgleich sie immer an diese Person, statt fair zu verteilen, und lässt sie unzugewiesen (wird niemand anderem gegeben), während diese Person Pause macht. Bei einer täglichen oder manuellen Aufgabe markiert dies nur, wem sie gehört — die tägliche Aufgabe selbst kann weiterhin jeder abschließen, aber ein daraus erstelltes Todo geht trotzdem direkt an diese Person.",
+    "Diese Aufgabe gehört immer einer dieser Personen — eine feste Haushaltsvereinbarung, keine Terminentscheidung. Bei einer wöchentlichen/monatlichen Aufgabe gibt der Ausgleich sie immer an die Person aus dieser Gruppe mit der geringsten Auslastung, statt im ganzen Haushalt fair zu verteilen, und lässt sie nur dann unzugewiesen, wenn gerade niemand aus der Gruppe verfügbar ist (z. B. alle in Pause). Bei einer täglichen oder manuellen Aufgabe markiert dies nur, wem sie gehört — die tägliche Aufgabe selbst kann weiterhin jeder abschließen, aber ein daraus erstelltes Todo geht trotzdem an die fairste Person aus der Gruppe.",
   "tasks.pinned_admin_only_note": "Nur ein Admin kann dies ändern",
   "tasks.pinned_badge": "Immer: {name}",
+  "tasks.pinned_badge_multi": "Immer: {names}",
   "tasks.step_basics_title": "Grundlagen",
   "tasks.step_basics_sub": "Was diese Aufgabe ist und wie oft sie vorkommt.",
   "tasks.step_who_title": "Wer & Optionen",

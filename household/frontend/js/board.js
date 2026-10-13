@@ -354,7 +354,7 @@ function todoRow(todo, container, writable) {
   // sitting open at the same time as the parent it's chained from, not
   // strictly after it.
   const chainBadge = todo.chain_parent_task_name
-    ? `<span class="badge badge-neutral">${escapeHtml(t("common.chained_from", { name: todo.chain_parent_task_name }))}</span>`
+    ? `<span class="badge badge-neutral badge-wrap">${escapeHtml(t("common.chained_from", { name: todo.chain_parent_task_name }))}</span>`
     : "";
   // Shown regardless of the "group by event" toggle — when grouping is
   // off there's no cluster header to carry this information, and even
@@ -652,18 +652,22 @@ async function openTodoModal(container) {
         overlay.querySelector("#t-description").value = task ? task.description || "" : "";
         overlay.querySelector("#t-points").value = task ? task.points : 1;
 
-        // Left as "Anyone," a pinned task's todo still ends up with the
-        // pinned person once the balancer's sweep picks it up after
-        // CLAIM_WINDOW (see CandidateTodo.pinned_user_id) — but that's
-        // a delay of hours, and to whoever's filling out this form it
-        // just looks broken in the meantime. Prefilling here is purely
-        // a convenience; nothing stops changing it before posting, and
+        // Left as "Anyone," a pinned task's todo still ends up with
+        // whichever eligible member of the pinned group is fairest
+        // once the balancer's sweep picks it up after CLAIM_WINDOW
+        // (see CandidateTodo.pinned_user_ids) — but that's a delay of
+        // hours, and to whoever's filling out this form it just looks
+        // broken in the meantime. Prefilling here is purely a
+        // convenience; nothing stops changing it before posting, and
         // leaving it on "Anyone" is still fine (just not instant).
+        // Only prefillable when the group has exactly one assignable
+        // member — a plain <select> can't represent "whichever of
+        // these is fairest," so a 2+-person group is left on "Anyone"
+        // rather than guessing which one.
         const assignable = new Set(assignableUsers(users).map((u) => u.id));
+        const pinnedAssignable = (task?.pinned_user_ids || []).filter((id) => assignable.has(id));
         const assigneeSelect = overlay.querySelector("#t-assignee");
-        assigneeSelect.value = task && task.pinned_user_id && assignable.has(task.pinned_user_id)
-          ? String(task.pinned_user_id)
-          : "";
+        assigneeSelect.value = pinnedAssignable.length === 1 ? String(pinnedAssignable[0]) : "";
 
         // The toggle only matters — and only shows — when the picked
         // task actually has a chain task to skip; nothing to deactivate

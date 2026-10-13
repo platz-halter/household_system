@@ -34,6 +34,7 @@ export const en = {
   "common.task_count": { one: "{n} task", other: "{n} tasks" },
   "common.todo_count": { one: "{n} todo", other: "{n} todos" },
   "common.couldnt_load_schedule": "Couldn't load the reminder schedule",
+  "common.and_n_more": "+{n} more",
   "common.couldnt_load_reports": "Couldn't load reports",
 
   "weekday.monday": "Monday",
@@ -371,10 +372,12 @@ export const en = {
   "tasks.task_deleted": "Task deleted",
   "tasks.pinned_label": "Always assign to",
   "tasks.pinned_none": "No one set",
+  "tasks.pinned_edit_btn": "Choose people…",
   "tasks.pinned_desc":
-    "This task always belongs to this person — a standing household agreement, not a scheduling choice. For a weekly/monthly task, the balancer always hands it to them instead of picking fairly, and leaves it unassigned (never handed to anyone else) while they're on break. For a daily or manual task, this just marks whose it is — anyone can still complete the daily task itself, but a todo created from either one still goes straight to this person.",
+    "This task always belongs to one of these people — a standing household agreement, not a scheduling choice. For a weekly/monthly task, the balancer always hands it to whichever of them is least loaded right now instead of picking fairly across the whole household, and leaves it unassigned only if none of them are currently eligible (e.g. all on break). For a daily or manual task, this just marks whose it is — anyone can still complete the daily task itself, but a todo created from either one still goes to whichever of them is fairest.",
   "tasks.pinned_admin_only_note": "Only an admin can change this",
   "tasks.pinned_badge": "Always: {name}",
+  "tasks.pinned_badge_multi": "Always: {names}",
   "tasks.step_basics_title": "Basics",
   "tasks.step_basics_sub": "What this task is, and how often it happens.",
   "tasks.step_who_title": "Who & options",

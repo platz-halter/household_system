@@ -231,6 +231,21 @@
   font-weight: 600;
 }
 
+/* For a badge whose text can genuinely run long (home.js's "After:
+   {parent}" on a board todo) — a full pill shape with single-line
+   nowrap text either clips unreliably (text-overflow doesn't reliably
+   ellipsis an inline-flex box) or overflows the row. Opt in per badge
+   rather than changing the base .badge, which every OTHER badge in
+   the app (including the Event Group preview's intentionally-wrapping
+   "Chained from: X" badges, in their own .eg-badge-row) relies on
+   staying a plain single-line pill. */
+.badge-wrap {
+  white-space: normal;
+  text-align: left;
+  border-radius: var(--radius-md);
+  max-width: 100%;
+}
+
 .badge-success { background: var(--color-success-bg); color: var(--color-success); }
 .badge-warning { background: var(--color-warning-bg); color: var(--color-warning); }
 .badge-danger { background: var(--color-danger-bg); color: var(--color-danger); }
@@ -767,6 +782,21 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A single-line truncating title is right for a short, usually-fixed
+   name (a task, a category) — wrong for a composed sentence that can
+   genuinely run long (Stats' "{name} completed {label}"), which was
+   cutting off mid-word on a phone screen ("..." eating the actual
+   task name). Opt in per row rather than changing the default, since
+   most .list-row-title usages are the short-name case. */
+.list-row-title-wrap {
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
 }
 
 .list-row-meta {

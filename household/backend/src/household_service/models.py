@@ -128,6 +128,30 @@ task_categories = Table(
 )
 
 
+# "Always assign to" group (Task.pinned_users) — was a single nullable
+# FK column (Task.pinned_user_id); converted to this plain many-to-many
+# table (migration 0f1a9b7c3d2e) on user request: "select multiple
+# users that can belong to the always assign group instead of just one
+# always assign to user". CASCADE on both sides, not the old column's
+# SET NULL on the user side — a membership ROW has nothing meaningful
+# left once either side of it is gone (unlike the old nullable scalar
+# column, there's no "keep the row, blank the value" equivalent for a
+# junction table), so removing a task or a user just removes their
+# membership rows, same as task_categories above. Primary key is the
+# pair itself, which doubles as the uniqueness guarantee a plain
+# `UniqueConstraint` would otherwise need to spell out separately.
+task_pinned_users = Table(
+    "task_pinned_users",
+    Base.metadata,
+    Column("task_id", ForeignKey("tasks.id", ondelete="CASCADE"), primary_key=True),
+    Column(
+        "household_user_id",
+        ForeignKey("household_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+)
+
+
 class Category(Base):
     __tablename__ = "categories"
 
@@ -189,52 +213,45 @@ class Task(Base):
     ramp_up_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
     ramp_up_bonus_points: Mapped[int] = mapped_column(Integer, default=0)
 
-    # "Always assign this task to this person" — a standing household
-    # agreement (e.g. "Alex always does the bathroom"), not a fairness
-    # decision. For a weekly/monthly task, crud.run_balancing's sweep
-    # hands it straight to them every period instead of running it
-    # through balancing.balance()'s fairness pick, and balancing.
+    # "Always assign this task to one of these people" — a standing
+    # household agreement (e.g. "Alex or Sam always does the
+    # bathroom"), not a fairness decision in the household-wide sense.
+    # For a weekly/monthly task, crud.run_balancing's sweep hands it
+    # straight to whichever eligible MEMBER OF THIS GROUP is currently
+    # least loaded (the same tie-break the household-wide pick uses,
+    # just scoped to the group — a single-member group behaves exactly
+    # like the old single-owner pin) instead of running it through
+    # balancing.balance()'s full household-wide pick, and balancing.
     # rebalance() never pulls it away — see balancing.py's own
     # CandidateTask/PullableAssignment docstrings for exactly how.
-    # Still counts toward the pinned person's own load for everything
+    # Still counts toward the picked member's own load for everything
     # ELSE the balancer distributes that period. For a `daily` or
     # `manual` task — neither of which the balancer ever touches at
     # all — the pin instead (a) shows as an informational badge, and
     # (b) still routes any TodoItem actually created FROM that task
     # (an Event Group root, or a Board "From task" post left as
-    # "Anyone") straight to the pinned person, via the exact same
-    # CandidateTodo.pinned_user_id path a weekly/monthly task's own
-    # spawned todos already use — it does NOT restrict who can
-    # complete a `daily` task directly from Home (a deliberate,
-    # narrower-than-it-could-be scope — see CLAUDE.md's "Always-assign
-    # (pinned) tasks"). Admin-only to set/change (see main.patch_task)
-    # — task create/edit is otherwise can_write, but unilaterally
-    # pinning a chore onto someone else bypasses both the fairness
-    # algorithm and the consent-based takeover-request design, so this
-    # one field needs the stronger gate. SET NULL (not CASCADE) on the
-    # pinned person's own deletion — the task itself survives, it just
-    # drops back into the normal fairness pool (or loses its badge, for
-    # a daily/manual one). Naturally inert for a chain-child task,
-    # since run_balancing's sweep already excludes every chain-child
-    # task before any pin logic ever runs, and a chain-child task's
-    # only instances come from its own chain spawn, never a bare "From
+    # "Anyone") to whichever eligible group member is least loaded, via
+    # the exact same CandidateTodo.pinned_user_ids path a weekly/
+    # monthly task's own spawned todos already use — it does NOT
+    # restrict who can complete a `daily` task directly from Home (a
+    # deliberate, narrower-than-it-could-be scope — see CLAUDE.md's
+    # "Always-assign (pinned) tasks"). Admin-only to set/change (see
+    # main.patch_task) — task create/edit is otherwise can_write, but
+    # unilaterally pinning a chore onto someone else bypasses both the
+    # fairness algorithm and the consent-based takeover-request design,
+    # so this one field needs the stronger gate. A many-to-many table
+    # (task_pinned_users, above), not a nullable FK column like this
+    # used to be — see that table's own docstring for the CASCADE
+    # reasoning. Naturally inert for a chain-child task, since
+    # run_balancing's sweep already excludes every chain-child task
+    # before any pin logic ever runs, and a chain-child task's only
+    # instances come from its own chain spawn, never a bare "From
     # task" post or an Event Group root — not auto-cleared server-side
     # the way `recurrence` becoming `daily` would be, though, since
     # chain-child status is derived/dynamic (from task_chain_links),
     # not a stored column.
-    pinned_user_id: Mapped[int | None] = mapped_column(
-        ForeignKey(
-            "household_users.id",
-            ondelete="SET NULL",
-            name="fk_tasks_pinned_user_id_household_users",
-        ),
-        nullable=True,
-    )
-    # foreign_keys explicit on both this and created_by below — two
-    # separate FK columns from Task into household_users now, which
-    # SQLAlchemy can't disambiguate on its own.
-    pinned_user: Mapped[HouseholdUser | None] = relationship(
-        foreign_keys=[pinned_user_id]
+    pinned_users: Mapped[list[HouseholdUser]] = relationship(
+        secondary=task_pinned_users
     )
 
     created_at: Mapped[datetime] = mapped_column(

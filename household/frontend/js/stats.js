@@ -178,7 +178,7 @@ async function loadRecent(container) {
           <div class="list-row" style="cursor: default;">
             <div class="avatar-sm"${e.household_user.image_path ? ` data-avatar-user-id="${e.household_user.id}"` : ""}>${escapeHtml(initials(e.household_user.display_name))}</div>
             <div class="list-row-body">
-              <div class="list-row-title">${escapeHtml(t("stats.completed_label", { name: e.household_user.display_name, label }))}</div>
+              <div class="list-row-title list-row-title-wrap">${escapeHtml(t("stats.completed_label", { name: e.household_user.display_name, label }))}</div>
               <div class="list-row-meta"><span>${timeAgo(e.earned_at)}</span></div>
             </div>
             <div class="list-row-points"><span>+${e.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>

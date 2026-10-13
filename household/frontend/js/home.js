@@ -244,7 +244,7 @@ function boardTodoRow(todo, container) {
     <div class="list-row-body">
       <div class="list-row-title">${escapeHtml(todo.title)}</div>
       <div class="list-row-meta">
-        <span class="badge badge-neutral">${escapeHtml(sourceLabel)}</span>
+        <span class="badge badge-neutral${todo.chain_parent_task_name ? " badge-wrap" : ""}">${escapeHtml(sourceLabel)}</span>
         ${badge ? `<span class="badge badge-${badge.tone}">${escapeHtml(badge.label)}</span>` : ""}
       </div>
     </div>

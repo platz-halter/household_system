@@ -11,7 +11,19 @@
    ============================================================ */
 
 :root {
-  /* --- Base black & white palette (default / "light") --- */
+  /* `color-scheme` tells the BROWSER's own UI (not this page's CSS)
+     which palette to paint things it draws itself — native form
+     control chrome, scrollbars, and critically the fill Android
+     Chrome uses behind the page during overscroll/edge-to-edge
+     gesture-nav areas. Never set before, so that fill stayed light
+     even under the dark theme's own --color-bg, showing as a white
+     strip right at the bottom edge — invisible in light mode (white
+     on white), which is why this surfaced specifically as "white bar
+     ... in dark mode". Declared per theme below, not just here, since
+     switching themes toggles the [data-theme] attribute, not this
+     block.
+     --- Base black & white palette (default / "light") --- */
+  color-scheme: light;
   --color-bg: #ffffff;
   --color-surface: #f7f7f7;
   --color-surface-raised: #ffffff;
@@ -81,6 +93,7 @@
 
 /* --- Dark theme (built in, ships alongside light) --- */
 [data-theme="dark"] {
+  color-scheme: dark;
   --color-bg: #0a0a0a;
   --color-surface: #161616;
   --color-surface-raised: #1e1e1e;

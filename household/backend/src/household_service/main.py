@@ -324,7 +324,7 @@ async def create_task(
     # on the hook for a chore needs the stronger admin gate (same
     # reasoning as the Board's own admin-only reassign vs. the
     # consent-based takeover request any writable user can ask for).
-    if data.pinned_user_id is not None and user.role != "admin":
+    if data.pinned_user_ids and user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only an admin can pin a task to someone",
@@ -383,15 +383,17 @@ async def patch_task(
     # actually changes who's pinned (model_fields_set, not `is not
     # None`: omitting the field entirely must stay a no-op for a
     # non-admin's otherwise-ordinary can_write edit, same as everywhere
-    # else TaskUpdate's fields are checked).
+    # else TaskUpdate's fields are checked). Compared as sets — a PATCH
+    # that re-sends the same group in a different order is not a
+    # change.
     if (
-        "pinned_user_id" in data.model_fields_set
-        and data.pinned_user_id != task.pinned_user_id
+        "pinned_user_ids" in data.model_fields_set
+        and set(data.pinned_user_ids or []) != {u.id for u in task.pinned_users}
         and user.role != "admin"
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only an admin can change a task's pinned owner",
+            detail="Only an admin can change a task's pinned group",
         )
     try:
         task = await crud.update_task(db, task, data)

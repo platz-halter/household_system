@@ -219,6 +219,20 @@ function pinnableUsers(users) {
   return users.filter((u) => u.role !== "viewer");
 }
 
+// "Always: {name}" for a single pin, "Always: A, B +N more" for a
+// group — capped at showing 2 names so a large group doesn't turn the
+// task row's badge into its own paragraph.
+function pinnedBadgeText(pinnedUsers) {
+  if (!pinnedUsers || pinnedUsers.length === 0) return null;
+  if (pinnedUsers.length === 1) {
+    return t("tasks.pinned_badge", { name: pinnedUsers[0].display_name });
+  }
+  const shown = pinnedUsers.slice(0, 2).map((u) => u.display_name);
+  const rest = pinnedUsers.length - shown.length;
+  const names = rest > 0 ? `${shown.join(", ")} ${t("common.and_n_more", { n: rest })}` : shown.join(", ");
+  return t("tasks.pinned_badge_multi", { names });
+}
+
 // Wires a `.stepper`'s ± buttons to the number input beside them —
 // the input itself stays real and directly editable (still what
 // draft-autosave and the save payload read); the buttons just nudge
@@ -549,7 +563,7 @@ function taskRow(task, container, writable) {
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
         <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${escapeHtml(t("common.times_per_day", { n: task.times_per_day }))}` : ""}</span>
         ${task.ramp_up_enabled ? `<span class="badge badge-info">${escapeHtml(t("common.bonus_badge", { n: task.ramp_up_bonus_points }))}</span>` : ""}
-        ${task.pinned_user ? `<span class="badge badge-info">${escapeHtml(t("tasks.pinned_badge", { name: task.pinned_user.display_name }))}</span>` : ""}
+        ${pinnedBadgeText(task.pinned_users) ? `<span class="badge badge-info badge-wrap">${escapeHtml(pinnedBadgeText(task.pinned_users))}</span>` : ""}
       </div>
     </div>
     <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>
@@ -596,6 +610,55 @@ function openModalShell(titleText, { onDismiss, extraHeaderHtml = "" } = {}) {
     if (e.target === overlay) dismiss();
   });
   return { overlay, body: overlay.querySelector("#modal-body"), close };
+}
+
+// A popup for picking any number of users at once — used by the Task
+// wizard's "always assign to" field, which used to be a single-select
+// <select> (user request: "a dialogue that lets you select multiple
+// users that can belong to the always assign group instead of just
+// one"). Reuses the .list-row-select/.list-row.selected pattern
+// home.js's own multi-select mode already established, rather than a
+// new checkbox-row design. `onConfirm(ids)` only fires on Save — the
+// caller's own selection state isn't touched until then, so cancelling
+// (X/backdrop) leaves it exactly as it was.
+function openUserMultiPickerModal({ users, selectedIds, title, onConfirm }) {
+  const { body, close } = openModalShell(title);
+  const selected = new Set(selectedIds);
+
+  body.innerHTML = `
+    <div id="ump-list" class="stack"></div>
+    <div class="modal-footer">
+      <button type="button" class="btn btn-primary grow" id="ump-confirm">${escapeHtml(t("common.save"))}</button>
+    </div>
+  `;
+
+  const listRoot = body.querySelector("#ump-list");
+  if (users.length === 0) {
+    listRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.no_eligible_tasks"))}</div>`;
+  } else {
+    listRoot.innerHTML = users
+      .map(
+        (u) => `
+      <button type="button" class="list-row${selected.has(u.id) ? " selected" : ""}" data-user-row="${u.id}">
+        <div class="list-row-select">${icons.check}</div>
+        <div class="list-row-body"><div class="list-row-title">${escapeHtml(u.display_name)}</div></div>
+      </button>`
+      )
+      .join("");
+    listRoot.querySelectorAll("[data-user-row]").forEach((row) => {
+      row.addEventListener("click", () => {
+        const id = Number(row.dataset.userRow);
+        if (selected.has(id)) selected.delete(id);
+        else selected.add(id);
+        row.classList.toggle("selected", selected.has(id));
+      });
+    });
+  }
+
+  body.querySelector("#ump-confirm").addEventListener("click", () => {
+    onConfirm([...selected]);
+    close();
+  });
 }
 
 function openCategoryModal(container, writable, category = null) {
@@ -1214,6 +1277,7 @@ async function openTaskModal(container, writable, task = null) {
   // values from an unrelated earlier draft.
   const draft = task ? null : loadTaskDraft();
   const selectedCats = new Set((task?.categories || []).map((c) => c.id));
+  let selectedPinnedIds = new Set(task?.pinned_user_ids || []);
   const selectedWeekdays = new Set(draft?.weekdays?.length ? draft.weekdays : task?.weekdays || []);
   // Manual is the default for a brand-new task (task is null here) — most
   // new tasks created lately are event-group roots/chain links, which
@@ -1226,7 +1290,7 @@ async function openTaskModal(container, writable, task = null) {
   // Meaningful for every recurrence except a chain-child task — even
   // daily/manual get a pin now (an informational badge, plus routing
   // any todo actually created from the task to the pinned person; see
-  // Task.pinned_user_id's own docstring for the full "what a pin does
+  // Task.pinned_users's own docstring for the full "what a pin does
   // per recurrence" breakdown). Chain-child status alone stays hidden,
   // since such a task's only instances come from its own chain spawn,
   // which already goes to whoever completed the parent (same_user) or
@@ -1338,16 +1402,15 @@ async function openTaskModal(container, writable, task = null) {
       </div>
 
       <div class="field" id="f-pinned-field" style="margin-top: var(--space-4); ${pinEligible ? "" : "display:none;"}">
-        <label for="f-pinned-user">${escapeHtml(t("tasks.pinned_label"))}</label>
-        <select class="select" id="f-pinned-user" ${canEditPin ? "" : "disabled"}>
-          <option value="">${escapeHtml(t("tasks.pinned_none"))}</option>
-          ${pinnable
-            .map(
-              (u) =>
-                `<option value="${u.id}" ${task?.pinned_user_id === u.id ? "selected" : ""}>${escapeAttr(u.display_name)}</option>`
-            )
-            .join("")}
-        </select>
+        <label>${escapeHtml(t("tasks.pinned_label"))}</label>
+        <div class="chip-row" id="f-pinned-chips" style="margin-bottom: var(--space-2);"></div>
+        ${
+          canEditPin
+            ? `<button type="button" class="btn btn-ghost btn-block" id="f-pinned-edit-btn" style="justify-content: center;">
+                 ${icons.plus}<span>${escapeHtml(t("tasks.pinned_edit_btn"))}</span>
+               </button>`
+            : ""
+        }
         <p class="muted" style="font-size: var(--font-size-xs); margin-top: 4px;">
           ${escapeHtml(t("tasks.pinned_desc"))}${!canEditPin ? ` ${escapeHtml(t("tasks.pinned_admin_only_note"))}` : ""}
         </p>
@@ -1444,7 +1507,7 @@ async function openTaskModal(container, writable, task = null) {
     weekdayPicker.style.display = e.target.value === "weekly" ? "" : "none";
     // The pinned-owner field (#f-pinned-field) deliberately does NOT
     // toggle here — unlike weekdays, a pin now applies to every
-    // recurrence (see Task.pinned_user_id's own docstring), so it
+    // recurrence (see Task.pinned_users's own docstring), so it
     // never needs hiding on a recurrence change.
   });
 
@@ -1473,6 +1536,49 @@ async function openTaskModal(container, writable, task = null) {
       chip.classList.toggle("chip-active");
     });
   });
+
+  function renderPinnedChips() {
+    const root = body.querySelector("#f-pinned-chips");
+    if (!root) return;
+    if (selectedPinnedIds.size === 0) {
+      root.innerHTML = `<span class="muted" style="font-size: var(--font-size-sm);">${escapeHtml(t("tasks.pinned_none"))}</span>`;
+      return;
+    }
+    root.innerHTML = [...selectedPinnedIds]
+      .map((id) => pinnable.find((u) => u.id === id))
+      .filter(Boolean)
+      .map(
+        (u) => `
+        <span class="chip chip-active" data-id="${u.id}">
+          ${escapeHtml(u.display_name)}
+          ${canEditPin ? `<button type="button" aria-label="${escapeAttr(t("tasks.remove_aria", { name: u.display_name }))}" data-remove="${u.id}">&times;</button>` : ""}
+        </span>`
+      )
+      .join("");
+    if (canEditPin) {
+      root.querySelectorAll("button[data-remove]").forEach((btn) => {
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          selectedPinnedIds.delete(Number(btn.dataset.remove));
+          renderPinnedChips();
+        });
+      });
+    }
+  }
+  renderPinnedChips();
+  if (canEditPin) {
+    body.querySelector("#f-pinned-edit-btn").addEventListener("click", () => {
+      openUserMultiPickerModal({
+        users: pinnable,
+        selectedIds: [...selectedPinnedIds],
+        title: t("tasks.pinned_label"),
+        onConfirm: (ids) => {
+          selectedPinnedIds = new Set(ids);
+          renderPinnedChips();
+        },
+      });
+    });
+  }
 
   body.querySelectorAll(".stepper").forEach((stepper) => wireStepper(stepper, { min: Number(stepper.querySelector("input").min || 0) }));
 
@@ -1504,8 +1610,6 @@ async function openTaskModal(container, writable, task = null) {
       return;
     }
 
-    const pinnedRaw = body.querySelector("#f-pinned-user").value;
-
     const payload = {
       name,
       description: body.querySelector("#f-description").value.trim() || null,
@@ -1517,12 +1621,12 @@ async function openTaskModal(container, writable, task = null) {
       ramp_up_enabled: isToggleOn(rampToggle),
       ramp_up_bonus_points: Number(body.querySelector("#f-bonus").value || 0),
       category_ids: [...selectedCats],
-      // Always included, explicit null when "No one" is picked — the
-      // PATCH route's own clearing logic depends on this field being
-      // PRESENT in the request (see TaskUpdate's own docstring), not
-      // just non-null; omitting it here would make un-pinning
-      // impossible.
-      pinned_user_id: pinnedRaw ? Number(pinnedRaw) : null,
+      // Always included, even as an empty array when nobody's pinned —
+      // the PATCH route's own clearing logic depends on this field
+      // being PRESENT in the request (see TaskUpdate's own docstring),
+      // not just non-empty; omitting it here would make clearing an
+      // existing pinned group impossible.
+      pinned_user_ids: [...selectedPinnedIds],
     };
 
     try {

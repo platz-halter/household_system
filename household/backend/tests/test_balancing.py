@@ -460,21 +460,28 @@ def test_excluded_user_leaves_item_unassigned_if_nobody_else_eligible():
     assert result.unassigned_todo_ids == [1]
 
 
-# ---- CandidateTask/CandidateTodo.pinned_user_id ("always assign to") ----
-# A standing household agreement, not a fairness decision — see
-# Task.pinned_user_id's own docstring and balancing.py's module one.
+# ---- CandidateTask/CandidateTodo.pinned_user_ids ("always assign to") --
+# A standing household agreement, not a household-wide fairness decision
+# — see Task.pinned_users's own docstring and balancing.py's module one.
+# A pin can now name more than one person; when it does, the pick among
+# THEM still follows the same fair, load-based tie-break the household-
+# wide pick uses — it's just scoped to the smaller group.
 
 
 def test_pinned_task_always_goes_to_its_owner_even_when_most_loaded():
     # Without the pin, user 1 (loaded) would never be picked over user 2
     # (empty) — the pin must override the fairness pick entirely, not
-    # just bias it.
+    # just bias it. Single-member group == the original "always this
+    # one person" behavior.
     users = [
         EligibleUser(user_id=1, points_this_week=100),
         EligibleUser(user_id=2, points_this_week=0),
     ]
     task = CandidateTask(
-        task_id=1, expected_points=5, ramp_up_enabled=False, pinned_user_id=1
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1}),
     )
 
     result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
@@ -487,11 +494,53 @@ def test_pinned_todo_always_goes_to_its_owner():
         EligibleUser(user_id=1, points_this_week=100),
         EligibleUser(user_id=2, points_this_week=0),
     ]
-    todo = CandidateTodo(todo_id=1, points=5, pinned_user_id=1)
+    todo = CandidateTodo(todo_id=1, points=5, pinned_user_ids=frozenset({1}))
 
     result = balance(users=users, tasks=[], todos=[todo], max_new_items_per_user=5)
 
     assert result.todo_assignments[1] == 1
+
+
+def test_pinned_group_goes_to_whichever_member_is_least_loaded():
+    # Three-person group — the task must land on user 3 (0 points), not
+    # user 1 or 2 (both more loaded), and definitely not user 4 (not in
+    # the group at all, even though they're the least loaded overall).
+    users = [
+        EligibleUser(user_id=1, points_this_week=50),
+        EligibleUser(user_id=2, points_this_week=30),
+        EligibleUser(user_id=3, points_this_week=0),
+        EligibleUser(user_id=4, points_this_week=0),
+    ]
+    task = CandidateTask(
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1, 2, 3}),
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments[1] == 3
+
+
+def test_pinned_group_skips_an_ineligible_member():
+    # User 1 (least loaded of the group) is on break — not in `users`
+    # at all — so the next-least-loaded ELIGIBLE group member (user 2)
+    # gets it, never user 3 (outside the group).
+    users = [
+        EligibleUser(user_id=2, points_this_week=10),
+        EligibleUser(user_id=3, points_this_week=0),
+    ]
+    task = CandidateTask(
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1, 2}),
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments[1] == 2
 
 
 def test_pinned_item_bypasses_the_per_run_cap():
@@ -502,7 +551,10 @@ def test_pinned_item_bypasses_the_per_run_cap():
     users = [EligibleUser(user_id=1, points_this_week=0)]
     plain_task = CandidateTask(task_id=1, expected_points=10, ramp_up_enabled=False)
     pinned_task = CandidateTask(
-        task_id=2, expected_points=5, ramp_up_enabled=False, pinned_user_id=1
+        task_id=2,
+        expected_points=5,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1}),
     )
 
     result = balance(
@@ -522,7 +574,25 @@ def test_pinned_item_left_unassigned_when_owner_not_eligible():
     # defeat the whole point of pinning.
     users = [EligibleUser(user_id=2, points_this_week=0)]
     task = CandidateTask(
-        task_id=1, expected_points=5, ramp_up_enabled=False, pinned_user_id=1
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1}),
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments == {}
+    assert result.unassigned_task_ids == [1]
+
+
+def test_pinned_group_left_unassigned_when_no_member_eligible():
+    users = [EligibleUser(user_id=99, points_this_week=0)]
+    task = CandidateTask(
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1, 2, 3}),
     )
 
     result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
@@ -540,7 +610,10 @@ def test_pinned_item_still_counts_toward_owners_load_for_other_items():
         EligibleUser(user_id=2, points_this_week=0),
     ]
     pinned_task = CandidateTask(
-        task_id=1, expected_points=10, ramp_up_enabled=False, pinned_user_id=1
+        task_id=1,
+        expected_points=10,
+        ramp_up_enabled=False,
+        pinned_user_ids=frozenset({1}),
     )
     plain_task = CandidateTask(task_id=2, expected_points=1, ramp_up_enabled=False)
 
@@ -553,6 +626,60 @@ def test_pinned_item_still_counts_toward_owners_load_for_other_items():
 
     assert result.task_assignments[1] == 1
     assert result.task_assignments[2] == 2
+
+
+def test_pinned_group_excluded_user_is_skipped_even_if_least_loaded():
+    # A "different person" chain todo excludes whoever completed its
+    # parent — even when that person is the least-loaded member of the
+    # pinned group, they must never get it; the next-least-loaded
+    # eligible member does instead.
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=20),
+    ]
+    todo = CandidateTodo(
+        todo_id=1, points=5, excluded_user_id=1, pinned_user_ids=frozenset({1, 2})
+    )
+
+    result = balance(users=users, tasks=[], todos=[todo], max_new_items_per_user=5)
+
+    assert result.todo_assignments[1] == 2
+
+
+def test_pinned_group_ramp_up_stays_with_last_assignee():
+    # User 2 is least loaded, but user 1 is the ramp-up streak's last
+    # completer and is still an eligible group member — stickiness
+    # keeps it with user 1 rather than rotating to user 2.
+    users = [
+        EligibleUser(user_id=1, points_this_week=10),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+    task = CandidateTask(
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=True,
+        last_assignee_id=1,
+        pinned_user_ids=frozenset({1, 2}),
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments[1] == 1
+
+
+def test_pinned_group_ramp_up_falls_back_to_fair_pick_when_last_assignee_ineligible():
+    users = [EligibleUser(user_id=2, points_this_week=0)]
+    task = CandidateTask(
+        task_id=1,
+        expected_points=5,
+        ramp_up_enabled=True,
+        last_assignee_id=1,  # on break, not in `users`
+        pinned_user_ids=frozenset({1, 2}),
+    )
+
+    result = balance(users=users, tasks=[task], todos=[], max_new_items_per_user=5)
+
+    assert result.task_assignments[1] == 2
 
 
 def test_rebalance_never_pulls_a_pinned_assignment():
@@ -578,53 +705,131 @@ def test_rebalance_never_pulls_a_pinned_assignment():
 
 def test_correct_pins_moves_a_mis_held_assignment_to_its_owner():
     a = PinnedAssignment(
-        assignment_id=1, holder_id=2, pinned_user_id=1, remaining_points=10
+        assignment_id=1,
+        holder_id=2,
+        pinned_user_ids=frozenset({1}),
+        remaining_points=10,
     )
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
 
-    moves = correct_pins(assignments=[a], eligible_user_ids={1, 2})
+    moves = correct_pins(assignments=[a], users=users)
 
     assert moves == [(1, 2, 1)]
+
+
+def test_correct_pins_picks_the_least_loaded_group_member():
+    a = PinnedAssignment(
+        assignment_id=1,
+        holder_id=3,  # outside the group
+        pinned_user_ids=frozenset({1, 2}),
+        remaining_points=10,
+    )
+    users = [
+        EligibleUser(user_id=1, points_this_week=50),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+
+    moves = correct_pins(assignments=[a], users=users)
+
+    assert moves == [(1, 3, 2)]
+
+
+def test_correct_pins_leaves_an_assignment_already_held_by_a_group_member():
+    # Holder IS in the pinned group (just not the single formerly-
+    # tracked "owner") — nothing to correct.
+    a = PinnedAssignment(
+        assignment_id=1,
+        holder_id=2,
+        pinned_user_ids=frozenset({1, 2}),
+        remaining_points=10,
+    )
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+
+    assert correct_pins(assignments=[a], users=users) == []
+
+
+def test_correct_pins_sequences_multiple_moves_by_updated_load():
+    # Two mis-held assignments, same two-person pinned group, both
+    # initially tied at 0 — the first move must be reflected in load
+    # before the second is decided, so they land on DIFFERENT people
+    # rather than both piling onto whoever looked least loaded first.
+    a1 = PinnedAssignment(
+        assignment_id=1,
+        holder_id=3,
+        pinned_user_ids=frozenset({1, 2}),
+        remaining_points=10,
+    )
+    a2 = PinnedAssignment(
+        assignment_id=2,
+        holder_id=3,
+        pinned_user_ids=frozenset({1, 2}),
+        remaining_points=5,
+    )
+    users = [
+        EligibleUser(user_id=1, points_this_week=0),
+        EligibleUser(user_id=2, points_this_week=0),
+    ]
+
+    moves = correct_pins(assignments=[a1, a2], users=users)
+
+    assert moves == [(1, 3, 1), (2, 3, 2)]
 
 
 def test_correct_pins_skips_an_assignment_with_progress():
     a = PinnedAssignment(
         assignment_id=1,
         holder_id=2,
-        pinned_user_id=1,
+        pinned_user_ids=frozenset({1}),
         remaining_points=10,
         has_progress=True,
     )
+    users = [EligibleUser(user_id=1, points_this_week=0)]
 
-    assert correct_pins(assignments=[a], eligible_user_ids={1, 2}) == []
+    assert correct_pins(assignments=[a], users=users) == []
 
 
 def test_correct_pins_never_undoes_an_accepted_takeover():
     # already_reassigned is sourced from the same TaskAssignment.
     # reassigned_at column crud.accept_takeover_request stamps — a pin
     # correction must not silently move a holder's own accepted
-    # takeover right back to the pinned owner.
+    # takeover right back to the pinned group.
     a = PinnedAssignment(
         assignment_id=1,
         holder_id=2,
-        pinned_user_id=1,
+        pinned_user_ids=frozenset({1}),
         remaining_points=10,
         already_reassigned=True,
     )
+    users = [EligibleUser(user_id=1, points_this_week=0)]
 
-    assert correct_pins(assignments=[a], eligible_user_ids={1, 2}) == []
+    assert correct_pins(assignments=[a], users=users) == []
 
 
 def test_correct_pins_leaves_it_when_owner_not_currently_eligible():
     a = PinnedAssignment(
-        assignment_id=1, holder_id=2, pinned_user_id=1, remaining_points=10
+        assignment_id=1,
+        holder_id=2,
+        pinned_user_ids=frozenset({1}),
+        remaining_points=10,
     )
+    users = [EligibleUser(user_id=99, points_this_week=0)]
 
-    assert correct_pins(assignments=[a], eligible_user_ids={2}) == []
+    assert correct_pins(assignments=[a], users=users) == []
 
 
 def test_correct_pins_skips_a_fully_completed_assignment():
     a = PinnedAssignment(
-        assignment_id=1, holder_id=2, pinned_user_id=1, remaining_points=0
+        assignment_id=1,
+        holder_id=2,
+        pinned_user_ids=frozenset({1}),
+        remaining_points=0,
     )
+    users = [EligibleUser(user_id=1, points_this_week=0)]
 
-    assert correct_pins(assignments=[a], eligible_user_ids={1, 2}) == []
+    assert correct_pins(assignments=[a], users=users) == []

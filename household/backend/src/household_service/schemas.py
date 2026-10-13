@@ -89,9 +89,10 @@ class TaskCreate(BaseModel):
     ramp_up_enabled: bool = False
     ramp_up_bonus_points: int = Field(default=0, ge=0)
     category_ids: list[int] = Field(default_factory=list)
-    # "Always assign to" owner — see Task.pinned_user_id's own docstring.
+    # "Always assign to" group — see Task.pinned_users's own docstring.
     # Admin-only to set (crud.create_task), same as changing it later.
-    pinned_user_id: int | None = None
+    # Empty list = not pinned, same meaning None used to carry.
+    pinned_user_ids: list[int] = Field(default_factory=list)
 
     @field_validator("weekdays")
     @classmethod
@@ -113,12 +114,13 @@ class TaskUpdate(BaseModel):
     Cross-checking `recurrence` against `weekdays` needs the task's
     current state when only one of the two is in this particular PATCH,
     so that validation lives in crud.update_task instead of here.
-    `pinned_user_id` needs the SAME "was it actually provided" distinction
-    for a different reason — explicit `null` must clear an existing pin,
-    while omitting the field must leave it alone, so crud.update_task
-    reads `"pinned_user_id" in data.model_fields_set` rather than the
+    `pinned_user_ids` needs the SAME "was it actually provided"
+    distinction for a different reason — an explicit empty list (or
+    `null`) must clear the existing pin group, while omitting the field
+    must leave it alone, so crud.update_task reads
+    `"pinned_user_ids" in data.model_fields_set` rather than the
     `is not None` pattern every other field here uses (which can set a
-    value but can never explicitly clear one back to null)."""
+    value but can never explicitly clear one back to empty)."""
 
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = Field(default=None, max_length=1000)
@@ -130,7 +132,7 @@ class TaskUpdate(BaseModel):
     ramp_up_enabled: bool | None = None
     ramp_up_bonus_points: int | None = Field(default=None, ge=0)
     category_ids: list[int] | None = None
-    pinned_user_id: int | None = None
+    pinned_user_ids: list[int] | None = None
 
     @field_validator("weekdays")
     @classmethod
@@ -160,9 +162,9 @@ class TaskOut(BaseModel):
     # this to keep it out of the normal task list and the task picker
     # used when choosing a NEW chain link's child.
     is_chain_child: bool = False
-    # "Always assign to" owner — see Task.pinned_user_id's own docstring.
-    pinned_user_id: int | None = None
-    pinned_user: HouseholdUserBrief | None = None
+    # "Always assign to" group — see Task.pinned_users's own docstring.
+    pinned_user_ids: list[int] = Field(default_factory=list)
+    pinned_users: list[HouseholdUserBrief] = Field(default_factory=list)
     # Who created this task — NULL for anything created before this
     # column existed. The frontend uses it to decide whether a non-admin
     # gets a Delete button on THIS task (see main.delete_task); nothing
@@ -188,12 +190,10 @@ class TaskOut(BaseModel):
             created_at=task.created_at,
             updated_at=task.updated_at,
             is_chain_child=is_chain_child,
-            pinned_user_id=task.pinned_user_id,
-            pinned_user=(
-                HouseholdUserBrief.model_validate(task.pinned_user)
-                if task.pinned_user
-                else None
-            ),
+            pinned_user_ids=[u.id for u in task.pinned_users],
+            pinned_users=[
+                HouseholdUserBrief.model_validate(u) for u in task.pinned_users
+            ],
             created_by_id=task.created_by_id,
         )
 

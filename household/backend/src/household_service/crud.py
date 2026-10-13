@@ -36,6 +36,7 @@ from household_service.models import (
     TaskChainLink,
     TodoItem,
     TodoStatus,
+    task_pinned_users,
 )
 from household_service.schemas import (
     CategoryIn,
@@ -234,7 +235,7 @@ async def delete_category(db: AsyncSession, category: Category) -> None:
 
 def _task_query():
     return select(Task).options(
-        selectinload(Task.categories), selectinload(Task.pinned_user)
+        selectinload(Task.categories), selectinload(Task.pinned_users)
     )
 
 
@@ -268,25 +269,37 @@ async def _resolve_categories(
     return found
 
 
-async def _validate_pinned_user(db: AsyncSession, pinned_user_id: int | None) -> None:
-    """A task's "always assign to" owner must be a real, non-viewer
-    household user — a viewer can never complete anything (can_write-
-    gated), so pinning one would leave the task permanently stuck, same
-    reasoning as _is_eligible_for_tasks' own viewer exclusion."""
-    if pinned_user_id is None:
-        return
-    pinned_user = await db.get(HouseholdUser, pinned_user_id)
-    if pinned_user is None:
-        raise ValueError(f"Unknown pinned user id: {pinned_user_id}")
-    if pinned_user.role == "viewer":
+async def _resolve_pinned_users(
+    db: AsyncSession, pinned_user_ids: list[int]
+) -> list[HouseholdUser]:
+    """Resolves a task's "always assign to" group — each id must be a
+    real, non-viewer household user (a viewer can never complete
+    anything, can_write-gated, so pinning one would leave the task
+    permanently stuck for them specifically — same reasoning as
+    _is_eligible_for_tasks' own viewer exclusion). Deduplicates ids —
+    the many-to-many table's own primary key would reject a literal
+    duplicate row anyway; checking here gives a clean no-op instead of
+    a DB-level error for a client that sent the same id twice."""
+    if not pinned_user_ids:
+        return []
+    unique_ids = set(pinned_user_ids)
+    result = await db.execute(
+        select(HouseholdUser).where(HouseholdUser.id.in_(unique_ids))
+    )
+    found = list(result.scalars().all())
+    missing = unique_ids - {u.id for u in found}
+    if missing:
+        raise ValueError(f"Unknown pinned user id(s): {sorted(missing)}")
+    if any(u.role == "viewer" for u in found):
         raise ValueError("a viewer can't be pinned to a task — they can never complete it")
+    return found
 
 
 async def create_task(
     db: AsyncSession, data: TaskCreate, creator: HouseholdUser | None = None
 ) -> Task:
     categories = await _resolve_categories(db, data.category_ids)
-    await _validate_pinned_user(db, data.pinned_user_id)
+    pinned_users = await _resolve_pinned_users(db, data.pinned_user_ids)
     task = Task(
         name=data.name,
         description=data.description,
@@ -297,14 +310,15 @@ async def create_task(
         times_per_day=data.times_per_day,
         ramp_up_enabled=data.ramp_up_enabled,
         ramp_up_bonus_points=data.ramp_up_bonus_points,
-        pinned_user_id=data.pinned_user_id,
+        pinned_users=pinned_users,
         created_by_id=creator.id if creator else None,
         categories=categories,
     )
     db.add(task)
     await db.commit()
     await db.refresh(
-        task, attribute_names=["categories", "pinned_user", "created_at", "updated_at"]
+        task,
+        attribute_names=["categories", "pinned_users", "created_at", "updated_at"],
     )
     return task
 
@@ -334,15 +348,15 @@ async def update_task(db: AsyncSession, task: Task, data: TaskUpdate) -> Task:
         task.ramp_up_bonus_points = data.ramp_up_bonus_points
     if data.category_ids is not None:
         task.categories = await _resolve_categories(db, data.category_ids)
-    # "pinned_user_id" in model_fields_set, not `is not None` — unlike
-    # every other field here, explicit null has to be distinguishable
-    # from "not included in this PATCH," since clearing an existing pin
-    # is a real, expected action (see TaskUpdate's own docstring).
-    if "pinned_user_id" in data.model_fields_set:
-        await _validate_pinned_user(db, data.pinned_user_id)
-        task.pinned_user_id = data.pinned_user_id
+    # "pinned_user_ids" in model_fields_set, not `is not None` — unlike
+    # every other field here, an explicit empty list has to be
+    # distinguishable from "not included in this PATCH," since clearing
+    # an existing pin group is a real, expected action (see TaskUpdate's
+    # own docstring).
+    if "pinned_user_ids" in data.model_fields_set:
+        task.pinned_users = await _resolve_pinned_users(db, data.pinned_user_ids or [])
     await db.commit()
-    await db.refresh(task, attribute_names=["categories", "pinned_user", "updated_at"])
+    await db.refresh(task, attribute_names=["categories", "pinned_users", "updated_at"])
     return task
 
 
@@ -799,9 +813,9 @@ async def trigger_event_group(
         max_new_items_per_user = max(load_count.values(), default=0) + len(created)
         # `created` and `root_tasks` were built in lockstep above (one
         # todo per root, same order) — zip pairs each todo back to the
-        # root task it might be pinned through. A root's OWN pin, if
-        # any — not to be confused with its chain children, which can
-        # never themselves be pinned (see Task.pinned_user_id).
+        # root task it might be pinned through. A root's OWN pin group,
+        # if any — not to be confused with its chain children, which
+        # can never themselves be pinned (see Task.pinned_users).
         result = balancing.balance(
             users=balancing_users,
             tasks=[],
@@ -809,7 +823,7 @@ async def trigger_event_group(
                 balancing.CandidateTodo(
                     todo_id=todo.id,
                     points=todo.points,
-                    pinned_user_id=task.pinned_user_id,
+                    pinned_user_ids=frozenset(u.id for u in task.pinned_users),
                 )
                 for todo, task in zip(created, root_tasks)
             ],
@@ -1716,7 +1730,9 @@ async def _gather_balancer_load(
     # existing assignment was computed under the old boundary.
     current_assignments_result = await db.execute(
         select(TaskAssignment)
-        .options(selectinload(TaskAssignment.task))
+        .options(
+            selectinload(TaskAssignment.task).selectinload(Task.pinned_users)
+        )
         .where(TaskAssignment.period_start <= as_of, TaskAssignment.period_end >= as_of)
     )
     current_assignments = list(current_assignments_result.scalars().all())
@@ -1882,7 +1898,7 @@ async def _spawn_one_chain_child(
     that column means "posted/triggered directly from this task" (Board
     "From task", an Event Group root), which pin-routing reads — a
     chain child's pin (if its task even has one) is meant to stay inert
-    (see Task.pinned_user_id's own docstring), and setting source_
+    (see Task.pinned_users's own docstring), and setting source_
     task_id here would wire that routing back on by accident. It's also
     exactly why a caller recursing onto a freshly-spawned child can't
     just read `child.source_task_id` to find its own chain links — see
@@ -2183,20 +2199,35 @@ async def run_balancing(
     reassignments: list[tuple[TaskAssignment, int, int, int]] = []
     now = datetime.now(UTC)
 
-    # ---- pin correction: tasks with an "always assign to" owner --------
-    # Moves an EXISTING assignment back to its pinned owner when it's
-    # currently held by someone else — e.g. the pin was just set, or
-    # changed, after this period's assignment was already made. Runs
-    # before the sweep so a freshly-corrected pin's load is reflected
-    # before anything else is decided this run. Not itself a fairness
-    # computation (see balancing.correct_pins's own docstring) — a
-    # pinned task that's ALREADY correctly held, or has no pin at all,
-    # never shows up here.
+    def _balancing_users() -> list[balancing.EligibleUser]:
+        # Re-read load_points/load_count each call — both the pin
+        # correction below and the two passes further down all share
+        # and mutate this same running state.
+        return [
+            balancing.EligibleUser(
+                user_id=u.id,
+                points_this_week=points_this_week[u.id],
+                already_assigned_points=load_points[u.id],
+                already_assigned_count=load_count[u.id],
+            )
+            for u in eligible
+        ]
+
+    # ---- pin correction: tasks with an "always assign to" group --------
+    # Moves an EXISTING assignment back to the pinned group when it's
+    # currently held by someone OUTSIDE it — e.g. the pin was just set,
+    # or changed, after this period's assignment was already made.
+    # Runs before the sweep so a freshly-corrected pin's load is
+    # reflected before anything else is decided this run. Not itself a
+    # fairness computation in the household-wide sense (see
+    # balancing.correct_pins's own docstring) — a pinned task that's
+    # ALREADY correctly held by SOME member of its group, or has no pin
+    # at all, never shows up here.
     pinned_candidates = [
         balancing.PinnedAssignment(
             assignment_id=a.id,
             holder_id=a.household_user_id,
-            pinned_user_id=a.task.pinned_user_id,
+            pinned_user_ids=frozenset(u.id for u in a.task.pinned_users),
             remaining_points=remaining_by_assignment[a.id],
             has_progress=(
                 await _completed_instance_count(
@@ -2207,11 +2238,11 @@ async def run_balancing(
             already_reassigned=a.reassigned_at is not None,
         )
         for a in current_assignments
-        if a.task.pinned_user_id is not None
-        and a.task.pinned_user_id != a.household_user_id
+        if a.task.pinned_users
+        and a.household_user_id not in {u.id for u in a.task.pinned_users}
     ]
     pin_moves = balancing.correct_pins(
-        assignments=pinned_candidates, eligible_user_ids=set(eligible_by_id)
+        assignments=pinned_candidates, users=_balancing_users()
     )
     for assignment_id, from_uid, to_uid in pin_moves:
         row = assignment_by_id[assignment_id]
@@ -2225,25 +2256,14 @@ async def run_balancing(
         load_points[to_uid] += pts
         load_count[to_uid] += 1
 
-    def _balancing_users() -> list[balancing.EligibleUser]:
-        # Re-read load_points/load_count each call — both passes below
-        # share and mutate this same running state.
-        return [
-            balancing.EligibleUser(
-                user_id=u.id,
-                points_this_week=points_this_week[u.id],
-                already_assigned_points=load_points[u.id],
-                already_assigned_count=load_count[u.id],
-            )
-            for u in eligible
-        ]
-
     # ---- pass 1: sweep anything not yet assigned this period -----------
     candidate_tasks: list[balancing.CandidateTask] = []
     task_period_map: dict[int, tuple[date, date]] = {}
     task_by_id: dict[int, Task] = {}
     tasks_result = await db.execute(
-        select(Task).where(
+        select(Task)
+        .options(selectinload(Task.pinned_users))
+        .where(
             Task.active.is_(True),
             # Explicit allow-list, not `!= daily` — a `manual` task
             # (Recurrence.manual) must never reach the sweep either;
@@ -2271,12 +2291,17 @@ async def run_balancing(
         expected = _expected_points(task)
         if expected <= 0:
             continue
-        # A pinned task never reaches balance()'s ramp-up-stickiness/
-        # rotation branch at all (see balancing.balance's pinned
-        # bypass) — skip the otherwise-wasted assignment-history query
-        # for it.
+        # A task pinned to exactly one person never reaches balance()'s
+        # ramp-up-stickiness/rotation branch at all (see balancing.
+        # balance's pinned bypass) — skip the otherwise-wasted
+        # assignment-history query for that single-member case. A
+        # group of 2+ still needs it: ramp-up stickiness now applies
+        # WITHIN the group too (see balancing.balance's own comment),
+        # and ordinary (non-ramp-up) rotation doesn't apply to a pinned
+        # item regardless of group size, so recent_assignee_ids only
+        # matters here for last_assignee_id.
         history = []
-        if task.pinned_user_id is None:
+        if not task.pinned_users or len(task.pinned_users) > 1:
             history_result = await db.execute(
                 select(TaskAssignment.household_user_id)
                 .where(
@@ -2294,7 +2319,7 @@ async def run_balancing(
                 ramp_up_enabled=task.ramp_up_enabled,
                 last_assignee_id=history[0] if history else None,
                 recent_assignee_ids=frozenset(history),
-                pinned_user_id=task.pinned_user_id,
+                pinned_user_ids=frozenset(u.id for u in task.pinned_users),
             )
         )
         task_period_map[task.id] = (p_start, p_end)
@@ -2318,23 +2343,24 @@ async def run_balancing(
     source_task_ids = {
         t.source_task_id for t in unclaimed_todos.values() if t.source_task_id
     }
-    pinned_by_source_task: dict[int, int] = {}
+    pinned_by_source_task: dict[int, set[int]] = {}
     if source_task_ids:
         pin_rows = await db.execute(
-            select(Task.id, Task.pinned_user_id).where(
-                Task.id.in_(source_task_ids), Task.pinned_user_id.isnot(None)
-            )
+            select(
+                task_pinned_users.c.task_id, task_pinned_users.c.household_user_id
+            ).where(task_pinned_users.c.task_id.in_(source_task_ids))
         )
-        pinned_by_source_task = dict(pin_rows.all())
+        for task_id, user_id in pin_rows.all():
+            pinned_by_source_task.setdefault(task_id, set()).add(user_id)
     candidate_todos = [
         balancing.CandidateTodo(
             todo_id=t.id,
             points=t.points,
             excluded_user_id=t.exclude_user_id,
-            pinned_user_id=(
-                pinned_by_source_task.get(t.source_task_id)
+            pinned_user_ids=frozenset(
+                pinned_by_source_task.get(t.source_task_id, set())
                 if t.source_task_id
-                else None
+                else set()
             ),
         )
         for t in unclaimed_todos.values()
@@ -2400,7 +2426,7 @@ async def run_balancing(
                 # the pin-correction pass above, a pinned task is never
                 # a fairness pull target — see balancing.rebalance's own
                 # `not a.pinned` gate.
-                pinned=a.task.pinned_user_id is not None,
+                pinned=bool(a.task.pinned_users),
             )
         )
 
