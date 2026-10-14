@@ -48,20 +48,54 @@ let groupRoleConfig = {
  * in this file already exists to prevent. Safe to call repeatedly;
  * cheap no-op once `getAuthentikConfig()`'s own cache is warm.
  */
+// Tracked so a specific page that's heavily role-gated (settings.js)
+// can await the SAME in-flight warm-up instead of racing it — see
+// groupRoleMapReady() below for why this matters.
+let groupRoleMapPromise = null;
+
 export async function warmGroupRoleMap() {
-  try {
-    const config = await getAuthentikConfig();
-    groupRoleConfig = {
-      admin_group: config.admin_group,
-      user_group: config.user_group,
-      viewer_group: config.viewer_group,
-    };
-  } catch {
-    // Keep whatever's already in groupRoleConfig (the default, or a
-    // previously successful fetch) — same "don't let an unreachable
-    // auth service break what's already working" principle as every
-    // other getAuthentikConfig() caller in this file.
-  }
+  groupRoleMapPromise = (async () => {
+    try {
+      const config = await getAuthentikConfig();
+      groupRoleConfig = {
+        admin_group: config.admin_group,
+        user_group: config.user_group,
+        viewer_group: config.viewer_group,
+      };
+    } catch {
+      // Keep whatever's already in groupRoleConfig (the default, or a
+      // previously successful fetch) — same "don't let an unreachable
+      // auth service break what's already working" principle as every
+      // other getAuthentikConfig() caller in this file.
+    }
+  })();
+  return groupRoleMapPromise;
+}
+
+/**
+ * Resolves once the group-role warm-up this page load's boot() kicked
+ * off (never awaited there on purpose — see its own comment) has
+ * settled, or immediately if nothing's in flight. For most pages the
+ * brief window before that happens genuinely doesn't matter (boot()'s
+ * own reasoning). Settings is the one page where it concretely does:
+ * a hard refresh landing directly ON Settings renders its admin-only
+ * section from getCurrentUserInfo() exactly once, synchronously, at
+ * the top of renderSettings() — if a real admin's Authentik groups
+ * claim doesn't match the STILL-DEFAULT groupRoleConfig yet (e.g. this
+ * household customized its admin group name through the Admin panel,
+ * same scenario the module docstring above already covers), that
+ * one-shot render computes "viewer," and nothing re-triggers it later
+ * — reproduced live as "refreshing on Settings demotes me to viewer
+ * until I navigate away and back" (navigating back re-renders the page
+ * from scratch, by which point the warm-up has long since resolved).
+ * Settings await-ing this before its own one-shot render is a
+ * deliberately narrow exception to "never await warmGroupRoleMap" —
+ * the whole page is role-gated content anyway, so a brief wait for
+ * accurate role data before paint is the right trade-off specifically
+ * here, unlike a role-agnostic page like Home.
+ */
+export function groupRoleMapReady() {
+  return groupRoleMapPromise || Promise.resolve();
 }
 
 // Full-page redirects go through this indirection ONLY so tests can

@@ -1,7 +1,7 @@
 import { CONFIG } from "./config.js";
 import { api, fetchImageUrl, invalidateImageUrl } from "./api.js";
 import { THEMES, getStoredTheme, applyTheme } from "./theme.js";
-import { getCurrentUserInfo, logout } from "./auth.js";
+import { getCurrentUserInfo, logout, groupRoleMapReady } from "./auth.js";
 import { icons } from "./icons.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
@@ -41,6 +41,13 @@ function isAdmin() {
 }
 
 export async function renderSettings(container) {
+  // See groupRoleMapReady()'s own docstring: this page's admin-only
+  // section is computed once, synchronously, from getCurrentUserInfo()
+  // below — a hard refresh landing directly here could otherwise do
+  // that before the group-role warm-up main.js's boot() kicked off
+  // (deliberately unawaited there) has resolved, wrongly rendering a
+  // real admin as a viewer until something re-renders the page.
+  await groupRoleMapReady();
   const user = getCurrentUserInfo() || {};
   const currentTheme = getStoredTheme();
   const writable = canWrite();

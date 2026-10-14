@@ -350,6 +350,97 @@ below).
     at the sim database) — open the picker, select two people, confirm,
     save, close and reopen the task to confirm persistence, and see
     the resulting "Always: X, Y" badge on the task list row.
+- 1.2.0 also picked up an eleventh round, following user-reported
+  evidence that the tenth round's mobile fixes hadn't actually fixed
+  two of the three things they targeted:
+  - **The Android white bar at the bottom — found the REAL cause**,
+    after the ninth/tenth rounds' `color-scheme` and `<html>`-
+    background guesses turned out insufficient: user report ("white
+    bar... only in the installed app version, not in Chrome browser")
+    proved it had nothing to do with page content or CSS at all — if
+    it had, it would show identically in a browser tab, which renders
+    the exact same HTML/CSS. Researched rather than guessed a third
+    time ([Chromium issue
+    559396686](https://issues.chromium.org/issues/559396686) and
+    several real-world PWA fixes): Chromium on Android derives an
+    INSTALLED PWA's system status/navigation bar colors from the Web
+    App Manifest, baked in at WebAPK mint time — it does NOT read a
+    live page's `<meta name="theme-color">` for that, no matter how
+    correctly that tag is kept in sync by JS (which it already was).
+    `manifest.json`'s `theme_color: "#ffffff"` was therefore always
+    going to paint that bar white regardless of in-app theme — fixed
+    by removing `theme_color` from both `household/frontend/manifest.
+    json` and `storage/frontend/manifest.json` entirely, which (per
+    the same research) makes the installed app's system bars follow
+    the PHONE's own OS-level light/dark setting instead of a stuck
+    value. Explicitly flagged to the user: this ties the system bar to
+    OS dark mode, not this app's own in-page toggle (which the Web App
+    Manifest has no way to observe) — a real, inherent platform gap
+    between "installed PWA" and "normal page," not something further
+    app code can close. Also explains why the user's own "cleared
+    cache and reinstalled" test didn't help: the manifest itself had
+    never actually changed before this round, so reinstalling just
+    re-baked the same white value.
+  - **"Spacing under the bottom-nav not respecting the theme" — same
+    root cause, re-described.** Taken together with the white-bar
+    report rather than as a separate bug.
+  - **The "After:"/"Chained from:" badges — the wrap-based fix from
+    the tenth round was itself the bug**, per direct user feedback
+    ("still shows a badly formatted line break"). Replaced with
+    single-line ellipsis truncation instead, matching every other
+    badge's look. `text-overflow` doesn't apply to `.badge`'s own box
+    (`inline-flex`), only to a block-level element's OWN overflow, so
+    the ellipsis needed an inner `<span>` (`.badge-truncate`'s outer
+    `max-width: 100%` constrains the row-relative width that inner
+    span then truncates against). Applied to home.js's "After:" badge,
+    board.js's "Chained from:" badge, and (for consistency, not
+    separately reported) the task-list "Always: A, B" pin badge from
+    the tenth round. Live-verified at 390px.
+  - **Stats' Recent Activity — now literally the exact layout the user
+    specified**, not just "doesn't truncate mid-word": split into "
+    {name} completed" as a small caption line and the task/todo title
+    as its own, separately-truncating `.list-row-title` line below it
+    — the old composed single sentence plus a 3-line clamp (tenth
+    round) is gone, along with its now-dead `.list-row-title-wrap` CSS
+    and the `stats.completed_label` key it used. Live-verified
+    pixel-for-pixel against the user's own example format.
+  - **A real, separate bug, unrelated to anything reported before this
+    message: refreshing on Settings demoted an admin to viewer until
+    navigating away and back.** Root cause: `main.js`'s `boot()`
+    deliberately never awaits `warmGroupRoleMap()` (so an unreachable
+    auth service can't delay first paint — correct for every OTHER
+    page), but `settings.js`'s `renderSettings()` computes its
+    admin-only section exactly once, synchronously, from
+    `getCurrentUserInfo()` — which, for an Authentik-sourced token,
+    depends on that same warm-up having already resolved the real
+    (possibly admin-customized) group names. A hard refresh landing
+    directly ON Settings can render before that fetch settles, using
+    the still-default group names — if this household's configured
+    admin group name doesn't match the hardcoded default, a real admin
+    computes as "viewer," and nothing re-triggers the check later
+    (navigating away and back works again because THAT render happens
+    after the warm-up has long since resolved). The exact bug CLAUDE.md
+    already documents a production incident for, just a second,
+    narrower trigger the original fix didn't close. New
+    `auth.js`-exported `groupRoleMapReady()` lets a specifically
+    role-heavy page await the SAME in-flight warm-up `boot()` kicked
+    off, rather than firing a redundant fetch — `settings.js` now
+    awaits it before computing its one-shot render. Router's own
+    `adminOnly` guard (gating `/admin` itself) had the identical race,
+    arguably worse: a `replace: true` redirect straight back to
+    `/settings`, erasing `/admin` from history, not just a
+    wrong-looking render — fixed the same way, scoped to only the
+    `adminOnly` check so every OTHER route still renders with no added
+    delay. `storage/frontend` has the same `warmGroupRoleMap` pattern
+    in its own independent `auth.js`, but never uses role for anything
+    beyond a display label there (no admin/user distinction at all —
+    see "Storage has no admin/user distinction" below), so the same
+    race there is a harmless momentary mislabel, not a functional
+    lockout — left alone rather than fixed unprompted. Regression-
+    tested live (a local-auth admin token hitting `/settings` and
+    `/admin` directly, simulating a hard refresh on each) rather than
+    the actual Authentik-token race itself, which would need a mocked
+    JWKS/RS256 setup this round didn't build — disclosed as such.
 - 1.1.0 adds **chained tasks**: completing one task can auto-spawn
   others onto the board as one-off todos, so a parent chore like "Set
   the table" can define child chores like "Clear the table" that only

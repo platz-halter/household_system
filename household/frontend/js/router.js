@@ -1,4 +1,4 @@
-import { isAuthenticated, getCurrentUserInfo } from "./auth.js";
+import { isAuthenticated, getCurrentUserInfo, groupRoleMapReady } from "./auth.js";
 import { renderLogin } from "./login.js";
 import { renderHome } from "./home.js";
 import { renderBoard } from "./board.js";
@@ -78,6 +78,17 @@ async function handleRoute() {
     return;
   }
   if (route.adminOnly) {
+    // Only this one route awaits the group-role warm-up (see
+    // groupRoleMapReady()'s own docstring in auth.js) — every other
+    // route still renders instantly. A real admin landing directly on
+    // /admin via a hard refresh used to get bounced straight back to
+    // /settings (a `replace: true` navigation, erasing /admin from
+    // history) when this check ran before their Authentik groups
+    // claim could be matched against a just-customized admin group
+    // name — the exact production incident CLAUDE.md documents for
+    // the Settings page's own admin section, just worse here since
+    // it's a redirect rather than a wrong-looking render.
+    await groupRoleMapReady();
     const info = getCurrentUserInfo();
     if (!info || info.role !== "admin") {
       navigate("/settings", { replace: true });
