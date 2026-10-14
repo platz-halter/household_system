@@ -17,8 +17,16 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* <html> had no background of its own — Android Chrome paints an
+   installed PWA's system navigation bar (the gesture-bar strip) from
+   <html>'s OWN computed background-color, not <body>'s (a different
+   box) and not anything color-scheme (tokens.css) covers, so it fell
+   back to white there regardless of theme. Kept in lockstep with
+   household/frontend's own copy of this fix — see that file's longer
+   comment. */
 html, body {
   height: 100%;
+  background: var(--color-bg);
 }
 
 body {

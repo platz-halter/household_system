@@ -563,7 +563,7 @@ function taskRow(task, container, writable) {
         ${catLabel ? `<span>${escapeHtml(catLabel)}</span>` : ""}
         <span>${escapeHtml(schedule)}${task.times_per_day > 1 ? ` · ${escapeHtml(t("common.times_per_day", { n: task.times_per_day }))}` : ""}</span>
         ${task.ramp_up_enabled ? `<span class="badge badge-info">${escapeHtml(t("common.bonus_badge", { n: task.ramp_up_bonus_points }))}</span>` : ""}
-        ${pinnedBadgeText(task.pinned_users) ? `<span class="badge badge-info badge-wrap">${escapeHtml(pinnedBadgeText(task.pinned_users))}</span>` : ""}
+        ${pinnedBadgeText(task.pinned_users) ? `<span class="badge badge-info badge-truncate"><span>${escapeHtml(pinnedBadgeText(task.pinned_users))}</span></span>` : ""}
       </div>
     </div>
     <div class="list-row-points"><span>${task.points}</span><span class="muted">${escapeHtml(t("common.pts"))}</span></div>

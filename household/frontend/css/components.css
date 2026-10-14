@@ -239,11 +239,25 @@
    the app (including the Event Group preview's intentionally-wrapping
    "Chained from: X" badges, in their own .eg-badge-row) relies on
    staying a plain single-line pill. */
-.badge-wrap {
-  white-space: normal;
-  text-align: left;
-  border-radius: var(--radius-md);
+/* Wrapping the badge's own text (the earlier approach here) still
+   read as "badly formatted" in practice — a multi-line pill just
+   doesn't look like the rest of the app's badges. Truncates instead,
+   matching every other badge's single-line look: `text-overflow`
+   doesn't apply to a flex container's own box (.badge is
+   inline-flex), only to a block/inline-block's content against ITS
+   OWN overflow — so the ellipsis has to live on an inner <span>, with
+   `max-width: 100%` on the outer .badge-truncate providing the actual
+   width limit (against the row it sits in) for that inner span to
+   overflow against. */
+.badge-truncate {
   max-width: 100%;
+}
+
+.badge-truncate > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .badge-success { background: var(--color-success-bg); color: var(--color-success); }
@@ -782,21 +796,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* A single-line truncating title is right for a short, usually-fixed
-   name (a task, a category) — wrong for a composed sentence that can
-   genuinely run long (Stats' "{name} completed {label}"), which was
-   cutting off mid-word on a phone screen ("..." eating the actual
-   task name). Opt in per row rather than changing the default, since
-   most .list-row-title usages are the short-name case. */
-.list-row-title-wrap {
-  overflow: hidden;
-  text-overflow: clip;
-  white-space: normal;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
 }
 
 .list-row-meta {

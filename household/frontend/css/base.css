@@ -15,8 +15,19 @@
   -webkit-tap-highlight-color: transparent;
 }
 
+/* `color-scheme` (tokens.css) fixes the BROWSER's own UI defaults,
+   but Android Chrome paints an installed PWA's system navigation bar
+   (the gesture-bar strip) from the <html> element's OWN computed
+   background-color specifically — not the page's content, not
+   <body>'s background (set below, but that's a DIFFERENT box).
+   <html> had no background of its own, so the browser fell back to
+   white there regardless of theme, which is what a "white bar where
+   the gesture bar sits" in dark mode actually was — color-scheme
+   alone never addressed this because it's a real, separate paint
+   target, not a browser-default color. */
 html, body {
   height: 100%;
+  background: var(--color-bg);
 }
 
 body {

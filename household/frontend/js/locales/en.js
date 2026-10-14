@@ -429,7 +429,13 @@ export const en = {
   "stats.couldnt_load_activity": "Couldn't load activity",
   "stats.deleted_task": "a deleted task",
   "stats.deleted_todo": "a deleted todo",
-  "stats.completed_label": "{name} completed {label}",
+  // Split into a caption ("Alice completed") above the task/todo title
+  // rather than one long sentence — a long title used to run the
+  // whole sentence past the row and either truncate mid-sentence or
+  // wrap awkwardly; the title itself truncates cleanly on its own
+  // line now instead (plain single-line ellipsis, same as every other
+  // .list-row-title).
+  "stats.completed_by_label": "{name} completed",
   "stats.remove_entry_aria": "Remove this completion of {label}",
   "stats.remove_entry_title": "Remove this completion?",
   "stats.remove_entry_message": "This removes the points it earned. The person won't be notified.",

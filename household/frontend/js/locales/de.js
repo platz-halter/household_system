@@ -436,7 +436,7 @@ export const de = {
   "stats.couldnt_load_activity": "Aktivität konnte nicht geladen werden",
   "stats.deleted_task": "eine gelöschte Aufgabe",
   "stats.deleted_todo": "ein gelöschtes Todo",
-  "stats.completed_label": "{name} hat {label} erledigt",
+  "stats.completed_by_label": "{name} hat erledigt",
   "stats.remove_entry_aria": "Diese Erledigung von {label} entfernen",
   "stats.remove_entry_title": "Diese Erledigung entfernen?",
   "stats.remove_entry_message": "Dadurch werden die dafür erhaltenen Punkte entfernt. Die Person wird nicht benachrichtigt.",

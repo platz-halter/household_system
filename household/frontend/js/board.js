@@ -354,7 +354,7 @@ function todoRow(todo, container, writable) {
   // sitting open at the same time as the parent it's chained from, not
   // strictly after it.
   const chainBadge = todo.chain_parent_task_name
-    ? `<span class="badge badge-neutral badge-wrap">${escapeHtml(t("common.chained_from", { name: todo.chain_parent_task_name }))}</span>`
+    ? `<span class="badge badge-neutral badge-truncate"><span>${escapeHtml(t("common.chained_from", { name: todo.chain_parent_task_name }))}</span></span>`
     : "";
   // Shown regardless of the "group by event" toggle — when grouping is
   // off there's no cluster header to carry this information, and even
