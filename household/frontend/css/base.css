@@ -63,7 +63,7 @@ h1, h2, h3, p {
 #app {
   min-height: 100%;
   padding-top: calc(var(--topbar-height) + env(safe-area-inset-top, 0px));
-  padding-bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--bottomnav-height) + var(--safe-bottom));
 }
 
 .topbar {
@@ -108,8 +108,8 @@ h1, h2, h3, p {
   bottom: 0;
   left: 0;
   right: 0;
-  height: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
-  padding-bottom: env(safe-area-inset-bottom, 0px);
+  height: calc(var(--bottomnav-height) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
   display: flex;
   background: var(--color-bg);
   border-top: 1px solid var(--color-border);

@@ -89,6 +89,29 @@
   --topbar-height: 56px;
   --bottomnav-height: 60px;
   --max-content-width: 720px;
+  /* Every bottom-safe-area calc in base.css/components.css reads this
+     instead of env(safe-area-inset-bottom, 0px) directly — see the
+     @media (display-mode: standalone) override below for why. */
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* On a real device, installed as a standalone app, env() has been
+   observed reporting 0 (or under-reporting) the actual gesture-nav
+   inset Android still reserves — the bottom nav then renders too
+   short to cover it, leaving a plain, uncolored strip below it that
+   no amount of background-color anywhere could ever paint (nothing
+   in this page's DOM claims that space to begin with). Floors the
+   reserved space at a reasonable gesture-bar height so the bottom
+   nav's own background always extends far enough, even when env()
+   under-reports. Scoped to standalone display mode specifically —
+   a regular browser tab's env() was already correct (confirmed: no
+   gap there), so this must not add unnecessary padding there too.
+   `calc(0px + ...)` isn't needed; max() against two lengths is valid
+   directly in a custom property. */
+@media (display-mode: standalone) {
+  :root {
+    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+  }
 }
 
 /* --- Dark theme (built in, ships alongside light) --- */

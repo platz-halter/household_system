@@ -72,6 +72,18 @@
   --topbar-height: 56px;
   --bottomnav-height: 60px;
   --max-content-width: 720px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+/* Floors the reserved bottom space on a real device so the bottom
+   nav's own background always extends far enough even when env()
+   under-reports the true gesture-nav inset in standalone/installed
+   mode — kept in lockstep with household/frontend's own copy of this
+   fix; see that file's longer comment for the full story. */
+@media (display-mode: standalone) {
+  :root {
+    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
+  }
 }
 
 /* --- Dark theme (built in, ships alongside light) --- */

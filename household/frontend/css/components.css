@@ -288,7 +288,7 @@
 .fab {
   position: fixed;
   right: var(--space-5);
-  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px) + var(--space-4));
+  bottom: calc(var(--bottomnav-height) + var(--safe-bottom) + var(--space-4));
   width: 56px;
   height: 56px;
   border-radius: var(--radius-full);
@@ -324,7 +324,7 @@
      "not centered"). +4px here is half that 8px width difference, so
      the two buttons' centers line up exactly. */
   right: calc(var(--space-5) + 4px);
-  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px) + var(--space-4) + 68px);
+  bottom: calc(var(--bottomnav-height) + var(--safe-bottom) + var(--space-4) + 68px);
   width: 48px;
   height: 48px;
   border-radius: var(--radius-full);
@@ -415,7 +415,7 @@
   background: var(--color-bg);
   border-radius: var(--radius-lg) var(--radius-lg) 0 0;
   padding: var(--space-5);
-  padding-bottom: calc(var(--space-8) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--space-8) + var(--safe-bottom));
 }
 
 @media (min-width: 560px) {
@@ -515,7 +515,7 @@
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--bottomnav-height) + var(--safe-bottom));
   display: flex;
   align-items: center;
   gap: var(--space-3);
@@ -537,7 +537,7 @@
   position: fixed;
   left: 0;
   right: 0;
-  bottom: calc(var(--bottomnav-height) + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--bottomnav-height) + var(--safe-bottom));
   display: flex;
   align-items: center;
   gap: var(--space-2);
