@@ -90,28 +90,18 @@
   --bottomnav-height: 60px;
   --max-content-width: 720px;
   /* Every bottom-safe-area calc in base.css/components.css reads this
-     instead of env(safe-area-inset-bottom, 0px) directly — see the
-     @media (display-mode: standalone) override below for why. */
+     instead of env(safe-area-inset-bottom, 0px) directly. A forced
+     floor was tried here (max(env(...), 24px) under
+     @media (display-mode: standalone)) on the theory that env() was
+     under-reporting the real gesture-nav inset — reverted: on the
+     device that showed the white strip, env() reports ~0, meaning the
+     page was never being laid out under the gesture-nav area in the
+     first place, so the floor only added dead padding above a region
+     the page still didn't cover. The white strip itself is Android's
+     own system navigation bar, painted by the OS from the installed
+     WebAPK shell's baked-in manifest colors, not page content at all
+     — see manifest.json's comment. */
   --safe-bottom: env(safe-area-inset-bottom, 0px);
-}
-
-/* On a real device, installed as a standalone app, env() has been
-   observed reporting 0 (or under-reporting) the actual gesture-nav
-   inset Android still reserves — the bottom nav then renders too
-   short to cover it, leaving a plain, uncolored strip below it that
-   no amount of background-color anywhere could ever paint (nothing
-   in this page's DOM claims that space to begin with). Floors the
-   reserved space at a reasonable gesture-bar height so the bottom
-   nav's own background always extends far enough, even when env()
-   under-reports. Scoped to standalone display mode specifically —
-   a regular browser tab's env() was already correct (confirmed: no
-   gap there), so this must not add unnecessary padding there too.
-   `calc(0px + ...)` isn't needed; max() against two lengths is valid
-   directly in a custom property. */
-@media (display-mode: standalone) {
-  :root {
-    --safe-bottom: max(env(safe-area-inset-bottom, 0px), 24px);
-  }
 }
 
 /* --- Dark theme (built in, ships alongside light) --- */
