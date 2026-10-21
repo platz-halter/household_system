@@ -56,6 +56,19 @@ export function initNotificationInbox() {
   bellBtn.addEventListener("click", openNotificationPanel);
   refreshNotificationBadge();
   setInterval(refreshNotificationBadge, POLL_INTERVAL_MS);
+  // Mobile Chrome (and the installed Android app specifically) throttles
+  // or fully suspends a backgrounded tab's setInterval — locking the
+  // phone, switching apps, or just leaving this tab in the background
+  // for a while routinely delays the next tick well past 30s, so a push
+  // that arrived while backgrounded left the bell showing a stale (often
+  // zero/hidden) badge for an unpredictable stretch after coming back,
+  // not just until "the next poll." Refreshing immediately on return to
+  // foreground, instead of only trusting the interval to catch up on its
+  // own, is what this was actually reported as ("stays hidden sometimes
+  // even if there's a notification").
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") refreshNotificationBadge();
+  });
 }
 
 export async function refreshNotificationBadge() {

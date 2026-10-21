@@ -636,12 +636,20 @@ function openUserMultiPickerModal({ users, selectedIds, title, onConfirm }) {
   if (users.length === 0) {
     listRoot.innerHTML = `<div class="empty-state">${escapeHtml(t("tasks.no_eligible_tasks"))}</div>`;
   } else {
-    listRoot.innerHTML = users
+    // Cosmetic only — an on-break user stays fully selectable (see
+    // pinnableUsers()'s own comment on why a pin must never exclude
+    // them), this just sorts them below everyone active so picking from
+    // the people actually around right now doesn't mean scanning past
+    // whoever's on break first. A stable sort keeps each group's own
+    // relative order (e.g. alphabetical, whatever `users` already is).
+    const sorted = [...users].sort((a, b) => (a.on_break ? 1 : 0) - (b.on_break ? 1 : 0));
+    listRoot.innerHTML = sorted
       .map(
         (u) => `
       <button type="button" class="list-row${selected.has(u.id) ? " selected" : ""}" data-user-row="${u.id}">
         <div class="list-row-select">${icons.check}</div>
         <div class="list-row-body"><div class="list-row-title">${escapeHtml(u.display_name)}</div></div>
+        ${u.on_break ? `<span class="muted" style="font-size: var(--font-size-xs); flex-shrink: 0; white-space: nowrap;">${escapeHtml(t("home.on_break"))}</span>` : ""}
       </button>`
       )
       .join("");

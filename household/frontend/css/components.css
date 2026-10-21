@@ -825,10 +825,28 @@
   letter-spacing: 0.03em;
 }
 
+/* flex-shrink was 0 (never shrink) — fine with 2-3 buttons, but a row
+   that's also writable-admin AND held by a pending takeover request
+   can carry 4 items at once (the takeover-slot's "Asked {name}" chip
+   + cancel, reassign, cancel-todo, complete) whose combined natural
+   width, added to .list-row-points' own fixed width, could exceed the
+   row's total width even after .list-row-body (flex:1, min-width:0)
+   shrank its title down to a single ellipsized character — the row
+   then had nowhere left to give and broke, which is what "more than
+   three buttons on the board break the layout" (narrower iOS
+   viewports hit this first) actually was. Letting this shrink too
+   (min-width: 0, same reasoning as list-row-body) and wrap means it
+   gives up its single-line width once the row runs out of room,
+   dropping extra buttons to a second line instead of forcing an
+   overflow — right-aligned so a wrapped second line still reads as
+   "belongs to this row," not a stray floating button. */
 .list-row-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: var(--space-2);
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
 }
 
 /* --- Event group cluster header (Board, "group by event" on) --- */
