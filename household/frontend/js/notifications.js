@@ -23,7 +23,7 @@
 import { api } from "./api.js";
 import { CONFIG } from "./config.js";
 import { icons } from "./icons.js";
-import { getCurrentUserInfo } from "./auth.js";
+import { getCurrentUserInfo, groupRoleMapReady } from "./auth.js";
 import { showToast } from "./toast.js";
 import { navigate } from "./router.js";
 import { escapeHtml, timeAgo } from "./util.js";
@@ -54,7 +54,19 @@ export function initNotificationInbox() {
   if (!bellBtn || !badgeEl) return;
 
   bellBtn.addEventListener("click", openNotificationPanel);
-  refreshNotificationBadge();
+  // The very FIRST call is the one that actually needs this — same race
+  // as settings.js/router.js's own groupRoleMapReady() use (see its
+  // comment in auth.js): canWrite() -> getCurrentUserInfo() computes an
+  // Authentik token's role from groupRoleConfig, which boot() only ever
+  // STARTS warming (never awaits) before calling this. An admin whose
+  // household customized the admin-group name past the still-default
+  // config got "viewer" from this one-shot call, hiding the bell —
+  // reported live as "the bell appears after a while [the next poll,
+  // by which point the warm-up had resolved], after a refresh it's gone
+  // again [the race restarting from scratch]." Every later call
+  // (interval tick, visibilitychange below) runs long after the warm-up
+  // has settled, so only this first one needs to wait for it.
+  groupRoleMapReady().then(refreshNotificationBadge);
   setInterval(refreshNotificationBadge, POLL_INTERVAL_MS);
   // Mobile Chrome (and the installed Android app specifically) throttles
   // or fully suspends a backgrounded tab's setInterval — locking the
