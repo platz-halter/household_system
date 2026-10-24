@@ -1295,16 +1295,16 @@ async function openTaskModal(container, writable, task = null) {
   const weekdayLabels = WEEKDAY_LABELS();
   const pinnable = pinnableUsers(await loadUsers(true));
   const canEditPin = isAdmin();
-  // Meaningful for every recurrence except a chain-child task — even
-  // daily/manual get a pin now (an informational badge, plus routing
-  // any todo actually created from the task to the pinned person; see
-  // Task.pinned_users's own docstring for the full "what a pin does
-  // per recurrence" breakdown). Chain-child status alone stays hidden,
-  // since such a task's only instances come from its own chain spawn,
-  // which already goes to whoever completed the parent (same_user) or
-  // the balancer's own pick (different_user) — a pin on the CHILD task
-  // itself would have nothing to attach to.
-  const pinEligible = !task?.is_chain_child;
+  // Meaningful for every task now, including a chain-child one — a
+  // different_user chain spawn routes to the child task's own pin
+  // group the same way a daily/manual task's own spawned todo already
+  // does (see Task.pinned_users's own docstring); a same_user chain
+  // spawn still bypasses it ("same person as the parent" is its own,
+  // separate standing agreement), so there a pin only shows as an
+  // informational badge, same as it would with no chain involved at
+  // all. Used to be hidden entirely for a chain-child task — lifted on
+  // explicit user request ("users can't define always assign to in
+  // chained tasks"), same as the earlier daily-task restriction was.
 
   // An admin can delete any task; a plain writable user only one they
   // created themselves (see main.delete_task) — self-service undo for
@@ -1409,7 +1409,7 @@ async function openTaskModal(container, writable, task = null) {
         </div>
       </div>
 
-      <div class="field" id="f-pinned-field" style="margin-top: var(--space-4); ${pinEligible ? "" : "display:none;"}">
+      <div class="field" id="f-pinned-field" style="margin-top: var(--space-4);">
         <label>${escapeHtml(t("tasks.pinned_label"))}</label>
         <div class="chip-row" id="f-pinned-chips" style="margin-bottom: var(--space-2);"></div>
         ${

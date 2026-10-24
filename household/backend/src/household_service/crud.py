@@ -415,10 +415,16 @@ async def _chain_ancestors(db: AsyncSession, task_id: int) -> list[int]:
 async def list_chain_links(
     db: AsyncSession, parent_task_id: int
 ) -> list[TaskChainLink]:
+    # Nested so _spawn_one_chain_child can read link.child_task.
+    # pinned_users without a lazy-load (MissingGreenlet) — needed now
+    # that a different_user child's own pin group is wired into its
+    # spawn-time assignment (see _assign_chain_todo_now).
     result = await db.execute(
         select(TaskChainLink)
         .where(TaskChainLink.parent_task_id == parent_task_id)
-        .options(selectinload(TaskChainLink.child_task))
+        .options(
+            selectinload(TaskChainLink.child_task).selectinload(Task.pinned_users)
+        )
         .order_by(TaskChainLink.position)
     )
     return list(result.scalars().all())
@@ -814,8 +820,9 @@ async def trigger_event_group(
         # `created` and `root_tasks` were built in lockstep above (one
         # todo per root, same order) — zip pairs each todo back to the
         # root task it might be pinned through. A root's OWN pin group,
-        # if any — not to be confused with its chain children, which
-        # can never themselves be pinned (see Task.pinned_users).
+        # if any — a chain CHILD's own pin (if it has one) is handled
+        # separately, right below, when that child itself spawns (see
+        # _spawn_one_chain_child/_assign_chain_todo_now).
         result = balancing.balance(
             users=balancing_users,
             tasks=[],
@@ -1789,7 +1796,11 @@ def _is_eligible_for_tasks(user: HouseholdUser) -> bool:
 
 
 async def _assign_chain_todo_now(
-    db: AsyncSession, todo: TodoItem, *, exclude_user_id: int | None
+    db: AsyncSession,
+    todo: TodoItem,
+    *,
+    exclude_user_id: int | None,
+    pinned_user_ids: frozenset[int] = frozenset(),
 ) -> None:
     """Immediately assigns a freshly-spawned "different person" chain
     child to whoever's currently least loaded, using the exact same
@@ -1803,7 +1814,19 @@ async def _assign_chain_todo_now(
     there's nobody to exclude, e.g. the parent is itself unassigned).
     Left open/unassigned if nobody else is eligible — exactly like an
     ordinary sweep leftover, and still excluded from self-claiming (see
-    claim_todo)."""
+    claim_todo).
+
+    `pinned_user_ids` is the CHILD task's own "always assign to" group
+    (see Task.pinned_users), if it has one — passed straight through to
+    balancing.balance(), which already handles a pinned item that's
+    ALSO excluding someone (picks the least-loaded eligible group
+    member who isn't `exclude_user_id`, or leaves it unassigned if that
+    empties the group out entirely, same as any other pinned item with
+    nobody currently eligible — see balance()'s own pinned branch and
+    test_pinned_group_excluded_user_is_skipped_even_if_least_loaded).
+    Empty by default so every other caller (none yet, but balance()
+    itself treats an empty frozenset as "not pinned") keeps today's
+    plain fairness pick."""
     settings = await get_settings_row(db)
     as_of = datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
     all_users = await list_household_users(db)
@@ -1842,7 +1865,10 @@ async def _assign_chain_todo_now(
         tasks=[],
         todos=[
             balancing.CandidateTodo(
-                todo_id=todo.id, points=todo.points, excluded_user_id=exclude_user_id
+                todo_id=todo.id,
+                points=todo.points,
+                excluded_user_id=exclude_user_id,
+                pinned_user_ids=pinned_user_ids,
             )
         ],
         max_new_items_per_user=max_new_items_per_user,
@@ -1896,13 +1922,21 @@ async def _spawn_one_chain_child(
 
     Deliberately never sets `source_task_id` on the child it creates:
     that column means "posted/triggered directly from this task" (Board
-    "From task", an Event Group root), which pin-routing reads — a
-    chain child's pin (if its task even has one) is meant to stay inert
-    (see Task.pinned_users's own docstring), and setting source_
-    task_id here would wire that routing back on by accident. It's also
-    exactly why a caller recursing onto a freshly-spawned child can't
-    just read `child.source_task_id` to find its own chain links — see
-    _spawn_chain_children_on_creation's own `task_id` override param.
+    "From task", an Event Group root), which the source_task_id-based
+    pin-routing other recurrences use reads — a chain child never goes
+    through that path (its only instances ever come from a chain
+    spawn), so it has its own, separate routing for a pin instead: a
+    different_user link passes the child task's own pinned_users
+    straight into _assign_chain_todo_now (which already knows how to
+    combine a pin with an exclusion — see that function's own
+    docstring); a same_user link bypasses the balancer entirely ("same
+    person as the parent" is itself a standing agreement, just a
+    different one), so a pin on that child's task is left as an
+    informational badge only, same as it would be with no chain
+    involved at all. It's also exactly why a caller recursing onto a
+    freshly-spawned child can't just read `child.source_task_id` to
+    find its own chain links — see _spawn_chain_children_on_creation's
+    own `task_id` override param.
 
     ALWAYS returns the created row now, regardless of whether it ended
     up with a real assignee — callers that only care about notifying
@@ -1931,7 +1965,12 @@ async def _spawn_one_chain_child(
     child.exclude_user_id = anchor_user_id
     db.add(child)
     await db.flush()
-    await _assign_chain_todo_now(db, child, exclude_user_id=anchor_user_id)
+    await _assign_chain_todo_now(
+        db,
+        child,
+        exclude_user_id=anchor_user_id,
+        pinned_user_ids=frozenset(u.id for u in link.child_task.pinned_users),
+    )
     return child
 
 

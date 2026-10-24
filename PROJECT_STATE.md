@@ -481,6 +481,111 @@ below).
     `/admin` directly, simulating a hard refresh on each) rather than
     the actual Authentik-token race itself, which would need a mocked
     JWKS/RS256 setup this round didn't build — disclosed as such.
+- 1.2.0 also picked up a twelfth round, closing out the Android white-bar
+  saga and four more user-reported items:
+  - **The white bar — actually resolved this time, and the eleventh
+    round's own fix was incomplete, not wrong.** `index.html` and
+    `manifest.json` had no explicit `Cache-Control` header at all
+    (unlike every other static asset here), falling through to nginx's
+    bare defaults — verified for real by building the actual
+    `household/frontend`/`storage/frontend` Docker images and
+    `curl -I`-ing both the old and new config, not just reasoned about.
+    An installed Android WebAPK's shell caches its entry HTML/manifest
+    far more aggressively than a normal browser tab under exactly that
+    gap, which is consistent with every manifest-color fix from the
+    ninth/tenth/eleventh rounds landing on the server but never
+    reaching the phone no matter how many times it was rebuilt or
+    reinstalled. Fixed with explicit `no-cache` on `location =
+    /index.html` and `location = /manifest.json` in both nginx.conf
+    files. **A follow-up CSS change made things briefly worse**: a
+    `--safe-bottom: max(env(safe-area-inset-bottom, 0px), 24px)` floor
+    (added when the real cause still looked like insufficient padding)
+    started actually reaching the phone once the cache fix shipped,
+    which is how its own flaw became visible — "now the bottom nav bar
+    has too much spacing," with the white gap still there underneath
+    it. That combination (padding added, gap unchanged) is itself the
+    proof the strip was never a padding shortfall: `env()` reporting
+    ~0 on this device means the floor was adding dead space above a
+    region the page was never laid out under in the first place.
+    Reverted. The user then rebuilt, reinstalled, and confirmed dark
+    mode fixed — the WebAPK shell had finally re-minted from the
+    now-correct (`#0a0a0a`) manifest values once Chrome could actually
+    see the updated manifest.json instead of a cached one.
+  - **Remaining, accepted platform limitation, found from the user's
+    very next report**: switching the in-app theme to light brings the
+    seam back. Proven (not just suspected) to be baked-at-mint-time
+    manifest color, not live CSS: `html`/`body`'s background already
+    tracks the in-page theme (a ninth-round fix), so if that were the
+    real paint source, light theme would be invisible-matching too —
+    it isn't, which only makes sense if Android is painting that strip
+    from the single static manifest color regardless of which theme is
+    selected at runtime. There is no supported way to make an
+    installed WebAPK's system bar track a runtime theme switch on
+    Android; `manifest.json` stays on the dark value since dark was
+    the reported problem, and a light-theme seam is now a known,
+    documented gap rather than something still being chased.
+  - **Board layout breaking on iOS with 3+ action buttons on one todo
+    row** (user-supplied screenshots). `.list-row-actions` was
+    `flex-shrink: 0` — fine for the usual 2-3 buttons, but a row that's
+    simultaneously an admin's own held todo AND has a pending takeover
+    request on it can carry four at once (the takeover "Asked {name}"
+    chip + cancel, reassign, cancel-todo, complete), whose combined
+    width could exceed the row's total even after the title had
+    already ellipsized to nothing. Changed to `flex-shrink: 1;
+    min-width: 0; flex-wrap: wrap; justify-content: flex-end` — extra
+    buttons now wrap onto a right-aligned second line instead of
+    overflowing.
+  - **Notification bell going stale/disappearing on Android**, two
+    separate causes found from one report: (1) mobile Chrome throttles
+    or suspends a backgrounded tab's `setInterval`, so a notification
+    that arrived while the phone was locked could leave the badge
+    stale well past its 30s poll interval after returning — fixed with
+    a `visibilitychange` listener that force-refreshes on return to
+    foreground. (2) The bell's own visibility (not just its badge) is
+    gated on `canWrite()`, which for an Authentik token depends on
+    `groupRoleConfig` — the exact same unawaited-`warmGroupRoleMap()`
+    race the eleventh round already fixed for Settings/`/admin`, just
+    not yet applied here: `initNotificationInbox()`'s first
+    `refreshNotificationBadge()` call ran before the warm-up resolved,
+    so an admin whose household customized its admin-group name past
+    the still-default config read as non-admin and lost the bell
+    entirely until the next poll — "appears after a while, gone again
+    after a refresh," reported by an actual admin. Fixed the same way:
+    the first call now awaits `groupRoleMapReady()`.
+  - **On-break users sorted to the bottom of the "always assign to"
+    picker** (user request, explicitly cosmetic only — "quicker adding
+    of active users," confirmed they must stay selectable). Stable
+    sort in `openUserMultiPickerModal`, plus a small "On break" tag;
+    `pinnableUsers()` itself is unchanged (still only excludes
+    viewers), so an on-break member stays fully pinnable, matching the
+    existing "a pin is a standing agreement that should survive a
+    break" reasoning.
+  - **Chain-child tasks couldn't have an "always assign to" group at
+    all** — a real gap, not a UI oversight: `_assign_chain_todo_now`
+    (the function that immediately assigns a freshly-spawned
+    `different_user` chain child) never read the child task's own
+    `pinned_users`, so the frontend hid the picker for a chain-child
+    task on the theory that a pin there would have nothing to attach
+    to. `balancing.balance()` already handled a pin combined with an
+    exclusion correctly (`test_pinned_group_excluded_user_is_skipped_
+    even_if_least_loaded` already covered this exact shape, written
+    with chain todos explicitly in mind, just never wired up at the
+    call site) — the fix is purely plumbing: `list_chain_links` now
+    nested-eager-loads `child_task.pinned_users`, and
+    `_spawn_one_chain_child` passes it into `_assign_chain_todo_now`,
+    which forwards it to `balance()` alongside the existing
+    `excluded_user_id`. Deliberately scoped to a `different_user` link
+    only — a `same_user` link still bypasses the balancer entirely
+    ("same person as the parent" is its own, separate standing
+    agreement), so a pin on that child task remains an informational
+    badge only, same as it already is for a `daily`/`manual` task's
+    direct-from-Home completion. Frontend picker is no longer hidden
+    for a chain-child task. See CLAUDE.md's "Always-assign (pinned)
+    tasks" entry for the full mechanics. Verified via the existing
+    `test_balancing.py` suite (unchanged, all 45 still passing — the
+    pure-function layer was already correct) plus a read-through of
+    every call site touched; not yet exercised against a live
+    database this round.
 - 1.1.0 adds **chained tasks**: completing one task can auto-spawn
   others onto the board as one-off todos, so a parent chore like "Set
   the table" can define child chores like "Clear the table" that only

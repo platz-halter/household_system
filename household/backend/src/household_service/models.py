@@ -242,14 +242,24 @@ class Task(Base):
     # so this one field needs the stronger gate. A many-to-many table
     # (task_pinned_users, above), not a nullable FK column like this
     # used to be — see that table's own docstring for the CASCADE
-    # reasoning. Naturally inert for a chain-child task, since
-    # run_balancing's sweep already excludes every chain-child task
-    # before any pin logic ever runs, and a chain-child task's only
-    # instances come from its own chain spawn, never a bare "From
-    # task" post or an Event Group root — not auto-cleared server-side
-    # the way `recurrence` becoming `daily` would be, though, since
-    # chain-child status is derived/dynamic (from task_chain_links),
-    # not a stored column.
+    # reasoning. Still excluded from run_balancing's own sweep for a
+    # chain-child task (that sweep is for weekly/monthly tasks with
+    # their own TaskAssignment period, which a chain-child task never
+    # has), but a chain-child task's pin is NOT inert — its only
+    # instances come from its own chain spawn, so that's where the pin
+    # is read instead: a different_user chain link passes the child
+    # task's pinned_users straight into _assign_chain_todo_now, which
+    # combines it with that spawn's own exclusion (never the person who
+    # just did the parent) the same way balance()'s pinned branch
+    # always has; a same_user link still bypasses pins entirely ("same
+    # person as the parent" is its own, different standing agreement),
+    # so there the pin stays an informational badge only, same as for a
+    # daily/manual task's own direct-from-Home completion. Not
+    # auto-cleared server-side when a task becomes a chain child (the
+    # way `recurrence` becoming `daily` would clear ramp-up, say),
+    # since chain-child status is derived/dynamic (from
+    # task_chain_links), not a stored column — a pin set before a task
+    # was chained just starts being read through the new path instead.
     pinned_users: Mapped[list[HouseholdUser]] = relationship(
         secondary=task_pinned_users
     )
