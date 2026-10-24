@@ -337,17 +337,46 @@ export async function handleAuthentikCallback() {
 // means every concurrent 401 waits on and gets the exact same outcome
 // as the single real refresh request. (Same fix as household/frontend's
 // own auth.js — this exact bug, independently found there first.)
+//
+// That guard only covers races WITHIN one tab. Two tabs (or a PWA icon
+// launch alongside a browser tab already open) on the same origin share
+// the same localStorage and can both wake up on a 401 and read the same
+// not-yet-rotated refresh token — same bug, wider scope, and the result
+// is the same: whichever call loses gets rejected and (if treated as a
+// real logout) wipes the tokens the winner just wrote. `withRefreshLock`
+// serializes the actual refresh call across tabs via the Web Locks API;
+// once inside the lock, re-checking whether the stored access token
+// already moved on since this 401 happened catches the case where
+// another tab finished refreshing while this one was waiting for the
+// lock, so the loser reuses that result instead of spending what's by
+// then a dead refresh token of its own.
+async function withRefreshLock(fn) {
+  if (!("locks" in navigator)) return fn(); // older Safari etc. — the single-tab guard above still applies
+  return navigator.locks.request("hs-token-refresh", fn);
+}
+
 let refreshInFlight = null;
 
 /**
  * Used by api.js on a 401 for an Authentik-sourced session — tries to
  * get a new access token with the stored refresh token before giving up
- * and sending the user back to login. Returns true on success. Safe to
- * call concurrently — see refreshInFlight above.
+ * and sending the user back to login. Safe to call concurrently, within
+ * a tab and across tabs — see refreshInFlight/withRefreshLock above.
+ *
+ * Returns one of:
+ *  - "ok": refreshed (or another tab already had, moments ago) — retry.
+ *  - "invalid": the refresh token itself was rejected — a real logout.
+ *  - "transient": couldn't reach Authentik (network/timeout/5xx) — the
+ *    refresh token is presumably still fine, so the caller must NOT
+ *    clear it or log the user out over what's likely a blip.
  */
 export async function tryRefreshAuthentikToken() {
   if (refreshInFlight) return refreshInFlight;
-  refreshInFlight = _doRefresh();
+  const accessTokenBeforeRefresh = getToken();
+  refreshInFlight = withRefreshLock(async () => {
+    if (getToken() !== accessTokenBeforeRefresh) return "ok";
+    return _doRefresh();
+  });
   try {
     return await refreshInFlight;
   } finally {
@@ -357,7 +386,7 @@ export async function tryRefreshAuthentikToken() {
 
 async function _doRefresh() {
   const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
-  if (!refreshToken) return false;
+  if (!refreshToken) return "invalid";
 
   try {
     const config = await getAuthentikConfig();
@@ -375,16 +404,24 @@ async function _doRefresh() {
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
     });
-    if (!resp.ok) return false;
+    if (!resp.ok) {
+      // Authentik actively rejecting the refresh token (expired,
+      // already used, revoked) is a real logout. Anything else — e.g.
+      // a 503 while Authentik is restarting — is transient and must
+      // not throw away a refresh token that's likely still good.
+      return resp.status === 400 || resp.status === 401 ? "invalid" : "transient";
+    }
 
     const data = await resp.json();
     localStorage.setItem(TOKEN_KEY, data.access_token);
     // Authentik rotates refresh tokens by default — if it didn't send a
     // new one, keep using the current one rather than discard it.
     if (data.refresh_token) localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh_token);
-    return true;
+    return "ok";
   } catch {
-    return false;
+    // Network error/timeout reaching Authentik — not a rejection of the
+    // refresh token itself.
+    return "transient";
   }
 }
 

@@ -118,6 +118,46 @@ below).
   how correct the refresh-retry code itself was; fixed in
   `shared/config.py`'s default and this deployment's `.env`/
   `.env.example` (`AUTHENTIK_SCOPE`). Only affects logins from here on.
+  Two more session-longevity bugs found and fixed in both frontends'
+  `auth.js`/`api.js` while investigating further "stay logged in for
+  multiple days" reports: **(a)** `tryRefreshAuthentikToken()` used to
+  collapse every failure mode (network error, Authentik timeout, an
+  actual 5xx, vs. Authentik genuinely rejecting the refresh token) into
+  a single `false`, which `api.js` always treated as a real logout —
+  so a transient blip (phone waking up on flaky wifi, Authentik mid
+  -restart) threw away a perfectly good refresh token and forced a
+  fresh login. `_doRefresh`/`tryRefreshAuthentikToken` now return
+  `"ok"` / `"invalid"` / `"transient"`; `api.js` only clears tokens and
+  redirects to `/login` on `"invalid"` (the refresh token itself was
+  rejected), and on `"transient"` just fails that one request with a
+  network-error toast, leaving the session intact to retry. **(b)** the
+  existing single-tab `refreshInFlight` dedup (needed because Authentik
+  rotates refresh tokens — a second concurrent user of the same
+  not-yet-rotated token gets flatly rejected) had no cross-tab
+  equivalent, so two tabs on the same origin (or a PWA launch alongside
+  a browser tab already open) could both 401 at once, both read the
+  same refresh token, and have the loser's rejection log out both tabs
+  — wiping the token the winner just wrote. Wrapped the refresh in
+  `navigator.locks.request("hs-token-refresh", ...)` (falling back to
+  running unlocked on browsers without the Web Locks API), and inside
+  the lock, re-checking whether the stored access token already moved
+  on since this 401 happened — if another tab refreshed while this one
+  was waiting for the lock, reuse that instead of spending what's by
+  then a dead refresh token of its own. **Not changed, and left as
+  recommendations instead** (both are policy choices, not bugs):
+  Authentik's own **Refresh token validity** / **Access token
+  validity** / the login flow's **Session duration** settings are the
+  real ceiling on how many days a session survives without a new
+  login — worth checking directly in Authentik, since no amount of
+  frontend retry logic helps once the refresh token itself has expired
+  there. And local-account logins (`auth/src/auth_service/security.py`'s
+  `ACCESS_TOKEN_TTL = timedelta(hours=12)`) have no refresh token at
+  all — a deliberate "local accounts are a dev/fallback path" design,
+  but it does mean a 12h hard logout for anyone actually using one day
+  to day; raising that TTL is a one-line change but trades away
+  statelessness (a deactivated local user or role change won't take
+  effect until their existing token expires), so left as the user's own
+  call rather than picked for them.
   Also fixed along the way: the New Task draft-autosave (localStorage,
   so in-progress input survives an accidental close/timeout) wasn't
   cleared on an explicit cancel, only on successful save — `openModalShell`

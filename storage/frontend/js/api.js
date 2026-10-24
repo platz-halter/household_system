@@ -35,10 +35,20 @@ async function request(url, options = {}) {
     // logout. Only attempted once per original call (_retried guards
     // against a refresh loop if the new token is somehow also rejected).
     if (!options._retried && getAuthSource() === "authentik") {
-      const refreshed = await tryRefreshAuthentikToken();
-      if (refreshed) {
+      const result = await tryRefreshAuthentikToken();
+      if (result === "ok") {
         return request(url, { ...options, _retried: true });
       }
+      if (result === "transient") {
+        // Authentik (or the network) just wasn't reachable — the
+        // refresh token is presumably still good. Let this one request
+        // fail without wiping a working session over what's likely a
+        // blip; the next request gets to try the refresh again.
+        if (!silent) showToast(t("api.network_error"), "danger");
+        throw new ApiError(t("api.network_error"), 0);
+      }
+      // result === "invalid": the refresh token itself was rejected —
+      // fall through to the real logout below.
     }
     clearToken();
     // A full reload, not router.js's navigate() — this is a low-level
