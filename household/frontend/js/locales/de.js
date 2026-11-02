@@ -235,6 +235,8 @@ export const de = {
   "board.new_todo_label": "Neues Todo",
   "board.nothing_here": "Nichts hier",
   "board.delete_event_label": "Dieses Ereignis löschen",
+  "board.collapse_event_label": "Dieses Ereignis einklappen",
+  "board.expand_event_label": "Dieses Ereignis ausklappen",
   "board.event_fallback_name": "Ereignis",
   "board.nothing_to_delete": "Nichts zu löschen — in diesem Ereignis ist schon alles erledigt",
   "board.kept_note": {
@@ -327,6 +329,10 @@ export const de = {
   "tasks.eg_preview_label": "Vorschau",
   "tasks.eg_preview_desc":
     "Alles Folgende wird erstellt, wenn diese Gruppe ausgelöst wird: jede Aufgabe oben, sofort, plus jede bereits davon verkettete Aufgabe. Entferne das Häkchen bei einer verketteten Aufgabe, um sie aus dieser Gruppe auszuschließen — sie wird trotzdem erstellt, nur ohne die Markierung dieser Gruppe.",
+  "tasks.eg_assignee_label": "Alle Aufgaben zuweisen an",
+  "tasks.eg_assignee_balance_option": "Fair verteilen",
+  "tasks.eg_assignee_desc":
+    "Wenn gesetzt, geht jede Aufgabe dieser Gruppe jedes Mal direkt an diese eine Person, statt fair verteilt zu werden — für gleichartige Aufgaben (z. B. „Müll rausbringen“: Restmüll, Papier, Bio), die immer zusammen an dieselbe Person gehen sollen. Nur für Admins.",
   "tasks.eg_auto_trigger_label": "Dies auch automatisch auslösen",
   "tasks.eg_repeats_label": "Wiederholt sich",
   "tasks.eg_specific_weekdays": "Bestimmte Wochentage",
@@ -406,6 +412,7 @@ export const de = {
   "eg.create_on_tasks_page": "Erstelle eine auf der Aufgabenseite",
   "eg.trigger_title": '„{name}" auslösen',
   "eg.this_creates": "Dies erstellt:",
+  "eg.all_goes_to": "Alles davon geht an {name}.",
   "eg.create_tasks_btn": "Aufgaben erstellen",
   "eg.nothing_to_create": "Nichts zu erstellen",
   "eg.not_grouped": "Nicht gruppiert",

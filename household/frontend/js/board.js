@@ -1,7 +1,7 @@
 import { CONFIG } from "./config.js";
 import { api, fetchImageUrl } from "./api.js";
 import { icons } from "./icons.js";
-import { getCurrentUserInfo } from "./auth.js";
+import { getCurrentUserInfo, groupRoleMapReady } from "./auth.js";
 import { showToast } from "./toast.js";
 import { showConfirmDialog } from "./confirmDialog.js";
 import { openTaskPickerModal } from "./taskPicker.js";
@@ -57,6 +57,24 @@ let todosCache = [];
 // takeover.js). Refetched alongside every todo list refresh so it never
 // goes stale after an ask/cancel/accept.
 let outgoingRequestsCache = [];
+// Which event-group runs are collapsed — in-memory only (resets on
+// reload/boot), same as any other purely-visual expand/collapse state
+// elsewhere in the app. Keyed by event_group_run_id.
+const collapsedRuns = new Set();
+
+// Same cadence as notifications.js's own poll — see startChangePolling
+// below.
+const POLL_INTERVAL_MS = 30_000;
+// The Board render currently on screen, as far as the change-poll below
+// is concerned — `{ container, listEl, writable }`, replaced wholesale
+// by every renderBoard() call. Both the recurring poll and the
+// visibility catch-up compare against this BY REFERENCE (not some
+// counter) to tell whether they're still looking at the render that's
+// actually showing: router.js has no "the user navigated away" hook
+// (it just reassigns #app's innerHTML for the next page), so this is
+// the only way either one finds out it's gone stale.
+let activeBoardView = null;
+let visibilityCatchupInstalled = false;
 
 function canWrite() {
   const info = getCurrentUserInfo();
@@ -77,6 +95,20 @@ function assignableUsers(users) {
 }
 
 export async function renderBoard(container) {
+  // canWrite()/isAdmin() below are computed once, synchronously, from
+  // getCurrentUserInfo() — for an Authentik user, that needs the
+  // group-role warm-up main.js's boot() kicks off but deliberately
+  // never awaits. A hard refresh landing directly on /board could
+  // otherwise render before that warm-up resolves, wrongly computing
+  // "viewer" for a real admin/user whose household has customized its
+  // Authentik group names (same default-fallback-vs-real-config gap
+  // CLAUDE.md documents for Settings/the notification bell) — every
+  // write action (claim/complete/cancel/reassign, both FABs) is gated
+  // on this value and nothing re-renders the Board afterward, so the
+  // page you land on from a refresh stays stuck looking read-only.
+  // Settings sets the precedent for awaiting this before a one-shot,
+  // write-gated render rather than leaving it racy.
+  await groupRoleMapReady();
   const writable = canWrite();
   const statusFilters = STATUS_FILTERS();
 
@@ -95,6 +127,15 @@ export async function renderBoard(container) {
         : ""
     }
   `;
+  // Captured right here, immediately after the innerHTML assignment
+  // that creates it — not later, after the awaits below. Those awaits
+  // give the event loop a chance to run another navigation first, and
+  // querying for "#todo-list" at that point (inside whatever page is
+  // now mounted) could come back null, which startChangePolling/
+  // ensureVisibilityCatchup would then crash on (`null.isConnected`)
+  // every single tick, forever, instead of cleanly detecting a stale
+  // view and stopping.
+  const listEl = container.querySelector("#todo-list");
 
   // Scoped to [data-status] — #group-toggle-chip now shares this same
   // row (user feedback: it used to sit on its own line below) but isn't
@@ -136,6 +177,104 @@ export async function renderBoard(container) {
   }
 
   await refreshTodos(container, writable);
+
+  const view = { container, listEl, writable };
+  activeBoardView = view;
+  ensureVisibilityCatchup();
+  startChangePolling(view);
+}
+
+// Polls quietly in the background so someone else's reassign/delete
+// (the two changes that make what's currently on screen actively WRONG
+// — a row that's gone, or a row claiming to be held by someone who no
+// longer holds it — rather than just, say, stale points) shows up
+// without the viewer having to navigate away and back, which is the
+// only way this app has ever refreshed anything otherwise. Deliberately
+// a plain poll, not a websocket/SSE push — this app has no other
+// realtime infrastructure (CLAUDE.md), and a 30s poll of one already-
+// cheap endpoint is a much smaller addition than a new push channel.
+//
+// Self-stopping, not explicitly cancelled: renderBoard() has no hook
+// for "the user navigated away" (router.js just swaps #app's innerHTML
+// for the next page), so this checks, on every tick, whether `view` is
+// still THE CURRENT activeBoardView (by reference — the very next
+// renderBoard() call replaces that reference wholesale) AND whether
+// view.listEl is still actually attached to the document — the second
+// check matters too: router.js reassigns #app's innerHTML wholesale
+// for the next page, which detaches #todo-list even though `container`
+// (the shared #app element) itself is unchanged, so reference equality
+// on container alone wouldn't have caught a navigation away. Either
+// condition failing means this poll is stale; it clears its own
+// interval and goes quiet instead of running forever against a page
+// that isn't shown anymore.
+function startChangePolling(view) {
+  const interval = setInterval(() => {
+    if (activeBoardView !== view || !view.listEl.isConnected) {
+      clearInterval(interval);
+      return;
+    }
+    pollForChanges(view);
+  }, POLL_INTERVAL_MS);
+}
+
+// Installed exactly once, ever (not per renderBoard() call, which would
+// otherwise pile up one listener per Board visit over a long session)
+// — always reads whatever `activeBoardView` currently is, so it stays
+// correct across any number of renderBoard() calls without needing to
+// be reinstalled. Mobile Chrome (and the installed Android app
+// specifically) throttles or fully suspends a backgrounded tab's
+// setInterval, same reasoning as notifications.js's own
+// visibilitychange catch-up — otherwise coming back to the Board after
+// a while in the background could show stale data for however much of
+// the 30s interval mobile Chrome actually honored, not just "until the
+// next poll."
+function ensureVisibilityCatchup() {
+  if (visibilityCatchupInstalled) return;
+  visibilityCatchupInstalled = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && activeBoardView?.listEl.isConnected) {
+      pollForChanges(activeBoardView);
+    }
+  });
+}
+
+// A light GET-and-compare, not a full refreshTodos() — avoids
+// re-rendering (and re-fetching /me + outgoing takeover requests) on
+// every tick when, as will be true most of the time, nothing actually
+// changed since the last load.
+async function pollForChanges(view) {
+  let fresh;
+  try {
+    const qs = state.status ? `?status=${encodeURIComponent(state.status)}` : "";
+    fresh = await api.get(`${HB}/todos${qs}`, { silent: true });
+  } catch {
+    return; // transient — next tick (or the next visibilitychange) tries again
+  }
+  // Re-checked after the await — navigation could have happened while
+  // this fetch was in flight, same reasoning as startChangePolling's
+  // own check.
+  if (activeBoardView !== view || !view.listEl.isConnected) return;
+  if (hasMajorChange(todosCache, fresh)) {
+    refreshTodos(view.container, view.writable);
+  }
+}
+
+// "Major" = deleted (an id that was on screen no longer comes back at
+// all — covers a real hard delete AND a status change that moved it
+// out of the current filter, e.g. someone else completed it: either
+// way, the row on screen is simply no longer there) or reassigned (same
+// id, different assigned_to). Anything else — points, due date, a new
+// todo appearing — isn't something a quiet background poll needs to
+// chase; the user's own actions (claim/complete/cancel) already
+// refresh the list themselves.
+function hasMajorChange(oldList, freshList) {
+  const freshById = new Map(freshList.map((todo) => [todo.id, todo]));
+  for (const old of oldList) {
+    const fresh = freshById.get(old.id);
+    if (!fresh) return true; // gone — deleted, or moved out of this filter
+    if ((old.assigned_to?.id ?? null) !== (fresh.assigned_to?.id ?? null)) return true;
+  }
+  return false;
 }
 
 // `force` refetches even if cached — used right before showing an
@@ -195,7 +334,12 @@ async function refreshTodos(container, writable) {
       fetches.push(api.get(`${HB}/takeover-requests?direction=outgoing`));
     }
     const results = await Promise.all(fetches);
-    todos = results[0];
+    // Newest first — the backend's own order (due_date asc, then
+    // created_at desc as a tiebreaker) is right for Home's "what's due
+    // soon" list, which also reads through this same endpoint, but the
+    // Board is a feed of what's been posted, so it's re-sorted here
+    // rather than touching the shared endpoint's default order.
+    todos = [...results[0]].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
     if (writable) {
       if (!meCache) meCache = results[1];
       outgoingRequestsCache = results[results.length - 1];
@@ -253,20 +397,40 @@ function renderTodoList(container, writable) {
 // only reachable in grouped view as well — flagged in the report, not
 // silently decided.
 function eventCard(firstTodo, members, container, writable) {
+  const runId = firstTodo.event_group_run_id;
+  const collapsed = collapsedRuns.has(runId);
+
   const card = document.createElement("div");
-  card.className = "event-card";
+  card.className = `event-card${collapsed ? " collapsed" : ""}`;
   card.innerHTML = `
     <div class="event-card-header">
+      <button class="btn btn-icon btn-ghost event-card-toggle" data-action="toggle-event" aria-expanded="${!collapsed}" aria-label="${escapeAttr(collapsed ? t("board.expand_event_label") : t("board.collapse_event_label"))}" title="${escapeAttr(collapsed ? t("board.expand_event_label") : t("board.collapse_event_label"))}">${icons.chevronRight}</button>
       <div class="event-card-title-group">
         <span class="event-card-title">${escapeHtml(firstTodo.event_group_name || t("board.event_fallback_name"))}</span>
         <span class="event-card-date">${formatGroupDate(firstTodo.event_group_triggered_at)}</span>
       </div>
       ${writable ? `<button class="btn btn-icon btn-ghost" data-action="delete-event" aria-label="${escapeAttr(t("board.delete_event_label"))}" title="${escapeAttr(t("board.delete_event_label"))}">${icons.trash}</button>` : ""}
     </div>
-    <div class="event-card-body stack"></div>
+    <div class="event-card-body stack${collapsed ? " hidden" : ""}"></div>
   `;
   const body = card.querySelector(".event-card-body");
   members.forEach((m) => body.appendChild(todoRow(m, container, writable)));
+
+  card.querySelector('[data-action="toggle-event"]').addEventListener("click", (e) => {
+    const nowCollapsed = !collapsedRuns.has(runId);
+    if (nowCollapsed) {
+      collapsedRuns.add(runId);
+    } else {
+      collapsedRuns.delete(runId);
+    }
+    card.classList.toggle("collapsed", nowCollapsed);
+    body.classList.toggle("hidden", nowCollapsed);
+    const btn = e.currentTarget;
+    btn.setAttribute("aria-expanded", String(!nowCollapsed));
+    const label = nowCollapsed ? t("board.expand_event_label") : t("board.collapse_event_label");
+    btn.setAttribute("aria-label", label);
+    btn.setAttribute("title", label);
+  });
 
   if (writable) {
     card.querySelector('[data-action="delete-event"]').addEventListener("click", () => {

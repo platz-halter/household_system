@@ -477,6 +477,11 @@ class EventGroupIn(BaseModel):
     schedule_recurrence: Literal["daily", "weekly"] | None = None
     schedule_weekdays: list[int] | None = None
     schedule_hour: int = Field(default=18, ge=0, le=23)
+    # None = normal fairness balancing. Set = every root todo this group
+    # creates goes straight to this one person instead — see
+    # EventGroup.assigned_user_id's own docstring. Admin-only to set or
+    # change (enforced in main.py, same gate as Task.pinned_user_ids).
+    assigned_user_id: int | None = None
 
     @field_validator("schedule_weekdays")
     @classmethod
@@ -509,6 +514,11 @@ class EventGroupOut(BaseModel):
     schedule_recurrence: Literal["daily", "weekly"] | None
     schedule_weekdays: list[int] | None
     schedule_hour: int
+    assigned_user_id: int | None
+    # Denormalized for display — same convention as TodoOut.
+    # chain_parent_task_name — so the frontend doesn't need a second
+    # lookup against /users just to show who a group always goes to.
+    assigned_user_name: str | None = None
 
     model_config = {"from_attributes": True}
 
@@ -531,6 +541,10 @@ class EventGroupOut(BaseModel):
             schedule_recurrence=group.schedule_recurrence,
             schedule_weekdays=group.schedule_weekdays,
             schedule_hour=group.schedule_hour,
+            assigned_user_id=group.assigned_user_id,
+            assigned_user_name=group.assigned_user.display_name
+            if group.assigned_user
+            else None,
         )
 
 

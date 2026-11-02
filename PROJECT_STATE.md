@@ -685,6 +685,48 @@ below).
   Authentik itself didn't separately restrict who could reach this
   Application's login flow. See `shared/auth.py`'s entry for the
   implementation and live verification.
+- Not yet version-bumped — **uncommitted** (see the working agreement at
+  the top of CLAUDE.md: committing is the user's own step). A fourth
+  round of Board/Event Group follow-ups, done together in one session:
+  - `board.js` list-row titles now wrap up to two lines before
+    ellipsizing, instead of truncating hard on one line even when
+    there was plenty of vertical room to spare (row height here is
+    padding-driven, never fixed).
+  - `.event-card`s (the Board's "group by event" view) are now
+    individually collapsible via a chevron toggle — in-memory per
+    viewer session, not persisted.
+  - The Board's own todo feed now sorts newest-created-first
+    client-side, instead of inheriting the shared `GET /todos`
+    endpoint's due-date-first order — still right for Home's own
+    "what's due soon" list, which reads through that same endpoint.
+  - **Bug fix**: `board.js`'s `renderBoard()` computed
+    `canWrite()`/`isAdmin()` synchronously before the group-role
+    warm-up (`warmGroupRoleMap()`, deliberately unawaited at boot) had
+    resolved — a hard refresh landing directly on `/board` could
+    render a real Authentik admin/user as a viewer whenever a
+    household had customized its Authentik group names, hiding every
+    write action (claim/complete/cancel/reassign, both FABs) with
+    nothing ever re-rendering the page afterward to correct it. Same
+    gap already documented for Settings/the notification bell; fixed
+    the same way — `renderBoard()` now awaits `groupRoleMapReady()`
+    first.
+  - Added `EventGroup.assigned_user_id` (migration `673a349db745` —
+    **written this session but not yet applied to any database**, see
+    "what's next" below) — see CLAUDE.md's Event Groups entry for the
+    full design. An admin-only per-group setting that sends every root
+    todo a trigger creates straight to one fixed person instead of
+    through the fairness balancer, for a set of same-type chores (e.g.
+    "Take out trash": trash/recycling/compost) that should always go
+    to the same person together and don't fit the chain-task
+    mechanism.
+  - Board now quietly polls `GET /todos` every 30s and re-fetches/
+    re-renders if a todo on screen was deleted (or moved out of the
+    current status filter) or reassigned — see CLAUDE.md's "Board
+    change-polling" entry for the design. Home's "Assigned to you"
+    quick overview got the same treatment right after (`home.js`'s
+    own `startChangePolling`/`pollForAssignedChanges`), so a task/todo
+    reassigned away from you, or deleted, stops showing there too
+    without navigating away and back.
 
 `shared/src/shared/__init__.py`'s `__version__` is
 the single source of truth, surfaced in every service's `GET /health`
@@ -3647,3 +3689,12 @@ Status legend: ✅ done & tested · 🟡 partial/known gaps · ⬜ not started
    this Compose project's network).
 5. Auto generate fallback admin credentials on deployment to avoid
    unsafe passwords or forgetting to setup a fallback user.
+6. Migration `673a349db745` (`add_assigned_user_id_to_event_groups`) was
+   hand-written this session and never applied — no containers were
+   running at the time. Before relying on `EventGroup.assigned_user_id`
+   in production, run (from the repo root, with `DATABASE_URL` pointed
+   at the `household` database — see MIGRATIONS.md):
+   ```
+   uv run --package household-backend alembic -c household/backend/alembic.ini upgrade head
+   uv run --package household-backend alembic -c household/backend/alembic.ini check
+   ```

@@ -38,6 +38,15 @@ let debounceTimer = null;
 let incomingRequestsCache = [];
 let outgoingRequestsCache = [];
 
+// Same change-polling design as board.js's own (see its
+// startChangePolling's comment for the full reasoning) — applied here
+// to "Assigned to you" instead of the Board's full todo feed, so a
+// task/todo reassigned away from you (or deleted) stops showing on
+// your Home screen without you having to navigate away and back.
+const POLL_INTERVAL_MS = 30_000;
+let activeHomeView = null;
+let visibilityCatchupInstalled = false;
+
 function debounce(fn, delay) {
   return (...args) => {
     clearTimeout(debounceTimer);
@@ -87,6 +96,11 @@ export async function renderHome(container) {
     </div>
     <div id="bulk-bar-root"></div>
   `;
+  // Captured right here, immediately after the innerHTML assignment —
+  // see board.js's identical comment on startChangePolling for why
+  // capturing this later, after the awaits below, is unsafe (a
+  // navigation in between could leave this null).
+  const listEl = container.querySelector("#assigned-list");
 
   const selection = { mode: false, ids: new Set() };
   pageSelection = selection; // so a completion triggered from "Assigned to you" (which has no selection of its own) can still refresh the All-tasks list below it
@@ -115,6 +129,94 @@ export async function renderHome(container) {
   await loadTakeoverRequests(container);
   await refreshCompletionsToday();
   await refreshTaskList(container, selection, writable);
+
+  const view = { container, listEl };
+  activeHomeView = view;
+  ensureVisibilityCatchup();
+  startChangePolling(view);
+}
+
+// Mirrors board.js's own startChangePolling — stops itself (by
+// reference equality against activeHomeView, replaced wholesale by
+// every renderHome() call, AND listEl.isConnected, since router.js
+// detaches it by reassigning #app's innerHTML without ever calling
+// back here) rather than needing an explicit "navigated away" hook,
+// which doesn't exist.
+function startChangePolling(view) {
+  const interval = setInterval(() => {
+    if (activeHomeView !== view || !view.listEl.isConnected) {
+      clearInterval(interval);
+      return;
+    }
+    pollForAssignedChanges(view);
+  }, POLL_INTERVAL_MS);
+}
+
+// Installed once, ever — same reasoning as board.js's own version:
+// mobile Chrome throttles/suspends a backgrounded tab's setInterval, so
+// returning to Home after a while away shouldn't have to wait out
+// however much of the 30s interval actually got honored.
+function ensureVisibilityCatchup() {
+  if (visibilityCatchupInstalled) return;
+  visibilityCatchupInstalled = true;
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && activeHomeView?.listEl.isConnected) {
+      pollForAssignedChanges(activeHomeView);
+    }
+  });
+}
+
+// Unlike board.js's hasMajorChange (which compares assigned_to on an id
+// it already had), both queries here are already scoped to "assigned
+// to ME" — /assignments is filtered client-side to meCache.id, /todos
+// is fetched with assigned_to_id=meCache.id server-side — so there's no
+// single id whose assignee field to compare. Instead, a reassignment
+// shows up as a change to WHICH ids are even in the list: away from you
+// (an id that was here no longer is — same as an outright delete, or
+// someone else completing/cancelling it), or TO you (an id that wasn't
+// here now is). idsDiffer below has to catch both directions, not just
+// disappearance, or half of "Task reassignment" — being handed
+// something new while this page sits open — would be missed.
+async function pollForAssignedChanges(view) {
+  if (!meCache) return;
+  let freshAssignments, freshTodos;
+  try {
+    [freshAssignments, freshTodos] = await Promise.all([
+      api.get(`${HB}/assignments`, { silent: true }),
+      api.get(`${HB}/todos?status=open&assigned_to_id=${meCache.id}`, { silent: true }),
+    ]);
+  } catch {
+    return; // transient — next tick (or the next visibilitychange) tries again
+  }
+  // Re-checked after the await, same reasoning as board.js's own
+  // pollForChanges — navigation could have happened while it was in flight.
+  if (activeHomeView !== view || !view.listEl.isConnected) return;
+
+  const myOldAssignments = (assignmentsCache || []).filter((a) => a.household_user.id === meCache.id);
+  const myFreshAssignments = freshAssignments.filter((a) => a.household_user.id === meCache.id);
+  if (idsDiffer(myOldAssignments, myFreshAssignments) || idsDiffer(myTodosCache, freshTodos)) {
+    // Not just loadAssignments()+loadStats(): a reassign or a rebalance
+    // pull also cancels whatever pending takeover request it just made
+    // stale server-side (see CLAUDE.md's "Admin reassign vs. takeover
+    // requests") — afterTakeoverAction() is the one existing helper that
+    // already refreshes assignments/todos, takeover requests, stats,
+    // AND the notification bell together, so "Takeover requests" can't
+    // be left showing a request that would now 409 if accepted.
+    await afterTakeoverAction(view.container);
+  }
+}
+
+// True iff the two lists don't contain exactly the same set of ids —
+// covers an id disappearing (reassigned away/deleted/resolved
+// elsewhere) AND a new id appearing (reassigned to you) in one check.
+function idsDiffer(oldList, freshList) {
+  const oldIds = new Set(oldList.map((item) => item.id));
+  const freshIds = new Set(freshList.map((item) => item.id));
+  if (oldIds.size !== freshIds.size) return true;
+  for (const id of oldIds) {
+    if (!freshIds.has(id)) return true;
+  }
+  return false;
 }
 
 // How many times each task's already been completed today (by anyone) —

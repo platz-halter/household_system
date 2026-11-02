@@ -533,6 +533,7 @@ function eventGroupRow(group, container, writable) {
       <div class="list-row-meta">
         <span>${escapeHtml(t("common.task_count", { n: group.roots.length, count: group.roots.length }))}</span>
         ${schedule ? `<span class="badge badge-info">${escapeHtml(schedule)}</span>` : ""}
+        ${group.assigned_user_name ? `<span class="badge badge-info badge-truncate"><span>${escapeHtml(t("tasks.pinned_badge", { name: group.assigned_user_name }))}</span></span>` : ""}
       </div>
     </div>
     ${writable ? `<button type="button" class="btn btn-icon btn-primary" data-action="trigger" aria-label="${escapeAttr(t("tasks.create_label", { name: group.name }))}" title="${escapeAttr(t("tasks.create_title"))}">${icons.send}</button>` : ""}
@@ -750,6 +751,12 @@ async function openEventGroupModal(container, writable, group = null) {
   await ensureTasksCache();
   const timezone = timezoneCache;
   const weekdayLabels = WEEKDAY_LABELS();
+  // Same admin-only gate as a task's own "always assign to" pin (see
+  // pinnableUsers' own comment) — sending every root todo this group
+  // creates to one fixed person bypasses the fairness balancer
+  // entirely, same reasoning as Task.pinned_users.
+  const assigneeOptions = pinnableUsers(await loadUsers(true));
+  const canSetAssignee = isAdmin();
 
   // A saved root can go stale (deactivated, or chained under another
   // task) since the group was last saved — split those out as
@@ -820,6 +827,20 @@ async function openEventGroupModal(container, writable, group = null) {
         ${escapeHtml(t("tasks.eg_preview_desc"))}
       </p>
       <div id="eg-preview-list" class="stack"></div>
+
+      <div class="field" style="margin-top: var(--space-6);">
+        <label for="eg-assignee">${escapeHtml(t("tasks.eg_assignee_label"))}</label>
+        <select class="select" id="eg-assignee" ${canSetAssignee ? "" : "disabled"}>
+          <option value="">${escapeHtml(t("tasks.eg_assignee_balance_option"))}</option>
+          ${assigneeOptions
+            .map(
+              (u) =>
+                `<option value="${u.id}" ${group?.assigned_user_id === u.id ? "selected" : ""}>${escapeAttr(u.display_name)}</option>`
+            )
+            .join("")}
+        </select>
+        <p class="muted" style="font-size: var(--font-size-xs); margin-top: var(--space-2);">${escapeHtml(t("tasks.eg_assignee_desc"))}</p>
+      </div>
 
       <div class="toggle-row" style="margin-top: var(--space-6);">
         <span class="toggle-row-label" id="eg-schedule-label">${escapeHtml(t("tasks.eg_auto_trigger_label"))}</span>
@@ -1051,6 +1072,11 @@ async function openEventGroupModal(container, writable, group = null) {
     // exists (e.g. a chain link that's since been removed) — otherwise
     // it could silently reappear if that task gets chained again later.
     const excludedTaskIds = [...excludedIds].filter((id) => lastPreviewTaskIds.has(id));
+    // The select stays disabled (not absent) for a non-admin, so its
+    // .value still reports the group's existing assignee unchanged
+    // rather than silently clearing it just because this editor can't
+    // change it.
+    const assigneeRaw = body.querySelector("#eg-assignee").value;
     const payload = {
       name,
       root_task_ids: selectedRoots.map((r) => r.id),
@@ -1058,6 +1084,7 @@ async function openEventGroupModal(container, writable, group = null) {
       schedule_recurrence: scheduleRecurrence,
       schedule_weekdays: scheduleWeekdays,
       schedule_hour: Number(body.querySelector("#eg-schedule-hour").value),
+      assigned_user_id: assigneeRaw === "" ? null : Number(assigneeRaw),
     };
     try {
       if (group) {

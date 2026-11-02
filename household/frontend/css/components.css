@@ -790,12 +790,21 @@
   gap: 3px;
 }
 
+/* Up to 2 lines before truncating — a single forced line (the old
+   white-space: nowrap + ellipsis) cut long titles down hard even when
+   the row had plenty of vertical room to spare, since row height here
+   is never fixed (padding-driven, grows with content). line-clamp lets
+   a long title actually use that space instead of ellipsizing after
+   just a few characters. */
 .list-row-title {
   font-weight: 600;
   font-size: var(--font-size-sm);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
 }
 
 .list-row-meta {
@@ -872,11 +881,34 @@
   margin-bottom: var(--space-3);
 }
 
+/* Collapsed, the header IS the whole card — no body below it to put
+   space before. */
+.event-card.collapsed .event-card-header {
+  margin-bottom: 0;
+}
+
+/* Rotates to point down (expanded) vs. right (collapsed) — the standard
+   accordion convention — rather than swapping icons, so there's one
+   less i18n/aria pairing to keep in sync with the collapsed state. */
+.event-card-toggle {
+  flex-shrink: 0;
+}
+
+.event-card-toggle .icon {
+  transition: transform var(--transition-fast);
+}
+
+.event-card-toggle[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
 .event-card-title-group {
   display: flex;
   align-items: baseline;
   gap: var(--space-2);
   flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .event-card-title {

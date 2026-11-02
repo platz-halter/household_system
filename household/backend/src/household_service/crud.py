@@ -540,6 +540,7 @@ def _event_group_query():
     return select(EventGroup).options(
         selectinload(EventGroup.roots).selectinload(EventGroupTask.task),
         selectinload(EventGroup.exclusions),
+        selectinload(EventGroup.assigned_user),
     )
 
 
@@ -574,6 +575,13 @@ async def _validate_event_group_roots(db: AsyncSession, task_ids: list[int]) -> 
             )
 
 
+async def _validate_event_group_assignee(db: AsyncSession, user_id: int | None) -> None:
+    if user_id is None:
+        return
+    if await get_household_user(db, user_id) is None:
+        raise ValueError(f"Unknown household user id: {user_id}")
+
+
 async def create_event_group(db: AsyncSession, data: EventGroupIn) -> EventGroup:
     existing = await db.scalar(
         select(EventGroup.id).where(EventGroup.name == data.name)
@@ -581,12 +589,14 @@ async def create_event_group(db: AsyncSession, data: EventGroupIn) -> EventGroup
     if existing is not None:
         raise ValueError("An event group with this name already exists")
     await _validate_event_group_roots(db, data.root_task_ids)
+    await _validate_event_group_assignee(db, data.assigned_user_id)
 
     group = EventGroup(
         name=data.name,
         schedule_recurrence=data.schedule_recurrence,
         schedule_weekdays=data.schedule_weekdays,
         schedule_hour=data.schedule_hour,
+        assigned_user_id=data.assigned_user_id,
     )
     db.add(group)
     await db.flush()
@@ -607,11 +617,13 @@ async def update_event_group(
         if existing is not None:
             raise ValueError("An event group with this name already exists")
     await _validate_event_group_roots(db, data.root_task_ids)
+    await _validate_event_group_assignee(db, data.assigned_user_id)
 
     group.name = data.name
     group.schedule_recurrence = data.schedule_recurrence
     group.schedule_weekdays = data.schedule_weekdays
     group.schedule_hour = data.schedule_hour
+    group.assigned_user_id = data.assigned_user_id
     # Wholesale replace — same "PATCH just resends the whole set"
     # semantics as Task.category_ids — simpler than diffing, and this
     # app's scale (a handful of roots/exclusions per group) makes the
@@ -786,60 +798,75 @@ async def trigger_event_group(
     await db.flush()  # need ids for CandidateTodo below
 
     all_users = await list_household_users(db)
-    eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
-    if eligible:
-        settings = await get_settings_row(db)
-        fairness_as_of = (
-            datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
-        )
-        week_start, _week_end = _resolve_period(
-            ReportPeriod.week, fairness_as_of, settings.week_start_weekday
-        )
-        (
-            load_points,
-            load_count,
-            points_this_week,
-            _current,
-            _remaining,
-        ) = await _gather_balancer_load(db, eligible, fairness_as_of, week_start)
-        balancing_users = [
-            balancing.EligibleUser(
-                user_id=u.id,
-                points_this_week=points_this_week[u.id],
-                already_assigned_points=load_points[u.id],
-                already_assigned_count=load_count[u.id],
+    if group.assigned_user_id is not None:
+        # Standing "always this one person for the whole batch" policy —
+        # see EventGroup.assigned_user_id's own docstring. Bypasses
+        # balancing.balance() entirely: every root todo in THIS run goes
+        # straight to the same fixed person, never split across several
+        # people the way the fairness pass below would. Left unassigned
+        # (not handed to someone else) if that person isn't currently
+        # eligible — the same guarantee a pinned task's group gives when
+        # nobody in it is available.
+        assignee = next((u for u in all_users if u.id == group.assigned_user_id), None)
+        if assignee is not None and _is_eligible_for_tasks(assignee):
+            for todo in created:
+                todo.assigned_to_id = assignee.id
+    else:
+        eligible = [u for u in all_users if _is_eligible_for_tasks(u)]
+        if eligible:
+            settings = await get_settings_row(db)
+            fairness_as_of = (
+                datetime.now(UTC).astimezone(ZoneInfo(settings.timezone)).date()
             )
-            for u in eligible
-        ]
-        # Must exceed everyone's current count plus this whole batch —
-        # same reasoning as _assign_chain_todo_now's own cap: this call
-        # hands out a fixed number of items in one go, not a capped
-        # daily ration, so nobody should be skipped just for already
-        # holding something.
-        max_new_items_per_user = max(load_count.values(), default=0) + len(created)
-        # `created` and `root_tasks` were built in lockstep above (one
-        # todo per root, same order) — zip pairs each todo back to the
-        # root task it might be pinned through. A root's OWN pin group,
-        # if any — a chain CHILD's own pin (if it has one) is handled
-        # separately, right below, when that child itself spawns (see
-        # _spawn_one_chain_child/_assign_chain_todo_now).
-        result = balancing.balance(
-            users=balancing_users,
-            tasks=[],
-            todos=[
-                balancing.CandidateTodo(
-                    todo_id=todo.id,
-                    points=todo.points,
-                    pinned_user_ids=frozenset(u.id for u in task.pinned_users),
+            week_start, _week_end = _resolve_period(
+                ReportPeriod.week, fairness_as_of, settings.week_start_weekday
+            )
+            (
+                load_points,
+                load_count,
+                points_this_week,
+                _current,
+                _remaining,
+            ) = await _gather_balancer_load(db, eligible, fairness_as_of, week_start)
+            balancing_users = [
+                balancing.EligibleUser(
+                    user_id=u.id,
+                    points_this_week=points_this_week[u.id],
+                    already_assigned_points=load_points[u.id],
+                    already_assigned_count=load_count[u.id],
                 )
-                for todo, task in zip(created, root_tasks)
-            ],
-            max_new_items_per_user=max_new_items_per_user,
-        )
-        for todo in created:
-            picked = result.todo_assignments.get(todo.id)
-            if picked is not None:
-                todo.assigned_to_id = picked
+                for u in eligible
+            ]
+            # Must exceed everyone's current count plus this whole batch
+            # — same reasoning as _assign_chain_todo_now's own cap: this
+            # call hands out a fixed number of items in one go, not a
+            # capped daily ration, so nobody should be skipped just for
+            # already holding something.
+            max_new_items_per_user = max(load_count.values(), default=0) + len(created)
+            # `created` and `root_tasks` were built in lockstep above
+            # (one todo per root, same order) — zip pairs each todo back
+            # to the root task it might be pinned through. A root's OWN
+            # pin group, if any — a chain CHILD's own pin (if it has
+            # one) is handled separately, right below, when that child
+            # itself spawns (see _spawn_one_chain_child/
+            # _assign_chain_todo_now).
+            result = balancing.balance(
+                users=balancing_users,
+                tasks=[],
+                todos=[
+                    balancing.CandidateTodo(
+                        todo_id=todo.id,
+                        points=todo.points,
+                        pinned_user_ids=frozenset(u.id for u in task.pinned_users),
+                    )
+                    for todo, task in zip(created, root_tasks)
+                ],
+                max_new_items_per_user=max_new_items_per_user,
+            )
+            for todo in created:
+                picked = result.todo_assignments.get(todo.id)
+                if picked is not None:
+                    todo.assigned_to_id = picked
 
     # Each root's own chain children spawn now too, not just at its
     # eventual completion — same request as the New Todo / "From task"

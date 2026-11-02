@@ -118,6 +118,11 @@ export function openTriggerConfirmModal(group, { onTriggered } = {}) {
   });
   body.innerHTML = `
     <p class="muted" style="font-size: var(--font-size-sm); margin-top: 0;">${escapeHtml(t("eg.this_creates"))}</p>
+    ${
+      group.assigned_user_name
+        ? `<p class="muted" style="font-size: var(--font-size-sm); margin: -4px 0 var(--space-3);">${escapeHtml(t("eg.all_goes_to", { name: group.assigned_user_name }))}</p>`
+        : ""
+    }
     <div id="eg-trigger-preview" class="stack"><div class="skeleton" style="height: 40px;"></div></div>
     <div class="modal-footer">
       <button class="btn btn-primary grow" id="eg-trigger-confirm" disabled>${escapeHtml(t("eg.create_tasks_btn"))}</button>

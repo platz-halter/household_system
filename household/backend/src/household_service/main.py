@@ -524,8 +524,16 @@ async def list_event_groups(
 async def create_event_group(
     data: EventGroupIn,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
+    user: CurrentUser = Depends(can_write),
 ):
+    # Same admin-only gate as Task.pinned_user_ids — sending every root
+    # todo to one fixed person bypasses the fairness algorithm, a
+    # stronger gate than this route's otherwise ordinary can_write edit.
+    if data.assigned_user_id is not None and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can assign a whole event group to one person",
+        )
     try:
         group = await crud.create_event_group(db, data)
     except ValueError as exc:
@@ -554,12 +562,22 @@ async def patch_event_group(
     group_id: int,
     data: EventGroupIn,
     db: AsyncSession = Depends(get_db),
-    _user: CurrentUser = Depends(can_write),
+    user: CurrentUser = Depends(can_write),
 ):
     group = await crud.get_event_group(db, group_id)
     if group is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Event group not found"
+        )
+    # Same admin-only gate as create above — only when this actually
+    # changes who the group always goes to, same as patch_task's own
+    # pinned_user_ids check, so a non-admin's otherwise-ordinary edit of
+    # the rest of the group (still full-body PATCH, so every field is
+    # always resent) isn't blocked just for re-sending the same value.
+    if data.assigned_user_id != group.assigned_user_id and user.role != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only an admin can assign a whole event group to one person",
         )
     try:
         group = await crud.update_event_group(db, group, data)

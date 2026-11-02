@@ -229,6 +229,8 @@ export const en = {
   "board.new_todo_label": "New todo",
   "board.nothing_here": "Nothing here",
   "board.delete_event_label": "Delete this event",
+  "board.collapse_event_label": "Collapse this event",
+  "board.expand_event_label": "Expand this event",
   "board.event_fallback_name": "Event",
   "board.nothing_to_delete": "Nothing to delete — everything in this event is already completed",
   "board.kept_note": {
@@ -321,6 +323,10 @@ export const en = {
   "tasks.eg_preview_label": "Preview",
   "tasks.eg_preview_desc":
     "Everything below is created when this group is triggered: each task above, right away, plus any task already chained from it. Uncheck a chained task to leave it out of this group — it still gets created, just without this group's tag.",
+  "tasks.eg_assignee_label": "Assign all tasks to",
+  "tasks.eg_assignee_balance_option": "Balance fairly",
+  "tasks.eg_assignee_desc":
+    "When set, every task this group creates goes straight to this one person every time, instead of being split up fairly — for a set of same-type chores (e.g. \"Take out trash\": trash, recycling, compost) that should always land on the same person together. Admin only.",
   "tasks.eg_auto_trigger_label": "Also trigger this automatically",
   "tasks.eg_repeats_label": "Repeats",
   "tasks.eg_specific_weekdays": "Specific weekdays",
@@ -399,6 +405,7 @@ export const en = {
   "eg.create_on_tasks_page": "Create one on the Tasks page",
   "eg.trigger_title": 'Trigger "{name}"',
   "eg.this_creates": "This creates:",
+  "eg.all_goes_to": "All of it goes to {name}.",
   "eg.create_tasks_btn": "Create tasks",
   "eg.nothing_to_create": "Nothing to create",
   "eg.not_grouped": "Not grouped",

@@ -413,7 +413,27 @@ class EventGroup(Base):
     same convention as `Task.weekdays`). `schedule_hour` is UTC, same
     convention as `HouseholdSettings.nudge_hour` — see
     household_service.scheduler/crud.run_scheduled_event_groups_if_due
-    for the actual due-check."""
+    for the actual due-check.
+
+    `assigned_user_id` (None = normal fairness balancing) sends EVERY
+    root todo this group creates straight to one fixed person, bypassing
+    `balancing.balance()` entirely for this run — for a set of same-type
+    one-off chores that should always land on the same person together
+    (e.g. "Take out trash": trash/recycling/compost as three independent
+    roots, one person, every time) and that don't fit the chain-task
+    mechanism (parent/child, one level deep, meant for a sequence of
+    different steps, not several interchangeable instances of the same
+    kind of chore). Unlike `Task.pinned_users`, this is a single fixed
+    person, not a pool the balancer picks the least-loaded member from —
+    the point here is "always this one person for the whole batch," not
+    "whichever of these is fairest today." If that person is on break
+    (or no longer eligible) when the group triggers, the run's todos are
+    left unassigned rather than falling back to the balancer — the same
+    "never hand it to someone outside the standing agreement" guarantee
+    pinned tasks already give. Admin-only to set or change, same
+    reasoning as `Task.pinned_users`: this bypasses the fairness
+    algorithm, a stronger gate than an EventGroup's otherwise ordinary
+    can_write edit."""
 
     __tablename__ = "event_groups"
 
@@ -424,6 +444,9 @@ class EventGroup(Base):
         ARRAY(Integer), nullable=True
     )
     schedule_hour: Mapped[int] = mapped_column(Integer, default=18, server_default="18")
+    assigned_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("household_users.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -436,6 +459,7 @@ class EventGroup(Base):
     exclusions: Mapped[list["EventGroupExclusion"]] = relationship(
         back_populates="event_group", cascade="all, delete-orphan"
     )
+    assigned_user: Mapped[HouseholdUser | None] = relationship()
 
 
 class EventGroupTask(Base):
