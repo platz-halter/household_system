@@ -38,9 +38,24 @@ Role = Literal["admin", "user", "viewer"]
 
 @dataclass
 class CurrentUser:
-    subject: str  # stable user id / username
+    subject: str  # stable user id / username — NEVER the display name
     role: Role
     source: Literal["authentik", "local"]
+    # Authentik's own "name" claim (the user's display name, as set on
+    # their Authentik profile — present once the "profile" scope is
+    # granted, which AUTHENTIK_SCOPE already requests by default), when
+    # the token actually carries one. None for a local account (no
+    # separate display-name concept there — see auth_service.models.
+    # LocalUser, username only) and for an Authentik token with no
+    # name claim or a blank one. A caller that wants to seed a new
+    # HouseholdUser's display name falls back to `subject` itself when
+    # this is None — see household_service.crud.
+    # get_or_create_household_user. Deliberately kept separate from
+    # `subject`, which stays the STABLE identity key a HouseholdUser row
+    # is looked up by — conflating the two would mean renaming someone's
+    # Authentik display name silently created a second, duplicate row
+    # instead of just updating a label.
+    display_name: str | None = None
 
 
 def _env_fallback_config() -> dict[str, str]:
@@ -203,10 +218,12 @@ async def _verify_authentik_token(token: str) -> CurrentUser:
             detail="Not a member of any group recognized by this application",
         )
 
+    name = claims.get("name")
     return CurrentUser(
         subject=claims.get("preferred_username", claims["sub"]),
         role=role,
         source="authentik",
+        display_name=name.strip() if isinstance(name, str) and name.strip() else None,
     )
 
 

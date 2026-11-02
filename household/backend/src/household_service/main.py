@@ -114,10 +114,36 @@ async def _self(db: AsyncSession, user: CurrentUser):
     `role` is never read for authorization (that's always the live token,
     same as everywhere else in this app) — it only exists so a
     background job (an auto-generated report) can know who's an admin to
-    push-notify without a live request/token to check against."""
-    household_user = await crud.get_or_create_household_user(db, user.subject)
+    push-notify without a live request/token to check against.
+
+    Also keeps `display_name` CONTINUOUSLY synced to Authentik's own
+    `name` claim for an Authentik user, on every request where it
+    differs from what's currently stored — not just seeded once at
+    `get_or_create_household_user`'s row creation. Deliberate choice
+    (asked directly, since there's a real tradeoff): there is currently
+    no UI anywhere in either frontend for a human to set a genuinely
+    custom `display_name` (the one route that accepts it, `PATCH /me`,
+    exists but the frontend never calls it with one — see
+    `HouseholdUserUpdate`), so continuously syncing has no manual
+    customization to clobber today. **If a manual-rename UI is ever
+    added**, this will need a companion "was this customized by a
+    human" flag (and its own migration) first — otherwise a sync on the
+    very next request after someone renames themselves in-app would
+    silently overwrite it back to whatever Authentik still says. Never
+    runs for a local account (`user.display_name` is always `None` for
+    one — no separate display-name concept there, see
+    `auth_service.models.LocalUser`)."""
+    household_user = await crud.get_or_create_household_user(
+        db, user.subject, display_name=user.display_name
+    )
+    changed = False
     if household_user.role != user.role:
         household_user.role = user.role
+        changed = True
+    if user.display_name and household_user.display_name != user.display_name[:200]:
+        household_user.display_name = user.display_name[:200]  # column limit
+        changed = True
+    if changed:
         await db.commit()
         await db.refresh(household_user)
     return household_user

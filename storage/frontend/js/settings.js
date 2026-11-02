@@ -24,7 +24,11 @@ const SOURCE_LABEL_KEYS = { local: "settings.source_local", authentik: "settings
 export function renderSettings(container) {
   const user = getCurrentUserInfo() || {};
   const currentTheme = getStoredTheme();
-  const initial = (user.subject || "?").slice(0, 1).toUpperCase();
+  // displayName is Authentik's own display name when the token has one
+  // (falling back to the username otherwise, same as subject) — see
+  // auth.js's getCurrentUserInfo for why there's no backend profile to
+  // read it from here the way household's Settings page can.
+  const initial = (user.displayName || "?").slice(0, 1).toUpperCase();
   const roleLabel = user.role && ROLE_LABEL_KEYS[user.role] ? t(ROLE_LABEL_KEYS[user.role]) : t("settings.unknown_role");
   const sourceLabel = user.source && SOURCE_LABEL_KEYS[user.source] ? t(SOURCE_LABEL_KEYS[user.source]) : "";
 
@@ -35,7 +39,7 @@ export function renderSettings(container) {
         <div class="user-info-card">
           <div class="user-avatar">${escapeHtml(initial)}</div>
           <div>
-            <div style="font-weight:600;">${escapeHtml(user.subject || t("settings.unknown_user"))}</div>
+            <div style="font-weight:600;">${escapeHtml(user.displayName || t("settings.unknown_user"))}</div>
             <div class="muted" style="font-size: var(--font-size-sm);">
               ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)}
             </div>

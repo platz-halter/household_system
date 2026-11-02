@@ -55,7 +55,25 @@ from household_service.schemas import (
 # ---- Household users -------------------------------------------------
 
 
-async def get_or_create_household_user(db: AsyncSession, subject: str) -> HouseholdUser:
+async def get_or_create_household_user(
+    db: AsyncSession, subject: str, display_name: str | None = None
+) -> HouseholdUser:
+    """`display_name` is Authentik's own "name" claim (see
+    shared.auth.CurrentUser.display_name) when the caller has one —
+    None for a local account, or an Authentik token with no name claim.
+    Here, it only seeds a BRAND NEW row's initial display name,
+    preferred over the bare `subject` (a username) when present, same
+    "admin-configured default at the moment this person is first seen"
+    treatment `preferred_language` below gets. An EXISTING row is
+    returned untouched by this function — see `main._self`, the one
+    caller, for what it does on top of this for someone who already
+    has a row: UNLIKE `preferred_language`'s own "never retroactive"
+    guarantee, this isn't just a one-time backfill — `display_name`
+    stays continuously synced to Authentik's current name on every
+    request, since (unlike a language) nobody has ever actually chosen
+    the auto-seeded username as their display name in the first
+    place, and there's no UI yet for anyone to choose something else
+    instead."""
     result = await db.execute(
         select(HouseholdUser).where(HouseholdUser.subject == subject)
     )
@@ -68,7 +86,11 @@ async def get_or_create_household_user(db: AsyncSession, subject: str) -> Househ
     settings = await get_settings_row(db)
     user = HouseholdUser(
         subject=subject,
-        display_name=subject,
+        # Truncated to the column's own limit — an Authentik "name" is
+        # free text someone else's Authentik instance controls, with no
+        # length limit of its own, and an overlong value would
+        # otherwise fail this very commit.
+        display_name=(display_name or subject)[:200],
         preferred_language=settings.default_language,
     )
     db.add(user)

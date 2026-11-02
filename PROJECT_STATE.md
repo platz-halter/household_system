@@ -685,9 +685,10 @@ below).
   Authentik itself didn't separately restrict who could reach this
   Application's login flow. See `shared/auth.py`'s entry for the
   implementation and live verification.
-- Not yet version-bumped — **uncommitted** (see the working agreement at
-  the top of CLAUDE.md: committing is the user's own step). A fourth
-  round of Board/Event Group follow-ups, done together in one session:
+- Not yet version-bumped (committed as `20d28d1`, "Bugfixes and added
+  auto refreshing and event group assign all to one person" — the
+  user's own commit, not this session's). A fourth round of Board/Event
+  Group follow-ups, done together in one session:
   - `board.js` list-row titles now wrap up to two lines before
     ellipsizing, instead of truncating hard on one line even when
     there was plenty of vertical room to spare (row height here is
@@ -727,6 +728,36 @@ below).
     own `startChangePolling`/`pollForAssignedChanges`), so a task/todo
     reassigned away from you, or deleted, stops showing there too
     without navigating away and back.
+
+- A fifth round, **uncommitted** (see the working agreement at the top
+  of CLAUDE.md: committing is the user's own step): a `HouseholdUser`
+  row's `display_name` now prefers Authentik's own `name` claim (a new
+  `CurrentUser.display_name` field in `shared/auth.py`) over the bare
+  username (`subject`) whenever the token actually carries one, both
+  for a brand-new row AND, via `main._self`, kept **continuously
+  synced** for an EXISTING one too — on every request where it differs
+  from Authentik's current name, not just a one-time backfill (asked
+  directly: there is currently **no UI anywhere** for a human to set a
+  genuinely custom `display_name` — the one route that would, `PATCH
+  /me`, is never called with one by the frontend — so there's nothing
+  for continuous sync to clobber today, and a later Authentik rename
+  now correctly comes through too). **If a manual-rename UI is ever
+  added**, this needs a "was this customized by a human" flag first,
+  or it would silently overwrite a self-chosen name on the next
+  request — see CLAUDE.md's "Display name from Authentik" entry.
+  Frontend: household's `settings.js` account card now shows this
+  (upgraded from the JWT-only username placeholder once its own
+  already-in-flight `GET /me` resolves — no new fetch); storage's
+  `auth.js`/`settings.js` gained their own `displayName` (storage has
+  no backend user row to read one from at all, so it's read straight
+  off the token's `name` claim there instead). **Not independently
+  verified in a browser** — only `node --check`/`py_compile` and the
+  backend pytest suite were run; the whole backend side also assumes
+  Authentik's access token actually carries a `name` claim once the
+  `profile` scope is granted, which is very likely true (the token
+  already carries `preferred_username`/`groups` from that same scope
+  mapping) but wasn't confirmed against a real decoded token the way
+  the 1.0.3 incident was.
 
 `shared/src/shared/__init__.py`'s `__version__` is
 the single source of truth, surfaced in every service's `GET /health`

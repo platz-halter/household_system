@@ -84,7 +84,16 @@ class HouseholdUser(Base):
     """Local profile for an authenticated subject (local-account username,
     or an Authentik preferred_username). This service doesn't own accounts
     — auth does — so there's no signup here; a row is created the first
-    time a subject is seen (see crud.get_or_create_household_user)."""
+    time a subject is seen (see crud.get_or_create_household_user),
+    seeding `display_name` from Authentik's own "name" claim when the
+    token carries one, falling back to the bare `subject` (a username)
+    otherwise. `main._self` also keeps an EXISTING row's `display_name`
+    CONTINUOUSLY synced to Authentik's current name this same way, on
+    every request where it differs — not a one-time backfill — since
+    there is no UI anywhere yet for a human to set a custom value
+    directly (only an unused `PATCH /me` API field); see `_self`'s own
+    docstring for what adding a manual-rename UI later would need
+    first."""
 
     __tablename__ = "household_users"
 

@@ -63,7 +63,7 @@ export async function renderSettings(container) {
         <div class="user-info-card">
           <div class="user-avatar" id="account-avatar">${escapeHtml(initial)}</div>
           <div>
-            <div style="font-weight:600;">${escapeHtml(user.subject || t("settings.unknown_user"))}</div>
+            <div style="font-weight:600;" id="account-name">${escapeHtml(user.subject || t("settings.unknown_user"))}</div>
             <div class="muted" style="font-size: var(--font-size-sm);">
               ${escapeHtml(roleLabel)} · ${escapeHtml(sourceLabel)}
             </div>
@@ -206,6 +206,15 @@ function renderLanguageSection(container, writable) {
   });
 }
 
+// Also upgrades the account card's name line from its initial
+// placeholder (`user.subject` — the bare username out of the JWT,
+// rendered synchronously before this async call ever lands) to the
+// real `HouseholdUser.display_name` once `/me` resolves — for an
+// Authentik user this is usually their actual Authentik display name
+// now (crud.get_or_create_household_user/main._self), not just their
+// username, the same value every OTHER display of this person already
+// uses (avatars, "Completed by X", etc.) via the backend profile
+// rather than a second, JWT-only name shown just on this one page.
 async function loadAvatar(container, writable) {
   const avatarEl = container.querySelector("#account-avatar");
   if (!avatarEl) return;
@@ -214,8 +223,18 @@ async function loadAvatar(container, writable) {
   try {
     me = await api.get(`${HB}/me`);
   } catch {
-    return; // leave the initials fallback in place
+    return; // leave the username placeholder/initials fallback in place
   }
+  const nameEl = container.querySelector("#account-name");
+  if (nameEl) nameEl.textContent = me.display_name;
+  // Same upgrade for the initial-letter fallback — without this, anyone
+  // with no profile photo kept seeing an initial derived from their
+  // USERNAME sitting right next to a name line that had just switched
+  // to their real display name, which could easily be a different
+  // letter (e.g. "jsmith" -> "J" next to "John Smith"'s own name, once
+  // adopted). Harmless to set even when a photo is about to replace it
+  // a moment later via applyPhoto() below.
+  avatarEl.textContent = (me.display_name || "?").slice(0, 1).toUpperCase();
   const photoUrl = `${HB}/users/${me.id}/photo`;
 
   const applyPhoto = async () => {
@@ -249,7 +268,7 @@ async function loadAvatar(container, writable) {
     try {
       me = await api.del(`${HB}/me/photo`);
       invalidateImageUrl(photoUrl);
-      avatarEl.innerHTML = escapeHtml((getCurrentUserInfo()?.subject || "?").slice(0, 1).toUpperCase());
+      avatarEl.innerHTML = escapeHtml((me.display_name || "?").slice(0, 1).toUpperCase());
       showToast(t("settings.photo_removed"), "success");
     } catch {
       /* api.js already showed a toast */

@@ -120,18 +120,37 @@ export function decodeToken() {
   }
 }
 
+// Authentik's own "name" claim (the display name set on that user's
+// Authentik profile — present once the "profile" scope is granted,
+// which this app's AUTHENTIK_SCOPE already requests by default), when
+// the token actually carries a non-blank one. Storage has no backend
+// user table of its own at all (see "Storage has no admin/user
+// distinction at all" in CLAUDE.md) — unlike household, which has a
+// HouseholdUser row to seed a display_name onto, the token is the ONLY
+// source of a name here, so this is read straight from it rather than
+// from any stored profile.
+function authentikDisplayName(payload) {
+  return typeof payload.name === "string" && payload.name.trim() ? payload.name.trim() : null;
+}
+
 /**
- * Resolves {subject, role, source} regardless of which token shape is
- * active — a local token carries `role` directly, an Authentik token
- * carries `groups` and needs mapping. Use this (not decodeToken()
- * directly) anywhere the UI needs the current user's role.
+ * Resolves {subject, displayName, role, source} regardless of which
+ * token shape is active — a local token carries `role` directly, an
+ * Authentik token carries `groups` and needs mapping. Use this (not
+ * decodeToken() directly) anywhere the UI needs the current user's
+ * role. `subject` stays the stable username-ish identifier (never
+ * shown as a human name — use `displayName` for that); `displayName`
+ * falls back to `subject` whenever there's no better name to show (a
+ * local account, which has no separate display-name concept at all —
+ * see auth_service.models.LocalUser — or an Authentik token with no
+ * `name` claim).
  */
 export function getCurrentUserInfo() {
   const payload = decodeToken();
   if (!payload) return null;
 
   if (payload.role) {
-    return { subject: payload.sub, role: payload.role, source: "local" };
+    return { subject: payload.sub, displayName: payload.sub, role: payload.role, source: "local" };
   }
   if (payload.groups) {
     // Fixed admin > user > viewer precedence, matching
@@ -141,9 +160,11 @@ export function getCurrentUserInfo() {
     if (payload.groups.includes(groupRoleConfig.admin_group)) role = "admin";
     else if (payload.groups.includes(groupRoleConfig.user_group)) role = "user";
     else if (payload.groups.includes(groupRoleConfig.viewer_group)) role = "viewer";
-    return { subject: payload.preferred_username || payload.sub, role, source: "authentik" };
+    const subject = payload.preferred_username || payload.sub;
+    return { subject, displayName: authentikDisplayName(payload) || subject, role, source: "authentik" };
   }
-  return { subject: payload.sub || "unknown", role: "viewer", source: getAuthSource() || "unknown" };
+  const subject = payload.sub || "unknown";
+  return { subject, displayName: subject, role: "viewer", source: getAuthSource() || "unknown" };
 }
 
 // --- Local account login -------------------------------------------
